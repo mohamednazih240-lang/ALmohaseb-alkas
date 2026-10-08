@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Cairo', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: #ffffff;
+    color: #0f172a;
+  }
+}
+
+@media print {
+  @page {
+    margin: 5mm;
+    size: auto;
+  }
+  body {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    font-size: 11pt !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  tr, .print-card {
+    page-break-inside: avoid !important;
+  }
+  /* Thermal receipt specific print mode */
+  body.printing-thermal {
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  body.printing-thermal @page {
+    size: 80mm auto !important;
+    margin: 2mm !important;
+  }
+}

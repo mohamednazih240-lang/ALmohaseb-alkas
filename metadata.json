@@ -1,0 +1,6 @@
+{
+  "name": "حساباتي المحاسبي المتكامل - Hesabaty ERP",
+  "description": "برنامج محاسبي متكامل واحترافي لإدارة المبيعات والمشتريات والمخزون والعملاء والموردين والخزينة والقيود اليومية والتقارير المالية بنظام القيد المزدوج الدقيق.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
