@@ -24,8 +24,19 @@ import {
   GoodsReceivedNote,
   AuditLog,
   AppSettings,
-  PaymentMethod
+  PaymentMethod,
+  User
 } from '../types/accounting';
+import {
+  getTenantStorageKey,
+  getTenantIdbKey,
+  getActiveTenantId,
+  setActiveTenantId,
+  getCompanyTenant,
+  getCompaniesList,
+  registerCompany,
+  CompanyTenant
+} from './tenantService';
 
 const STORAGE_KEY = 'hesabaty_pro_db_v6';
 const IDB_NAME = 'hesabaty_accounting_db';
@@ -52,12 +63,13 @@ function openIndexedDB(): Promise<IDBDatabase> {
 /**
  * Saves entire accounting database into IndexedDB (supports millions of records and gigabytes of storage)
  */
-export async function saveToIndexedDB(db: AccountingDB): Promise<void> {
+export async function saveToIndexedDB(db: AccountingDB, customKey?: string): Promise<void> {
   try {
     const idb = await openIndexedDB();
     const tx = idb.transaction(IDB_STORE, 'readwrite');
     const store = tx.objectStore(IDB_STORE);
-    store.put(db, IDB_KEY);
+    const key = customKey || (getActiveTenantId() ? getTenantIdbKey(getActiveTenantId()!) : IDB_KEY);
+    store.put(db, key);
   } catch (e) {
     console.warn('IndexedDB write notice:', e);
   }
@@ -66,13 +78,14 @@ export async function saveToIndexedDB(db: AccountingDB): Promise<void> {
 /**
  * Asynchronously loads accounting database from IndexedDB
  */
-export async function loadFromIndexedDB(): Promise<AccountingDB | null> {
+export async function loadFromIndexedDB(customKey?: string): Promise<AccountingDB | null> {
   try {
     const idb = await openIndexedDB();
     return new Promise((resolve) => {
       const tx = idb.transaction(IDB_STORE, 'readonly');
       const store = tx.objectStore(IDB_STORE);
-      const req = store.get(IDB_KEY);
+      const key = customKey || (getActiveTenantId() ? getTenantIdbKey(getActiveTenantId()!) : IDB_KEY);
+      const req = store.get(key);
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => resolve(null);
     });
@@ -145,14 +158,14 @@ export function defaultAccounts(): Account[] {
   ];
 }
 
-export function defaultCurrencies(): Currency[] {
+export function defaultCurrencies(baseCurrencySymbol: string = 'ج.م'): Currency[] {
   return [
-    { id: 'curr_egp', code: 'EGP', name: 'الجنيه المصري', symbol: 'ج.م', rate: 1, isBase: true, lastUpdated: getTodayDate() },
-    { id: 'curr_usd', code: 'USD', name: 'الدولار الأمريكي', symbol: '$', rate: 48.5, isBase: false, lastUpdated: getTodayDate() },
-    { id: 'curr_sar', code: 'SAR', name: 'الريال السعودي', symbol: 'ر.س', rate: 12.9, isBase: false, lastUpdated: getTodayDate() },
-    { id: 'curr_eur', code: 'EUR', name: 'اليورو الأوروبي', symbol: '€', rate: 52.8, isBase: false, lastUpdated: getTodayDate() },
-    { id: 'curr_aed', code: 'AED', name: 'الدرهم الإماراتي', symbol: 'د.إ', rate: 13.2, isBase: false, lastUpdated: getTodayDate() },
-    { id: 'curr_kwd', code: 'KWD', name: 'الدينار الكويتي', symbol: 'د.ك', rate: 158.0, isBase: false, lastUpdated: getTodayDate() }
+    { id: 'curr_egp', code: 'EGP', name: 'الجنيه المصري', symbol: 'ج.م', rate: 1, isBase: baseCurrencySymbol === 'ج.م', lastUpdated: getTodayDate() },
+    { id: 'curr_usd', code: 'USD', name: 'الدولار الأمريكي', symbol: '$', rate: 48.5, isBase: baseCurrencySymbol === '$', lastUpdated: getTodayDate() },
+    { id: 'curr_sar', code: 'SAR', name: 'الريال السعودي', symbol: 'ر.س', rate: 12.9, isBase: baseCurrencySymbol === 'ر.س', lastUpdated: getTodayDate() },
+    { id: 'curr_eur', code: 'EUR', name: 'اليورو الأوروبي', symbol: '€', rate: 52.8, isBase: baseCurrencySymbol === '€', lastUpdated: getTodayDate() },
+    { id: 'curr_aed', code: 'AED', name: 'الدرهم الإماراتي', symbol: 'د.إ', rate: 13.2, isBase: baseCurrencySymbol === 'د.إ', lastUpdated: getTodayDate() },
+    { id: 'curr_kwd', code: 'KWD', name: 'الدينار الكويتي', symbol: 'د.ك', rate: 158.0, isBase: baseCurrencySymbol === 'د.ك', lastUpdated: getTodayDate() }
   ];
 }
 
@@ -229,8 +242,20 @@ export function cleanAllDemoTransactions(db: AccountingDB): AccountingDB {
   };
 }
 
-export function createSeedData(): AccountingDB {
+export function createSeedData(
+  companyName?: string,
+  currency: string = 'ج.م',
+  adminUser?: { name: string; username: string }
+): AccountingDB {
   const settings = defaultSettings();
+  if (companyName) {
+    settings.company = companyName;
+    settings.invoiceTitle = companyName;
+  }
+  if (currency) {
+    settings.currency = currency;
+  }
+
   const accounts = defaultAccounts();
   const whId = 'wh_main';
   const warehouses: Warehouse[] = [
@@ -242,18 +267,21 @@ export function createSeedData(): AccountingDB {
   const customers: Party[] = [];
   const suppliers: Party[] = [];
 
+  const adminName = adminUser?.name || 'مدير المنشأة';
+  const adminUsername = adminUser?.username || 'admin';
+
   const audit: AuditLog[] = [
     {
       id: 'au_init',
       at: new Date().toISOString(),
-      user: 'مدير النظام',
-      action: 'تهيئة النظام النظيف',
-      detail: 'تم تهيئة النظام النظيف وتثبيت دليل الحسابات القياسي للعمل الفعلي مباشرة'
+      user: adminName,
+      action: 'تهيئة مساحة العمل المستقلة',
+      detail: `تم تأسيس قاعدة بيانات نظيفة ومعزولة بالكامل لمنشأة "${settings.company}" وتثبيت دليل الحسابات القياسي للعمل الفعلي مباشرة`
     }
   ];
 
-  const users = [
-    { id: 'usr_main', name: 'مدير النظام', username: 'admin', role: 'مدير' as const, active: true }
+  const users: User[] = [
+    { id: `usr_${Date.now().toString(36)}`, name: adminName, username: adminUsername, role: 'مدير' as const, active: true }
   ];
 
   return {
@@ -282,7 +310,7 @@ export function createSeedData(): AccountingDB {
       { id: 'per_current', name: 'السنة المالية الحالية', from: `${new Date().getFullYear()}-01-01`, to: `${new Date().getFullYear()}-12-31`, status: 'مفتوح' }
     ],
     costCenters: [],
-    currencies: defaultCurrencies(),
+    currencies: defaultCurrencies(currency),
     fixedAssets: [],
     bankReconciliations: [],
     goodsReceivedNotes: [],
@@ -290,67 +318,54 @@ export function createSeedData(): AccountingDB {
   };
 }
 
-export function loadDatabase(): AccountingDB {
+/**
+ * Loads accounting database for a specific tenant / company (100% data isolation)
+ */
+export function loadTenantDatabase(tenantId: string): AccountingDB {
+  const tenant = getCompanyTenant(tenantId);
+  const storageKey = getTenantStorageKey(tenantId);
+
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (!raw) {
-      // Check if previous v5, v4 or older exists, migrate settings and users but wipe all demo data
-      const oldRaw = localStorage.getItem('hesabaty_pro_db_v5') || 
-                     localStorage.getItem('hesabaty_pro_db_v4') || 
-                     localStorage.getItem('hesabaty_pro_db_v3');
-      if (oldRaw) {
-        try {
-          const oldDb = JSON.parse(oldRaw);
-          if (oldDb && Array.isArray(oldDb.accounts)) {
-            const cleaned = cleanAllDemoTransactions(oldDb);
-            saveDatabase(cleaned);
-            try {
-              localStorage.removeItem('hesabaty_pro_db_v5');
-              localStorage.removeItem('hesabaty_pro_db_v4');
-              localStorage.removeItem('hesabaty_pro_db_v3');
-            } catch (e) {}
-            return cleaned;
-          }
-        } catch (e) {
-          // ignore
+      // Check if this tenant is the default company and we have legacy data to migrate
+      if (tenantId === 'comp_primary' || tenantId.startsWith('comp_migrated')) {
+        const legacyRaw = localStorage.getItem(STORAGE_KEY);
+        if (legacyRaw) {
+          try {
+            const legacyDb = JSON.parse(legacyRaw);
+            if (legacyDb && Array.isArray(legacyDb.accounts)) {
+              saveTenantDatabase(tenantId, legacyDb);
+              return legacyDb;
+            }
+          } catch (e) {}
         }
       }
 
-      const initial = createSeedData();
-      saveDatabase(initial);
+      // Initialize fresh, isolated seed data for this specific company
+      const initial = createSeedData(
+        tenant?.name || 'المنشأة الجديدة',
+        tenant?.currency || 'ج.م',
+        tenant ? { name: tenant.adminName, username: tenant.adminUsername } : undefined
+      );
+      saveTenantDatabase(tenantId, initial);
       return initial;
     }
 
     const parsed = JSON.parse(raw);
     if (!parsed || parsed.version < 6 || !Array.isArray(parsed.products) || !Array.isArray(parsed.accounts)) {
-      const initial = createSeedData();
-      saveDatabase(initial);
+      const initial = createSeedData(
+        tenant?.name,
+        tenant?.currency,
+        tenant ? { name: tenant.adminName, username: tenant.adminUsername } : undefined
+      );
+      saveTenantDatabase(tenantId, initial);
       return initial;
     }
 
-    // Safety check: if parsed database contains any previous demo products, parties, or mock demo accounts, clean them
-    const hasDemoData = parsed.invoices?.some((i: any) => i.id === 'inv_1001' || i.id === 'inv_2001' || i.number === 'INV-001001') ||
-      parsed.stockMovements?.some((sm: any) => sm.id === 'sm_1') ||
-      parsed.products?.some((p: any) => p.id === 'prod_1' || p.code === 'PRD-101') ||
-      parsed.customers?.some((c: any) => c.id === 'cust_1') ||
-      parsed.suppliers?.some((s: any) => s.id === 'supp_1') ||
-      parsed.treasury?.some((tr: any) => tr.id === 'tr_1') ||
-      parsed.users?.some((u: any) => u.id === 'usr_acc' || u.id === 'usr_cashier' || u.name === 'أحمد محمود' || u.name === 'سارة خالد' || u.name === 'محمد علي');
-
-    if (hasDemoData) {
-      const cleaned = cleanAllDemoTransactions(parsed);
-      // Ensure users list is also cleaned of demo accounts
-      cleaned.users = [
-        { id: 'usr_main', name: 'مدير النظام', username: 'admin', role: 'مدير' as const, active: true }
-      ];
-      cleaned.currentUser = cleaned.users[0];
-      saveDatabase(cleaned);
-      return cleaned;
-    }
-
-    // Guarantee modern arrays are never undefined in runtime
+    // Ensure modern arrays and structure
     if (!parsed.costCenters) parsed.costCenters = [];
-    if (!parsed.currencies || parsed.currencies.length === 0) parsed.currencies = defaultCurrencies();
+    if (!parsed.currencies || parsed.currencies.length === 0) parsed.currencies = defaultCurrencies(parsed.settings?.currency || 'ج.م');
     if (!parsed.fixedAssets) parsed.fixedAssets = [];
     if (!parsed.bankReconciliations) parsed.bankReconciliations = [];
     if (!parsed.goodsReceivedNotes) parsed.goodsReceivedNotes = [];
@@ -366,21 +381,88 @@ export function loadDatabase(): AccountingDB {
 
     return parsed;
   } catch (err) {
-    console.error('Failed to parse database from localStorage:', err);
-    const initial = createSeedData();
-    saveDatabase(initial);
+    console.error(`Failed to load tenant database for ${tenantId}:`, err);
+    const initial = createSeedData(
+      tenant?.name,
+      tenant?.currency,
+      tenant ? { name: tenant.adminName, username: tenant.adminUsername } : undefined
+    );
+    saveTenantDatabase(tenantId, initial);
     return initial;
   }
 }
 
-export function saveDatabase(db: AccountingDB): void {
-  // Asynchronously store in IndexedDB (virtually unlimited browser storage capacity)
-  saveToIndexedDB(db);
+/**
+ * Saves accounting database for a specific tenant / company (100% data isolation)
+ */
+export function saveTenantDatabase(tenantId: string, db: AccountingDB): void {
+  const storageKey = getTenantStorageKey(tenantId);
+  const idbKey = getTenantIdbKey(tenantId);
+
+  // Asynchronously store in IndexedDB
+  saveToIndexedDB(db, idbKey);
 
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    localStorage.setItem(storageKey, JSON.stringify(db));
   } catch (err) {
-    console.warn('localStorage size limit reached, data safely persisted in IndexedDB:', err);
+    console.warn(`localStorage size limit reached for tenant ${tenantId}, data safely in IndexedDB:`, err);
+  }
+}
+
+export function loadDatabase(): AccountingDB {
+  const activeTenantId = getActiveTenantId();
+  if (activeTenantId) {
+    return loadTenantDatabase(activeTenantId);
+  }
+
+  // If no active tenant, check if we have any registered companies
+  const companies = getCompaniesList();
+  if (companies.length > 0) {
+    const firstCompany = companies[0];
+    setActiveTenantId(firstCompany.id);
+    return loadTenantDatabase(firstCompany.id);
+  }
+
+  // Check if legacy database exists: if so, migrate to initial primary company
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.accounts)) {
+        const companyName = parsed.settings?.company || 'المنشأة الرئيسية';
+        const primaryTenant = registerCompany({
+          name: companyName,
+          adminName: parsed.currentUser?.name || 'مدير المنشأة',
+          adminUsername: parsed.currentUser?.username || 'admin',
+          currency: parsed.settings?.currency || 'ج.م'
+        });
+        setActiveTenantId(primaryTenant.id);
+        saveTenantDatabase(primaryTenant.id, parsed);
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn('Legacy database migration note:', e);
+  }
+
+  // Default: Return pristine initial seed data
+  const initial = createSeedData();
+  saveDatabase(initial);
+  return initial;
+}
+
+export function saveDatabase(db: AccountingDB): void {
+  const activeTenantId = getActiveTenantId();
+  if (activeTenantId) {
+    saveTenantDatabase(activeTenantId, db);
+  } else {
+    // Also save to default storage key
+    saveToIndexedDB(db);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    } catch (err) {
+      console.warn('localStorage limit notice:', err);
+    }
   }
 }
 

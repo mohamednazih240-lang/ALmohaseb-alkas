@@ -29,6 +29,7 @@ import {
   defaultSettings,
   logAudit
 } from '../services/accountingStorage';
+import { updateCompany, getActiveTenantId } from '../services/tenantService';
 
 interface SystemViewsProps {
   subPage: 'users' | 'audit' | 'periods' | 'backup' | 'settings';
@@ -207,6 +208,18 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     updated.settings = { ...settingsForm };
     logAudit(updated, 'تحديث إعدادات المنشأة', updated.settings.company);
+
+    // Sync active tenant name and currency in company registry
+    const activeId = getActiveTenantId();
+    if (activeId) {
+      updateCompany(activeId, {
+        name: updated.settings.company,
+        currency: updated.settings.currency,
+        phone: updated.settings.phone,
+        address: updated.settings.address
+      });
+    }
+
     onUpdateDb(updated);
     alert('تم حفظ إعدادات النظام بنجاح.');
   };

@@ -120,9 +120,10 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
+      const companySlug = (db.settings.company || 'منشأة').replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, '_');
       const fileName = customBackupTitle.trim()
         ? `hesabaty_backup_${customBackupTitle.trim().replace(/\s+/g, '_')}_${Date.now()}.json`
-        : undefined;
+        : `hesabaty_backup_${companySlug}_${Date.now()}.json`;
 
       const created = await uploadBackupToGoogleDrive(db, fileName);
       setSuccessMessage('تم إنشاء وحفظ النسخة الاحتياطية بنجاح على حساب Google Drive الخاص بك!');

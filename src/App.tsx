@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   loadDatabase,
   saveDatabase,
+  loadTenantDatabase,
   calculateFinancialSummary
 } from './services/accountingStorage';
 import {
@@ -38,6 +39,7 @@ import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { getStoredAuthSession, logoutUser, AuthSession } from './services/firebaseAuth';
 import { loadFromIndexedDB } from './services/accountingStorage';
+import { getActiveTenantId } from './services/tenantService';
 
 export default function App() {
   const [db, setDb] = useState<AccountingDB>(() => loadDatabase());
@@ -506,11 +508,25 @@ export default function App() {
             onCancel={() => {
               if (authSession) setShowLoginView(false);
             }}
-            onLoginSuccess={(session) => {
+            onLoginSuccess={(session, tenantDb) => {
               setAuthSession(session);
               setShowLoginView(false);
-              const updated = { ...db, currentUser: session.user };
-              handleUpdateDb(updated);
+
+              if (tenantDb) {
+                const targetDb = { ...tenantDb, currentUser: session.user };
+                setDb(targetDb);
+                saveDatabase(targetDb);
+              } else if (session.tenantId) {
+                const loaded = loadTenantDatabase(session.tenantId);
+                const targetDb = { ...loaded, currentUser: session.user };
+                setDb(targetDb);
+                saveDatabase(targetDb);
+              } else {
+                const loaded = loadDatabase();
+                const targetDb = { ...loaded, currentUser: session.user };
+                setDb(targetDb);
+                saveDatabase(targetDb);
+              }
             }}
           />
         </div>

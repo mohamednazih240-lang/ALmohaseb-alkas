@@ -64,15 +64,19 @@ export const Header: React.FC<HeaderProps> = ({
             <Menu className="w-5 h-5" />
           </button>
 
-          <div className="flex items-center gap-2">
+          <div 
+            onClick={onOpenLogin}
+            className="flex items-center gap-2 cursor-pointer hover:opacity-85 transition-opacity"
+            title="انقر لتبديل المنشأة أو تأسيس شركة جديدة"
+          >
             <div className="w-9 h-9 rounded-lg bg-black text-white flex items-center justify-center font-black text-base shadow-xs">
               <Building2 className="w-5 h-5" />
             </div>
             <div>
               <div className="font-extrabold text-slate-900 text-sm leading-tight flex items-center gap-1.5">
                 <span>{settings.company || 'حساباتي'}</span>
-                <span className="text-[10px] bg-slate-100 text-slate-800 font-bold px-1.5 py-0.5 rounded-sm border border-slate-200">
-                  ERP v4.0
+                <span className="text-[10px] bg-emerald-50 text-emerald-800 font-bold px-1.5 py-0.5 rounded-sm border border-emerald-200">
+                  مساحة معزولة
                 </span>
               </div>
               <div className="text-[11px] text-slate-500 font-medium">
@@ -228,12 +232,16 @@ export const Header: React.FC<HeaderProps> = ({
 
             {showUserDropdown && (
               <div
-                className="absolute left-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50 text-right animate-in fade-in slide-in-from-top-2"
+                className="absolute left-0 mt-2 w-56 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50 text-right animate-in fade-in slide-in-from-top-2"
                 onClick={() => setShowUserDropdown(false)}
               >
-                <div className="px-3 py-1.5 border-b border-slate-100">
-                  <div className="font-bold text-xs text-slate-900">{currentUser.name}</div>
-                  <div className="text-[10px] text-slate-500 font-mono">{currentUser.role}</div>
+                <div className="px-3 py-2 border-b border-slate-100 bg-slate-50/60 rounded-t-xl">
+                  <div className="font-extrabold text-xs text-slate-900">{currentUser.name}</div>
+                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">{currentUser.role}</div>
+                  <div className="mt-1.5 pt-1.5 border-t border-slate-200/60 flex items-center gap-1.5 text-[11px] font-bold text-emerald-700">
+                    <Building2 className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">{settings.company}</span>
+                  </div>
                 </div>
 
                 {onOpenDriveBackup && (
@@ -249,10 +257,10 @@ export const Header: React.FC<HeaderProps> = ({
                 {onOpenLogin && (
                   <button
                     onClick={onOpenLogin}
-                    className="w-full px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-black flex items-center gap-2 text-right cursor-pointer"
+                    className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center gap-2 text-right cursor-pointer"
                   >
-                    <User className="w-4 h-4 text-slate-600" />
-                    <span>تبديل الحساب / تسجيل الدخول</span>
+                    <Building2 className="w-4 h-4 text-slate-700" />
+                    <span>تبديل المنشأة / تأسيس شركة جديدة</span>
                   </button>
                 )}
 

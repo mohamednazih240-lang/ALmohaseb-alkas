@@ -1,6 +1,7 @@
 import firebaseConfig from '../../firebase-applet-config.json';
 import { User as AppUser } from '../types/accounting';
 import { AuthSession, setGoogleAccessToken, AUTH_USER_KEY } from './firebaseAuth';
+import { registerCompany, setActiveTenantId } from './tenantService';
 
 declare global {
   interface Window {
@@ -108,6 +109,17 @@ export async function signInWithGoogleIdentity(): Promise<AuthSession> {
               picture = userInfo.picture;
             }
 
+            // Register or activate isolated company tenant for this Google user
+            const tenant = registerCompany({
+              name: `منشأة ${name}`,
+              adminName: name,
+              adminUsername: email,
+              currency: 'ج.م',
+              isGoogle: true,
+              googleEmail: email
+            });
+            setActiveTenantId(tenant.id);
+
             const appUser: AppUser = {
               id: `usr_g_${email.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 15)}`,
               name,
@@ -122,13 +134,24 @@ export async function signInWithGoogleIdentity(): Promise<AuthSession> {
               isGoogle: true,
               googleEmail: email,
               googlePhoto: picture,
-              token: accessToken
+              token: accessToken,
+              tenantId: tenant.id,
+              companyName: tenant.name
             };
 
             localStorage.setItem(AUTH_USER_KEY, JSON.stringify(session));
             resolve(session);
           } catch (fetchErr) {
             console.warn('Could not fetch user profile details:', fetchErr);
+            const fallbackTenant = registerCompany({
+              name: 'منشأة سحابية جديدة',
+              adminName: 'مستخدم جوجل',
+              adminUsername: 'google_user',
+              currency: 'ج.م',
+              isGoogle: true
+            });
+            setActiveTenantId(fallbackTenant.id);
+
             const fallbackUser: AppUser = {
               id: `usr_g_${Date.now().toString(36)}`,
               name: 'مستخدم جوجل المسجل',
@@ -140,7 +163,9 @@ export async function signInWithGoogleIdentity(): Promise<AuthSession> {
             const session: AuthSession = {
               user: fallbackUser,
               isGoogle: true,
-              token: accessToken
+              token: accessToken,
+              tenantId: fallbackTenant.id,
+              companyName: fallbackTenant.name
             };
             localStorage.setItem(AUTH_USER_KEY, JSON.stringify(session));
             resolve(session);
