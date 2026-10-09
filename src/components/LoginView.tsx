@@ -64,20 +64,40 @@ export const LoginView: React.FC<LoginViewProps> = ({
           return;
         }
 
-        if (fbErr.code === 'auth/popup-closed-by-user') {
-          setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل قبل إتمام العملية.');
+        if (
+          fbErr?.code === 'auth/popup-closed-by-user' ||
+          fbErr?.code === 'auth/cancelled-popup-request'
+        ) {
+          setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل. يمكنك المحاولة مجدداً في أي وقت.');
           return;
         }
         
-        // Try GIS as universal fallback for any other unexpected Firebase issues
-        const gisSession = await signInWithGoogleIdentity();
-        onLoginSuccess(gisSession);
+        // Try GIS as universal fallback for any other domain or popup issues
+        try {
+          const gisSession = await signInWithGoogleIdentity();
+          onLoginSuccess(gisSession);
+          return;
+        } catch (gisErr: any) {
+          if (
+            gisErr?.message === 'popup_closed' ||
+            gisErr?.message?.includes('closed') ||
+            gisErr?.message?.includes('popup')
+          ) {
+            setErrorMessage('تم إغلاق نافذة Google قبل اختيار الحساب.');
+            return;
+          }
+          throw gisErr;
+        }
       }
     } catch (err: any) {
-      console.error('Final Google Sign-In error:', err);
-      if (err.message?.includes('closed') || err.message?.includes('popup')) {
+      if (
+        err?.message === 'popup_closed' ||
+        err?.message?.includes('closed') ||
+        err?.message?.includes('popup')
+      ) {
         setErrorMessage('تم إغلاق نافذة Google قبل اختيار الحساب.');
       } else {
+        console.warn('Google sign-in info:', err?.message || err);
         setErrorMessage(
           'تعذر تسجيل الدخول التلقائي بحساب Google على هذا النطاق حالياً. يمكنك استخدام "تسجيل الدخول اليدوي" للمتابعة فوراً بدون أي تأخير.'
         );

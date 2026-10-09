@@ -28,6 +28,7 @@ import {
   getStoredAuthSession,
   signInWithGoogle
 } from '../services/firebaseAuth';
+import { signInWithGoogleIdentity } from '../services/gisAuth';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 
 interface GoogleDriveBackupModalProps {
@@ -83,10 +84,38 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      await signInWithGoogle();
+      try {
+        await signInWithGoogle();
+      } catch (fbErr: any) {
+        if (
+          fbErr?.code === 'auth/popup-closed-by-user' ||
+          fbErr?.code === 'auth/cancelled-popup-request'
+        ) {
+          setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل.');
+          return;
+        }
+        // Fallback to Google Identity Services
+        try {
+          await signInWithGoogleIdentity();
+        } catch (gisErr: any) {
+          if (
+            gisErr?.message === 'popup_closed' ||
+            gisErr?.message?.includes('closed') ||
+            gisErr?.message?.includes('popup')
+          ) {
+            setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل.');
+            return;
+          }
+          throw gisErr;
+        }
+      }
       await fetchBackups();
     } catch (err: any) {
-      setErrorMessage('فشل ربط حساب Google.');
+      if (err?.message === 'popup_closed' || err?.message?.includes('closed')) {
+        setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل.');
+      } else {
+        setErrorMessage('تعذر ربط حساب Google حالياً. يرجى المحاولة مرة أخرى.');
+      }
     } finally {
       setIsLoading(false);
     }

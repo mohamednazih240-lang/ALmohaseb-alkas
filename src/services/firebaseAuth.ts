@@ -83,7 +83,12 @@ export async function signInWithGoogle(): Promise<AuthSession> {
     localStorage.setItem(AUTH_USER_KEY, JSON.stringify(session));
     return session;
   } catch (error: any) {
-    console.error('Error signing in with Google:', error);
+    if (
+      error?.code !== 'auth/popup-closed-by-user' &&
+      error?.code !== 'auth/cancelled-popup-request'
+    ) {
+      console.warn('Firebase Google sign-in note:', error?.code || error?.message);
+    }
     throw error;
   }
 }

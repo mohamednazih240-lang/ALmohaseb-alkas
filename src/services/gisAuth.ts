@@ -132,8 +132,12 @@ export async function signInWithGoogleIdentity(): Promise<AuthSession> {
           }
         },
         error_callback: (err: any) => {
-          console.error('GIS Error callback:', err);
-          reject(new Error(err?.message || 'حدث خطأ أثناء فتح نافذة تسجيل الدخول بجوجل'));
+          if (err?.type === 'popup_closed' || err?.type === 'popup_blocked_by_browser') {
+            reject(new Error('popup_closed'));
+            return;
+          }
+          console.warn('Google Identity notification:', err?.type || err);
+          reject(new Error(err?.message || 'تعذر استكمال تسجيل الدخول'));
         }
       });
 
