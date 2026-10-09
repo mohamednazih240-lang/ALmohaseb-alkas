@@ -85,36 +85,29 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
     setErrorMessage(null);
     try {
       try {
-        await signInWithGoogle();
-      } catch (fbErr: any) {
+        await signInWithGoogleIdentity();
+      } catch (gisErr: any) {
         if (
-          fbErr?.code === 'auth/popup-closed-by-user' ||
-          fbErr?.code === 'auth/cancelled-popup-request'
+          gisErr?.message === 'popup_closed' ||
+          gisErr?.message?.includes('closed')
         ) {
           setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل.');
           return;
         }
-        // Fallback to Google Identity Services
-        try {
-          await signInWithGoogleIdentity();
-        } catch (gisErr: any) {
-          if (
-            gisErr?.message === 'popup_closed' ||
-            gisErr?.message?.includes('closed') ||
-            gisErr?.message?.includes('popup')
-          ) {
-            setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل.');
-            return;
-          }
-          throw gisErr;
-        }
+        // Fallback to Firebase
+        await signInWithGoogle();
       }
       await fetchBackups();
     } catch (err: any) {
-      if (err?.message === 'popup_closed' || err?.message?.includes('closed')) {
+      if (
+        err?.code === 'auth/popup-closed-by-user' ||
+        err?.code === 'auth/cancelled-popup-request' ||
+        err?.message === 'popup_closed' ||
+        err?.message?.includes('closed')
+      ) {
         setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل.');
       } else {
-        setErrorMessage('تعذر ربط حساب Google حالياً. يرجى المحاولة مرة أخرى.');
+        setErrorMessage('تعذر ربط حساب Google حالياً. يرجى التأكد من السماح بالنوافذ المنبثقة.');
       }
     } finally {
       setIsLoading(false);

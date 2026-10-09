@@ -39,67 +39,44 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Handle Google Sign-in with resilient universal fallback (GIS OAuth Token Client)
+  // Handle Google Sign-in using Google Identity Services (Universal & Works on all mobile browsers/Vercel/Previews)
   const handleGoogleLogin = async () => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      // First attempt: Firebase Auth popup
+      // Direct GIS token client: works on every domain, mobile Chrome/Safari, PWA, Vercel
+      // without needing domain whitelisting or triggering aggressive popup blockers
       try {
-        const session = await signInWithGoogle();
-        onLoginSuccess(session);
+        const gisSession = await signInWithGoogleIdentity();
+        onLoginSuccess(gisSession);
         return;
-      } catch (fbErr: any) {
-        console.warn('Firebase popup sign-in encountered an issue, trying universal Google Identity client...', fbErr);
-        
-        // If domain unauthorized or popup blocked, fall back immediately to Google Identity Services client
+      } catch (gisErr: any) {
         if (
-          fbErr.code === 'auth/unauthorized-domain' ||
-          fbErr.code === 'auth/configuration-not-found' ||
-          fbErr.message?.includes('unauthorized-domain') ||
-          fbErr.message?.includes('domain')
+          gisErr?.message === 'popup_closed' ||
+          gisErr?.message?.includes('closed')
         ) {
-          const gisSession = await signInWithGoogleIdentity();
-          onLoginSuccess(gisSession);
+          setErrorMessage('تم إغلاق نافذة Google قبل اختيار الحساب. يمكنك النقر مجدداً للمتابعة.');
           return;
         }
 
-        if (
-          fbErr?.code === 'auth/popup-closed-by-user' ||
-          fbErr?.code === 'auth/cancelled-popup-request'
-        ) {
-          setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل. يمكنك المحاولة مجدداً في أي وقت.');
-          return;
-        }
-        
-        // Try GIS as universal fallback for any other domain or popup issues
-        try {
-          const gisSession = await signInWithGoogleIdentity();
-          onLoginSuccess(gisSession);
-          return;
-        } catch (gisErr: any) {
-          if (
-            gisErr?.message === 'popup_closed' ||
-            gisErr?.message?.includes('closed') ||
-            gisErr?.message?.includes('popup')
-          ) {
-            setErrorMessage('تم إغلاق نافذة Google قبل اختيار الحساب.');
-            return;
-          }
-          throw gisErr;
-        }
+        console.warn('GIS sign-in note, attempting Firebase popup fallback...', gisErr);
+        // Fallback to Firebase popup
+        const fbSession = await signInWithGoogle();
+        onLoginSuccess(fbSession);
+        return;
       }
     } catch (err: any) {
       if (
+        err?.code === 'auth/popup-closed-by-user' ||
+        err?.code === 'auth/cancelled-popup-request' ||
         err?.message === 'popup_closed' ||
-        err?.message?.includes('closed') ||
-        err?.message?.includes('popup')
+        err?.message?.includes('closed')
       ) {
-        setErrorMessage('تم إغلاق نافذة Google قبل اختيار الحساب.');
+        setErrorMessage('تم إغلاق نافذة Google قبل إتمام العملية. يمكنك النقر مرة أخرى.');
       } else {
         console.warn('Google sign-in info:', err?.message || err);
         setErrorMessage(
-          'تعذر تسجيل الدخول التلقائي بحساب Google على هذا النطاق حالياً. يمكنك استخدام "تسجيل الدخول اليدوي" للمتابعة فوراً بدون أي تأخير.'
+          'إذا تم حظر النوافذ المنبثقة في متصفح هاتفك، يرجى السماح بها من إعدادات المتصفح، أو استخدم "تسجيل الدخول اليدوي" بالأسفل للمتابعة فوراً بدون أي قيود.'
         );
       }
     } finally {

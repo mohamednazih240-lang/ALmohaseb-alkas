@@ -17,9 +17,7 @@ export const auth = getAuth(app);
 // Configure Google Provider with Google Drive file scope
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
-googleProvider.setCustomParameters({
-  prompt: 'select_account'
-});
+// Don't force prompt=select_account as it triggers popup blockers on Chrome mobile
 
 export const GOOGLE_TOKEN_KEY = 'hesabaty_google_access_token';
 export const AUTH_USER_KEY = 'hesabaty_active_user';

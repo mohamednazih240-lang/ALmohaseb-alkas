@@ -20,7 +20,22 @@ export function loadGoogleIdentityScript(): Promise<void> {
       return resolve();
     }
 
-    const existing = document.getElementById('google-gis-script');
+    const checkInterval = setInterval(() => {
+      if (window.google?.accounts?.oauth2) {
+        clearInterval(checkInterval);
+        return resolve();
+      }
+    }, 50);
+
+    // Timeout after 4 seconds
+    setTimeout(() => {
+      clearInterval(checkInterval);
+      if (window.google?.accounts?.oauth2) {
+        return resolve();
+      }
+    }, 4000);
+
+    const existing = document.querySelector('script[src*="accounts.google.com/gsi/client"]');
     if (existing) {
       existing.addEventListener('load', () => resolve());
       existing.addEventListener('error', () => reject(new Error('Failed to load GIS script')));
@@ -141,7 +156,7 @@ export async function signInWithGoogleIdentity(): Promise<AuthSession> {
         }
       });
 
-      client.requestAccessToken({ prompt: 'select_account' });
+      client.requestAccessToken();
     } catch (e: any) {
       reject(e);
     }
