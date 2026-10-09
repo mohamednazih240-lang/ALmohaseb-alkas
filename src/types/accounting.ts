@@ -367,6 +367,7 @@ export interface User {
   password?: string;
   role: 'مدير' | 'محاسب' | 'مبيعات' | 'مخزن' | 'كاشير';
   active: boolean;
+  lastLogin?: string;
 }
 
 export interface AppSettings {

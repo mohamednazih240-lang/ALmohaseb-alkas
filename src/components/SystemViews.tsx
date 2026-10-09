@@ -12,7 +12,8 @@ import {
   RefreshCw,
   AlertTriangle,
   CheckCircle2,
-  X
+  X,
+  Cloud
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -33,12 +34,14 @@ interface SystemViewsProps {
   subPage: 'users' | 'audit' | 'periods' | 'backup' | 'settings';
   db: AccountingDB;
   onUpdateDb: (updated: AccountingDB) => void;
+  onOpenGoogleDriveBackup?: () => void;
 }
 
 export const SystemViews: React.FC<SystemViewsProps> = ({
   subPage,
   db,
-  onUpdateDb
+  onUpdateDb,
+  onOpenGoogleDriveBackup
 }) => {
   // User form modal
   const [showUserModal, setShowUserModal] = useState(false);
@@ -426,6 +429,37 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Google Drive Cloud Card */}
+            <div className="md:col-span-3 bg-gradient-to-r from-blue-900 to-slate-900 text-white p-6 rounded-3xl shadow-lg border border-blue-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 bg-blue-600 rounded-xl">
+                    <Cloud className="w-6 h-6 text-white" />
+                  </div>
+                  <h3 className="text-base font-black text-white">
+                    النسخ الاحتياطي السحابي عبر Google Drive (المزامنة الشاملة)
+                  </h3>
+                  <span className="bg-blue-500/30 text-blue-200 border border-blue-400/30 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                    مزامنة بين الهواتف
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed max-w-2xl">
+                  اربط حساب Google (الجيميل) لحفظ وتخزين قواعد البيانات السحابية واسترجاعها فوراً على أي هاتف أو جهاز كمبيوتر آخر بمجرد تسجيل الدخول بنفس الجيميل!
+                </p>
+              </div>
+
+              {onOpenGoogleDriveBackup && (
+                <button
+                  type="button"
+                  onClick={onOpenGoogleDriveBackup}
+                  className="px-5 py-3 bg-white hover:bg-slate-100 text-slate-950 font-bold text-xs rounded-2xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
+                >
+                  <Cloud className="w-4 h-4 text-blue-600" />
+                  <span>فتح مركز Google Drive السحابي</span>
+                </button>
+              )}
+            </div>
+
             <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
               <div className="flex items-center gap-2 text-slate-900 font-black text-sm">
                 <Download className="w-5 h-5 text-slate-700" />

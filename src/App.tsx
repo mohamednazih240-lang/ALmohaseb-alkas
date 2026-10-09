@@ -32,7 +32,12 @@ import { CurrenciesView } from './components/CurrenciesView';
 import { FixedAssetsView } from './components/FixedAssetsView';
 import { ProcurementView } from './components/ProcurementView';
 import { BarcodePrintingView } from './components/BarcodePrintingView';
+import { LoginView } from './components/LoginView';
+import { GoogleDriveBackupModal } from './components/GoogleDriveBackupModal';
+import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
+import { getStoredAuthSession, logoutUser, AuthSession } from './services/firebaseAuth';
+import { loadFromIndexedDB } from './services/accountingStorage';
 
 export default function App() {
   const [db, setDb] = useState<AccountingDB>(() => loadDatabase());
@@ -40,6 +45,11 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
   const pageHistoryRef = useRef<PageId[]>(['dashboard']);
+
+  // Authentication & Google Drive states
+  const [authSession, setAuthSession] = useState<AuthSession | null>(() => getStoredAuthSession());
+  const [showLoginView, setShowLoginView] = useState(false);
+  const [showDriveBackupModal, setShowDriveBackupModal] = useState(false);
 
   // Modals
   const [showQuickSearch, setShowQuickSearch] = useState(false);
@@ -55,8 +65,19 @@ export default function App() {
   useModalBackHandler(showQuickSearch, () => setShowQuickSearch(false), 'quick_search');
   useModalBackHandler(!!previewInvoice, () => setPreviewInvoice(null), 'invoice_preview');
   useModalBackHandler(productModalState.isOpen, () => setProductModalState({ isOpen: false, product: null }), 'product_modal');
+  useModalBackHandler(showDriveBackupModal, () => setShowDriveBackupModal(false), 'drive_backup_modal');
+  useModalBackHandler(showLoginView, () => setShowLoginView(false), 'login_view_modal');
 
-  // Save changes to localStorage
+  // Hydrate database from IndexedDB on startup (handles large databases up to gigabytes)
+  useEffect(() => {
+    loadFromIndexedDB().then(idbData => {
+      if (idbData && idbData.invoices && idbData.settings) {
+        setDb(idbData);
+      }
+    });
+  }, []);
+
+  // Save changes to IndexedDB and localStorage
   const handleUpdateDb = (updated: AccountingDB) => {
     setDb(updated);
     saveDatabase(updated);
@@ -207,13 +228,23 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-white text-slate-900 flex flex-col font-sans" dir="rtl">
+      {/* PWA Mobile App Installation & Instant Auto-Update Banner */}
+      <PWAInstallBanner />
+
       {/* Header */}
       <Header
         settings={db.settings}
-        currentUser={db.currentUser || db.users[0]}
+        currentUser={authSession?.user || db.currentUser || db.users[0]}
         lowStockCount={summary.lowStockCount}
         onOpenQuickSearch={() => setShowQuickSearch(true)}
         onToggleSidebar={() => setSidebarOpen(prev => !prev)}
+        onOpenDriveBackup={() => setShowDriveBackupModal(true)}
+        onOpenLogin={() => setShowLoginView(true)}
+        onLogout={() => {
+          logoutUser();
+          setAuthSession(null);
+          setShowLoginView(true);
+        }}
         onQuickAction={(action) => {
           if (action === 'new_sale') navigateToPage('sales');
           else if (action === 'new_purchase') navigateToPage('purchases');
@@ -224,8 +255,6 @@ export default function App() {
           else if (action === 'view_low_stock') navigateToPage('products');
         }}
         activePageTitle={getPageTitle(currentPage)}
-        canGoBack={canGoBack}
-        onGoBack={handleGoBack}
       />
 
       <div className="flex flex-1">
@@ -420,6 +449,7 @@ export default function App() {
               subPage={currentPage as any}
               db={db}
               onUpdateDb={handleUpdateDb}
+              onOpenGoogleDriveBackup={() => setShowDriveBackupModal(true)}
             />
           )}
         </main>
@@ -454,6 +484,34 @@ export default function App() {
         settings={db.settings}
         onClose={() => setPreviewInvoice(null)}
       />
+
+      {/* Google Drive Cloud Backup & Restore Modal */}
+      <GoogleDriveBackupModal
+        isOpen={showDriveBackupModal}
+        onClose={() => setShowDriveBackupModal(false)}
+        db={db}
+        onRestoreDb={(restored) => {
+          handleUpdateDb(restored);
+        }}
+      />
+
+      {/* Full-Screen / Modal Login Page (Manual & Google Sign-in) */}
+      {showLoginView && (
+        <div className="fixed inset-0 z-50 overflow-y-auto">
+          <LoginView
+            settings={db.settings}
+            users={db.users}
+            canCancel={true}
+            onCancel={() => setShowLoginView(false)}
+            onLoginSuccess={(session) => {
+              setAuthSession(session);
+              setShowLoginView(false);
+              const updated = { ...db, currentUser: session.user };
+              handleUpdateDb(updated);
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

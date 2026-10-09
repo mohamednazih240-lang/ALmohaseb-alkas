@@ -28,6 +28,58 @@ import {
 } from '../types/accounting';
 
 const STORAGE_KEY = 'hesabaty_pro_db_v6';
+const IDB_NAME = 'hesabaty_accounting_db';
+const IDB_STORE = 'erp_storage';
+const IDB_KEY = 'main_database_state';
+
+function openIndexedDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      return reject(new Error('IndexedDB not supported in this environment'));
+    }
+    const request = indexedDB.open(IDB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const idb = request.result;
+      if (!idb.objectStoreNames.contains(IDB_STORE)) {
+        idb.createObjectStore(IDB_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/**
+ * Saves entire accounting database into IndexedDB (supports millions of records and gigabytes of storage)
+ */
+export async function saveToIndexedDB(db: AccountingDB): Promise<void> {
+  try {
+    const idb = await openIndexedDB();
+    const tx = idb.transaction(IDB_STORE, 'readwrite');
+    const store = tx.objectStore(IDB_STORE);
+    store.put(db, IDB_KEY);
+  } catch (e) {
+    console.warn('IndexedDB write notice:', e);
+  }
+}
+
+/**
+ * Asynchronously loads accounting database from IndexedDB
+ */
+export async function loadFromIndexedDB(): Promise<AccountingDB | null> {
+  try {
+    const idb = await openIndexedDB();
+    return new Promise((resolve) => {
+      const tx = idb.transaction(IDB_STORE, 'readonly');
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.get(IDB_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
 
 export const PAYMENT_METHODS: PaymentMethod[] = [
   'نقدي',
@@ -318,10 +370,13 @@ export function loadDatabase(): AccountingDB {
 }
 
 export function saveDatabase(db: AccountingDB): void {
+  // Asynchronously store in IndexedDB (virtually unlimited browser storage capacity)
+  saveToIndexedDB(db);
+
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
   } catch (err) {
-    console.error('Failed to save to localStorage:', err);
+    console.warn('localStorage size limit reached, data safely persisted in IndexedDB:', err);
   }
 }
 

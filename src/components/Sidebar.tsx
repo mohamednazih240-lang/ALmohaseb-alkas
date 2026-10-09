@@ -36,6 +36,7 @@ import {
   Barcode,
   LockKeyhole
 } from 'lucide-react';
+import { PWAInstallButton } from './PWAInstallBanner';
 
 export type PageId =
   | 'dashboard'
@@ -246,8 +247,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           ))}
         </nav>
 
-        {/* Footer info */}
-        <div className="p-2.5 border-t border-slate-100 bg-slate-50/50 text-center">
+        {/* Footer info & Install */}
+        <div className="p-2.5 border-t border-slate-100 bg-slate-50/50 flex flex-col items-center gap-2">
+          <PWAInstallButton className="w-full justify-center" />
           <div className="text-[10px] text-slate-500 font-medium">
             نظام القيد المزدوج المتوازن © 2026
           </div>

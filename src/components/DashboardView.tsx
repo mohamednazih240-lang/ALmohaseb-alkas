@@ -104,7 +104,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Top Welcome & KPI Summary Bar */}
+      {/* Top Welcome & Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
         <div>
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
@@ -118,14 +118,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => onOpenInvoiceModal('sale')}
-            className="px-3.5 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
+            className="px-3.5 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
           >
             <ShoppingCart className="w-3.5 h-3.5" />
             <span>+ فاتورة بيع فورية</span>
           </button>
           <button
             onClick={() => onOpenInvoiceModal('purchase')}
-            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
           >
             <ShoppingBag className="w-3.5 h-3.5" />
             <span>+ فاتورة شراء</span>
@@ -133,7 +133,120 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       </div>
 
-      {/* 8 Essential Executive KPI Cards */}
+      {/* 1. TOP SECTION: Quick Operations Launchpad (الكروت السريعة بالواجهة الرئيسية بالأعلى) */}
+      <div className="bg-white p-4 sm:p-5 rounded-2xl border-2 border-slate-200 shadow-xs">
+        <div className="flex items-center justify-between mb-3.5">
+          <div>
+            <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span>مركز العمليات والإجراءات السريعة</span>
+            </h2>
+            <p className="text-[11px] text-slate-500">
+              تنفيذ القيود والفواتير والسندات المحاسبية مباشرة بنقرة زر واحدة
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
+          {/* Card 1: Sale */}
+          <button
+            onClick={() => onOpenInvoiceModal('sale')}
+            className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group cursor-pointer shadow-2xs hover:shadow-xs"
+          >
+            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 group-hover:bg-emerald-600 group-hover:text-white flex items-center justify-center mb-1.5 transition-colors">
+              <ShoppingCart className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-slate-900">فاتورة بيع</span>
+            <span className="text-[10px] text-slate-400">إيراد ومخزن</span>
+          </button>
+
+          {/* Card 2: Purchase */}
+          <button
+            onClick={() => onOpenInvoiceModal('purchase')}
+            className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group cursor-pointer shadow-2xs hover:shadow-xs"
+          >
+            <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-700 group-hover:bg-blue-600 group-hover:text-white flex items-center justify-center mb-1.5 transition-colors">
+              <ShoppingBag className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-slate-900">فاتورة شراء</span>
+            <span className="text-[10px] text-slate-400">توريد وتكلفة</span>
+          </button>
+
+          {/* Card 3: Receipt */}
+          <button
+            onClick={() => onOpenVoucherModal('receipt')}
+            className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group cursor-pointer shadow-2xs hover:shadow-xs"
+          >
+            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 group-hover:bg-emerald-600 group-hover:text-white flex items-center justify-center mb-1.5 transition-colors">
+              <Receipt className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-slate-900">سند قبض</span>
+            <span className="text-[10px] text-slate-400">تحصيل عميل</span>
+          </button>
+
+          {/* Card 4: Payment */}
+          <button
+            onClick={() => onOpenVoucherModal('payment')}
+            className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group cursor-pointer shadow-2xs hover:shadow-xs"
+          >
+            <div className="w-10 h-10 rounded-xl bg-rose-50 text-rose-700 group-hover:bg-rose-600 group-hover:text-white flex items-center justify-center mb-1.5 transition-colors">
+              <CreditCard className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-slate-900">سند صرف</span>
+            <span className="text-[10px] text-slate-400">سداد مورد</span>
+          </button>
+
+          {/* Card 5: Add Product */}
+          <button
+            onClick={() => onOpenProductModal()}
+            className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group cursor-pointer shadow-2xs hover:shadow-xs"
+          >
+            <div className="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-700 group-hover:bg-indigo-600 group-hover:text-white flex items-center justify-center mb-1.5 transition-colors">
+              <Package className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-slate-900">صنف جديد</span>
+            <span className="text-[10px] text-slate-400">باركود وتسعير</span>
+          </button>
+
+          {/* Card 6: Add Customer */}
+          <button
+            onClick={() => onOpenPartyModal('customer')}
+            className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group cursor-pointer shadow-2xs hover:shadow-xs"
+          >
+            <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-700 group-hover:bg-amber-600 group-hover:text-white flex items-center justify-center mb-1.5 transition-colors">
+              <Users className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-slate-900">عميل جديد</span>
+            <span className="text-[10px] text-slate-400">بيانات وائتمان</span>
+          </button>
+
+          {/* Card 7: Treasury Movement */}
+          <button
+            onClick={onOpenCashMoveModal}
+            className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group cursor-pointer shadow-2xs hover:shadow-xs"
+          >
+            <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-700 group-hover:bg-purple-600 group-hover:text-white flex items-center justify-center mb-1.5 transition-colors">
+              <Wallet className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-slate-900">حركة خزينة</span>
+            <span className="text-[10px] text-slate-400">إيداع / سحب</span>
+          </button>
+
+          {/* Card 8: Physical Inventory */}
+          <button
+            onClick={() => onNavigate('inventory')}
+            className="flex flex-col items-center justify-center p-3 rounded-xl border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group cursor-pointer shadow-2xs hover:shadow-xs"
+          >
+            <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-800 group-hover:bg-black group-hover:text-white flex items-center justify-center mb-1.5 transition-colors">
+              <Boxes className="w-5 h-5" />
+            </div>
+            <span className="text-xs font-bold text-slate-900">تسوية جرد</span>
+            <span className="text-[10px] text-slate-400">مطابقة الفعلي</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 2. Executive KPI Cards (تحت الكروت السريعة) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
         {/* KPI 1: Sales Today */}
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs hover:border-slate-300 transition-all">
@@ -273,118 +386,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {summary.lowStockCount > 0 ? 'تحتاج طلب شراء' : 'المخزون مستقر'}
             </span>
           </div>
-        </div>
-      </div>
-
-      {/* Quick Operations Launchpad (الكروت السريعة اللازمة للمحاسب والكاشير) */}
-      <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-2xs">
-        <div className="flex items-center justify-between mb-3.5">
-          <div>
-            <h2 className="text-sm font-black text-slate-900">
-              مركز العمليات والإجراءات السريعة
-            </h2>
-            <p className="text-[11px] text-slate-500">
-              تنفيذ القيود والفواتير والسندات المحاسبية مباشرة بنقرة زر واحدة
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
-          {/* Card 1: Sale */}
-          <button
-            onClick={() => onOpenInvoiceModal('sale')}
-            className="flex flex-col items-center justify-center p-3 rounded-lg border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group"
-          >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-black group-hover:text-white text-slate-900 flex items-center justify-center mb-1.5 transition-colors">
-              <ShoppingCart className="w-4 h-4" />
-            </div>
-            <span className="text-xs font-bold text-slate-900">فاتورة بيع</span>
-            <span className="text-[10px] text-slate-400">إيراد ومخزن</span>
-          </button>
-
-          {/* Card 2: Purchase */}
-          <button
-            onClick={() => onOpenInvoiceModal('purchase')}
-            className="flex flex-col items-center justify-center p-3 rounded-lg border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group"
-          >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-black group-hover:text-white text-slate-900 flex items-center justify-center mb-1.5 transition-colors">
-              <ShoppingBag className="w-4 h-4" />
-            </div>
-            <span className="text-xs font-bold text-slate-900">فاتورة شراء</span>
-            <span className="text-[10px] text-slate-400">توريد وتكلفة</span>
-          </button>
-
-          {/* Card 3: Receipt */}
-          <button
-            onClick={() => onOpenVoucherModal('receipt')}
-            className="flex flex-col items-center justify-center p-3 rounded-lg border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group"
-          >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-black group-hover:text-white text-slate-900 flex items-center justify-center mb-1.5 transition-colors">
-              <Receipt className="w-4 h-4" />
-            </div>
-            <span className="text-xs font-bold text-slate-900">سند قبض</span>
-            <span className="text-[10px] text-slate-400">تحصيل عميل</span>
-          </button>
-
-          {/* Card 4: Payment */}
-          <button
-            onClick={() => onOpenVoucherModal('payment')}
-            className="flex flex-col items-center justify-center p-3 rounded-lg border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group"
-          >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-black group-hover:text-white text-slate-900 flex items-center justify-center mb-1.5 transition-colors">
-              <CreditCard className="w-4 h-4" />
-            </div>
-            <span className="text-xs font-bold text-slate-900">سند صرف</span>
-            <span className="text-[10px] text-slate-400">سداد مورد</span>
-          </button>
-
-          {/* Card 5: Add Product */}
-          <button
-            onClick={() => onOpenProductModal()}
-            className="flex flex-col items-center justify-center p-3 rounded-lg border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group"
-          >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-black group-hover:text-white text-slate-900 flex items-center justify-center mb-1.5 transition-colors">
-              <Package className="w-4 h-4" />
-            </div>
-            <span className="text-xs font-bold text-slate-900">صنف جديد</span>
-            <span className="text-[10px] text-slate-400">باركود وتسعير</span>
-          </button>
-
-          {/* Card 6: Add Customer */}
-          <button
-            onClick={() => onOpenPartyModal('customer')}
-            className="flex flex-col items-center justify-center p-3 rounded-lg border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group"
-          >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-black group-hover:text-white text-slate-900 flex items-center justify-center mb-1.5 transition-colors">
-              <Users className="w-4 h-4" />
-            </div>
-            <span className="text-xs font-bold text-slate-900">عميل جديد</span>
-            <span className="text-[10px] text-slate-400">بيانات وائتمان</span>
-          </button>
-
-          {/* Card 7: Treasury Movement */}
-          <button
-            onClick={onOpenCashMoveModal}
-            className="flex flex-col items-center justify-center p-3 rounded-lg border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group"
-          >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-black group-hover:text-white text-slate-900 flex items-center justify-center mb-1.5 transition-colors">
-              <Wallet className="w-4 h-4" />
-            </div>
-            <span className="text-xs font-bold text-slate-900">حركة خزينة</span>
-            <span className="text-[10px] text-slate-400">إيداع / سحب</span>
-          </button>
-
-          {/* Card 8: Physical Inventory */}
-          <button
-            onClick={() => onNavigate('inventory')}
-            className="flex flex-col items-center justify-center p-3 rounded-lg border border-slate-200 hover:border-black hover:bg-slate-50 text-slate-900 transition-all text-center group"
-          >
-            <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-black group-hover:text-white text-slate-900 flex items-center justify-center mb-1.5 transition-colors">
-              <Boxes className="w-4 h-4" />
-            </div>
-            <span className="text-xs font-bold text-slate-900">تسوية جرد</span>
-            <span className="text-[10px] text-slate-400">مطابقة الفعلي</span>
-          </button>
         </div>
       </div>
 

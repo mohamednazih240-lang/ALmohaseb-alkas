@@ -10,9 +10,11 @@ import {
   Building2,
   CheckCircle2,
   Sparkles,
-  ArrowRight
+  Cloud,
+  LogOut
 } from 'lucide-react';
 import { AppSettings, User as UserType } from '../types/accounting';
+import { PWAInstallButton } from './PWAInstallBanner';
 
 interface HeaderProps {
   settings: AppSettings;
@@ -22,8 +24,9 @@ interface HeaderProps {
   onToggleSidebar: () => void;
   onQuickAction: (action: string) => void;
   activePageTitle: string;
-  canGoBack?: boolean;
-  onGoBack?: () => void;
+  onOpenDriveBackup?: () => void;
+  onOpenLogin?: () => void;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -34,10 +37,12 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleSidebar,
   onQuickAction,
   activePageTitle,
-  canGoBack = false,
-  onGoBack
+  onOpenDriveBackup,
+  onOpenLogin,
+  onLogout
 }) => {
   const [showQuickDropdown, setShowQuickDropdown] = useState(false);
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
 
   const todayArabic = new Date().toLocaleDateString('ar-EG', {
     weekday: 'long',
@@ -49,7 +54,7 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs select-none">
       <div className="flex items-center justify-between px-3 sm:px-4 py-2.5 h-16">
-        {/* Right side (RTL start): Toggle, Back Button, Brand, Current view */}
+        {/* Right side (RTL start): Toggle, Brand, Current view */}
         <div className="flex items-center gap-2 sm:gap-3">
           <button
             onClick={onToggleSidebar}
@@ -58,17 +63,6 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Menu className="w-5 h-5" />
           </button>
-
-          {canGoBack && onGoBack && (
-            <button
-              onClick={onGoBack}
-              className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-lg text-xs font-bold transition-all flex items-center gap-1 border border-slate-300 shadow-2xs cursor-pointer active:scale-95"
-              title="الرجوع للصفحة السابقة"
-            >
-              <ArrowRight className="w-4 h-4 text-slate-700" />
-              <span className="hidden sm:inline">رجوع</span>
-            </button>
-          )}
 
           <div className="flex items-center gap-2">
             <div className="w-9 h-9 rounded-lg bg-black text-white flex items-center justify-center font-black text-base shadow-xs">
@@ -92,7 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex-1 max-w-md mx-4 hidden md:block">
           <button
             onClick={onOpenQuickSearch}
-            className="w-full flex items-center justify-between px-3 py-2 bg-slate-50 hover:bg-slate-100 text-slate-500 hover:text-slate-900 rounded-lg border border-slate-200 text-xs transition-all shadow-2xs group"
+            className="w-full flex items-center justify-between px-3 py-2 bg-slate-50 hover:bg-slate-100 text-slate-500 hover:text-slate-900 rounded-lg border border-slate-200 text-xs transition-all shadow-2xs group cursor-pointer"
           >
             <div className="flex items-center gap-2">
               <Search className="w-4 h-4 text-slate-400 group-hover:text-black" />
@@ -104,22 +98,37 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
         </div>
 
-        {/* Left side (RTL end): Actions, alerts, user */}
+        {/* Left side (RTL end): Actions, alerts, Google Drive, user */}
         <div className="flex items-center gap-2">
           {/* Quick search button for small screens */}
           <button
             onClick={onOpenQuickSearch}
-            className="md:hidden p-2 text-slate-700 hover:text-black hover:bg-slate-100 rounded-lg"
+            className="md:hidden p-2 text-slate-700 hover:text-black hover:bg-slate-100 rounded-lg cursor-pointer"
             title="بحث"
           >
             <Search className="w-5 h-5" />
           </button>
 
+          {/* PWA Mobile Install Button */}
+          <PWAInstallButton />
+
+          {/* Google Drive Backup Button */}
+          {onOpenDriveBackup && (
+            <button
+              onClick={onOpenDriveBackup}
+              className="p-2 text-blue-700 hover:text-blue-900 hover:bg-blue-50 rounded-lg transition-colors border border-blue-200 cursor-pointer flex items-center gap-1 text-xs font-bold"
+              title="النسخ الاحتياطي السحابي عبر Google Drive"
+            >
+              <Cloud className="w-4 h-4 text-blue-600" />
+              <span className="hidden sm:inline text-[11px]">Drive</span>
+            </button>
+          )}
+
           {/* Quick Add Dropdown */}
           <div className="relative">
             <button
               onClick={() => setShowQuickDropdown(!showQuickDropdown)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-black hover:bg-slate-800 text-white font-bold text-xs rounded-lg transition-colors shadow-xs"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-black hover:bg-slate-800 text-white font-bold text-xs rounded-lg transition-colors shadow-xs cursor-pointer"
             >
               <PlusCircle className="w-4 h-4" />
               <span className="hidden sm:inline">إجراء سريع</span>
@@ -135,28 +144,28 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
                 <button
                   onClick={() => onQuickAction('new_sale')}
-                  className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center justify-between text-right"
+                  className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center justify-between text-right cursor-pointer"
                 >
                   <span>فاتورة بيع جديدة</span>
                   <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">F2</span>
                 </button>
                 <button
                   onClick={() => onQuickAction('new_purchase')}
-                  className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center justify-between text-right"
+                  className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center justify-between text-right cursor-pointer"
                 >
                   <span>فاتورة شراء جديدة</span>
                   <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">F3</span>
                 </button>
                 <button
                   onClick={() => onQuickAction('new_receipt')}
-                  className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center justify-between text-right"
+                  className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center justify-between text-right cursor-pointer"
                 >
                   <span>سند قبض من عميل</span>
                   <span className="text-[10px] text-emerald-600 font-mono">+قبض</span>
                 </button>
                 <button
                   onClick={() => onQuickAction('new_payment')}
-                  className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center justify-between text-right"
+                  className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center justify-between text-right cursor-pointer"
                 >
                   <span>سند صرف لمورد</span>
                   <span className="text-[10px] text-rose-600 font-mono">-صرف</span>
@@ -164,13 +173,13 @@ export const Header: React.FC<HeaderProps> = ({
                 <div className="my-1 border-t border-slate-100"></div>
                 <button
                   onClick={() => onQuickAction('new_product')}
-                  className="w-full px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-black text-right"
+                  className="w-full px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-black text-right cursor-pointer"
                 >
                   إضافة صنف للمخزون
                 </button>
                 <button
                   onClick={() => onQuickAction('new_customer')}
-                  className="w-full px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-black text-right"
+                  className="w-full px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-black text-right cursor-pointer"
                 >
                   إضافة عميل جديد
                 </button>
@@ -182,7 +191,7 @@ export const Header: React.FC<HeaderProps> = ({
           {lowStockCount > 0 && (
             <button
               onClick={() => onQuickAction('view_low_stock')}
-              className="relative p-2 text-slate-700 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition-colors border border-amber-200"
+              className="relative p-2 text-slate-700 hover:text-amber-700 hover:bg-amber-50 rounded-lg transition-colors border border-amber-200 cursor-pointer"
               title={`${lowStockCount} أصناف قاربت على النفاد`}
             >
               <Bell className="w-4 h-4 text-amber-600" />
@@ -198,22 +207,70 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="font-medium text-[11px]">{todayArabic}</span>
           </div>
 
-          {/* User badge */}
-          <div className="flex items-center gap-2 pl-1 pr-2 py-1 bg-slate-100 rounded-lg border border-slate-200 text-xs">
-            <div className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center font-bold text-[10px]">
-              {currentUser.name.charAt(0)}
-            </div>
-            <div className="hidden sm:block text-right">
-              <div className="font-bold text-slate-900 text-[11px] leading-tight">
-                {currentUser.name}
+          {/* User badge with dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => setShowUserDropdown(!showUserDropdown)}
+              className="flex items-center gap-2 pl-1 pr-2 py-1 bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 text-xs transition-colors cursor-pointer"
+            >
+              <div className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center font-bold text-[10px]">
+                {currentUser.name.charAt(0)}
               </div>
-              <div className="text-[9px] text-slate-500 leading-tight">
-                {currentUser.role}
+              <div className="hidden sm:block text-right">
+                <div className="font-bold text-slate-900 text-[11px] leading-tight">
+                  {currentUser.name}
+                </div>
+                <div className="text-[9px] text-slate-500 leading-tight">
+                  {currentUser.role}
+                </div>
               </div>
-            </div>
+            </button>
+
+            {showUserDropdown && (
+              <div
+                className="absolute left-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-50 text-right animate-in fade-in slide-in-from-top-2"
+                onClick={() => setShowUserDropdown(false)}
+              >
+                <div className="px-3 py-1.5 border-b border-slate-100">
+                  <div className="font-bold text-xs text-slate-900">{currentUser.name}</div>
+                  <div className="text-[10px] text-slate-500 font-mono">{currentUser.role}</div>
+                </div>
+
+                {onOpenDriveBackup && (
+                  <button
+                    onClick={onOpenDriveBackup}
+                    className="w-full px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-black flex items-center gap-2 text-right cursor-pointer"
+                  >
+                    <Cloud className="w-4 h-4 text-blue-600" />
+                    <span>مزامنة Google Drive</span>
+                  </button>
+                )}
+
+                {onOpenLogin && (
+                  <button
+                    onClick={onOpenLogin}
+                    className="w-full px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-black flex items-center gap-2 text-right cursor-pointer"
+                  >
+                    <User className="w-4 h-4 text-slate-600" />
+                    <span>تبديل الحساب / تسجيل الدخول</span>
+                  </button>
+                )}
+
+                {onLogout && (
+                  <button
+                    onClick={onLogout}
+                    className="w-full px-3 py-2 text-xs font-medium text-rose-600 hover:bg-rose-50 flex items-center gap-2 text-right border-t border-slate-100 cursor-pointer"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    <span>تسجيل الخروج</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
     </header>
   );
 };
+
