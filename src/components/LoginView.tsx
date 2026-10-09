@@ -9,12 +9,13 @@ import {
   AlertCircle,
   Loader2,
   ArrowRight,
-  Sparkles,
   KeyRound,
-  Mail
+  LogIn,
+  Check
 } from 'lucide-react';
 import { User as AppUser, AppSettings } from '../types/accounting';
 import { signInWithGoogle, signInManual, AuthSession } from '../services/firebaseAuth';
+import { signInWithGoogleIdentity } from '../services/gisAuth';
 
 interface LoginViewProps {
   settings: AppSettings;
@@ -38,21 +39,48 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Handle Google Sign-in
+  // Handle Google Sign-in with resilient universal fallback (GIS OAuth Token Client)
   const handleGoogleLogin = async () => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const session = await signInWithGoogle();
-      onLoginSuccess(session);
+      // First attempt: Firebase Auth popup
+      try {
+        const session = await signInWithGoogle();
+        onLoginSuccess(session);
+        return;
+      } catch (fbErr: any) {
+        console.warn('Firebase popup sign-in encountered an issue, trying universal Google Identity client...', fbErr);
+        
+        // If domain unauthorized or popup blocked, fall back immediately to Google Identity Services client
+        if (
+          fbErr.code === 'auth/unauthorized-domain' ||
+          fbErr.code === 'auth/configuration-not-found' ||
+          fbErr.message?.includes('unauthorized-domain') ||
+          fbErr.message?.includes('domain')
+        ) {
+          const gisSession = await signInWithGoogleIdentity();
+          onLoginSuccess(gisSession);
+          return;
+        }
+
+        if (fbErr.code === 'auth/popup-closed-by-user') {
+          setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل قبل إتمام العملية.');
+          return;
+        }
+        
+        // Try GIS as universal fallback for any other unexpected Firebase issues
+        const gisSession = await signInWithGoogleIdentity();
+        onLoginSuccess(gisSession);
+      }
     } catch (err: any) {
-      console.error(err);
-      if (err.code === 'auth/popup-closed-by-user') {
-        setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل قبل إتمام العملية.');
-      } else if (err.code === 'auth/cancelled-popup-request') {
-        setErrorMessage('تم إلغاء طلب تسجيل الدخول.');
+      console.error('Final Google Sign-In error:', err);
+      if (err.message?.includes('closed') || err.message?.includes('popup')) {
+        setErrorMessage('تم إغلاق نافذة Google قبل اختيار الحساب.');
       } else {
-        setErrorMessage(err.message || 'حدث خطأ أثناء الاتصال بخدمة Google. يمكنك تسجيل الدخول يدوياً.');
+        setErrorMessage(
+          'تعذر تسجيل الدخول التلقائي بحساب Google على هذا النطاق حالياً. يمكنك استخدام "تسجيل الدخول اليدوي" للمتابعة فوراً بدون أي تأخير.'
+        );
       }
     } finally {
       setIsLoading(false);
@@ -66,13 +94,17 @@ export const LoginView: React.FC<LoginViewProps> = ({
     setErrorMessage(null);
 
     try {
-      const targetUser = users.find(u => u.id === selectedUserId) || {
-        id: 'usr_manual',
-        name: customUsername || 'مستخدم مسجل',
-        username: customUsername || 'admin',
-        role: 'مدير' as const,
-        active: true
-      };
+      let targetUser = users.find(u => u.id === selectedUserId);
+      if (!targetUser) {
+        const finalName = customUsername.trim() || 'مدير النظام';
+        targetUser = {
+          id: `usr_${Date.now().toString(36)}`,
+          name: finalName,
+          username: customUsername.trim() || 'admin',
+          role: 'مدير',
+          active: true
+        };
+      }
 
       const session = signInManual(targetUser);
       onLoginSuccess(session);
@@ -84,19 +116,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 flex flex-col justify-center items-center p-4 sm:p-6 text-slate-100 font-sans" dir="rtl">
-      {/* Background radial glow */}
+    <div className="min-h-screen bg-slate-950 flex flex-col justify-center items-center p-4 sm:p-6 text-slate-100 font-sans relative select-none" dir="rtl">
+      {/* Background glow styling */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-emerald-500/10 rounded-full blur-3xl"></div>
+        <div className="absolute -top-40 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-emerald-600/10 rounded-full blur-3xl"></div>
+        <div className="absolute -bottom-40 right-1/4 w-[500px] h-[500px] bg-blue-600/10 rounded-full blur-3xl"></div>
       </div>
 
-      <div className="relative w-full max-w-md bg-white text-slate-900 rounded-3xl shadow-2xl border border-slate-200 overflow-hidden">
-        {/* Brand Banner */}
-        <div className="bg-slate-950 text-white p-6 sm:p-8 text-center relative">
+      <div className="relative w-full max-w-md bg-white text-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 overflow-hidden">
+        {/* Brand Header */}
+        <div className="bg-slate-900 text-white p-6 sm:p-7 text-center relative border-b border-slate-800">
           {canCancel && onCancel && (
             <button
               onClick={onCancel}
-              className="absolute top-4 left-4 p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl text-xs transition-colors"
+              className="absolute top-4 left-4 p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl text-xs transition-colors cursor-pointer"
               title="إلغاء والعودة"
             >
               <ArrowRight className="w-5 h-5" />
@@ -104,14 +137,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
           )}
 
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-white text-black shadow-lg mb-3">
-            <Building2 className="w-8 h-8" />
+            <Building2 className="w-7 h-7" />
           </div>
 
           <h1 className="text-xl sm:text-2xl font-black tracking-tight">
             {settings.company || 'حساباتي المحاسبي المتكامل'}
           </h1>
           <p className="text-xs text-slate-400 font-medium mt-1">
-            Hesabaty ERP v4.0 - البوابة المحاسبية السحابية الآمنة
+            Hesabaty ERP - البوابة المحاسبية السحابية الآمنة
           </p>
 
           <div className="mt-4 flex items-center justify-center gap-2">
@@ -121,13 +154,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
             </span>
             <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">
               <Cloud className="w-3 h-3" />
-              ربط Google Drive
+              سحابي ومحلي
             </span>
           </div>
         </div>
 
-        {/* Tab Switcher: Google vs Manual */}
-        <div className="p-3 bg-slate-100 border-b border-slate-200 flex gap-2">
+        {/* Tab Switcher */}
+        <div className="p-2.5 bg-slate-100 border-b border-slate-200 flex gap-2">
           <button
             type="button"
             onClick={() => { setActiveTab('google'); setErrorMessage(null); }}
@@ -143,7 +176,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
               <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
             </svg>
-            <span>تسجيل الدخول بالجيميل</span>
+            <span>حساب Google (Gmail)</span>
           </button>
 
           <button
@@ -165,7 +198,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
           {errorMessage && (
             <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-medium flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{errorMessage}</span>
+              <span className="leading-relaxed">{errorMessage}</span>
             </div>
           )}
 
@@ -209,47 +242,69 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 <ul className="space-y-1 pr-6 list-disc text-slate-500">
                   <li>حفظ وتخزين قواعد البيانات الاحتياطية في مجلد Google Drive الخاص بك بأمان.</li>
                   <li>إمكانية سحب النسخة على أي هاتف أو جهاز لوحي آخر بنفس الجيميل فوراً.</li>
-                  <li>حماية تامة من ضياع البيانات أو فرمتة الهاتف.</li>
+                  <li>حماية تامة من ضياع البيانات أو استبدال الجهاز.</li>
                 </ul>
               </div>
             </div>
           ) : (
-            /* TAB 2: MANUAL LOGIN */
+            /* TAB 2: MANUAL LOGIN (Clean - No Demo Accounts) */
             <form onSubmit={handleManualLogin} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                  اختر المستخدم أو الحساب المحاسبي
+                  اسم المستخدم أو الحساب المسجل
                 </label>
-                <div className="space-y-2">
-                  {users.map(u => (
-                    <label
-                      key={u.id}
-                      className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all ${
-                        selectedUserId === u.id
-                          ? 'border-black bg-slate-50 ring-1 ring-black'
-                          : 'border-slate-200 hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <input
-                          type="radio"
-                          name="selected_user"
-                          checked={selectedUserId === u.id}
-                          onChange={() => setSelectedUserId(u.id)}
-                          className="w-4 h-4 text-black focus:ring-0"
-                        />
-                        <div>
-                          <div className="font-black text-xs text-slate-900">{u.name}</div>
-                          <div className="text-[10px] text-slate-500">
-                            {u.role === 'مدير' ? 'مدير النظام (كامل الصلاحيات)' : u.role === 'محاسب' ? 'محاسب عام' : 'كاشير ومبيعات'}
+                {users && users.length > 0 ? (
+                  <div className="space-y-2 mb-3">
+                    {users.map(u => (
+                      <label
+                        key={u.id}
+                        className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all ${
+                          selectedUserId === u.id
+                            ? 'border-black bg-slate-50 ring-1 ring-black'
+                            : 'border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <input
+                            type="radio"
+                            name="selected_user"
+                            checked={selectedUserId === u.id}
+                            onChange={() => {
+                              setSelectedUserId(u.id);
+                              setCustomUsername('');
+                            }}
+                            className="w-4 h-4 text-black focus:ring-0"
+                          />
+                          <div>
+                            <div className="font-black text-xs text-slate-900">{u.name}</div>
+                            <div className="text-[10px] text-slate-500 font-mono">@{u.username}</div>
                           </div>
                         </div>
-                      </div>
-                      <span className="text-[10px] bg-slate-100 font-mono font-bold px-2 py-0.5 rounded text-slate-600">
-                        {u.role}
-                      </span>
-                    </label>
-                  ))}
+                        <span className="text-[10px] bg-slate-200/80 font-bold px-2 py-0.5 rounded text-slate-700">
+                          {u.role}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                    أو الدخول باسم مستخدم جديد:
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={customUsername}
+                      onChange={e => {
+                        setCustomUsername(e.target.value);
+                        setSelectedUserId('');
+                      }}
+                      placeholder="اكتب اسم المستخدم أو اسمك..."
+                      className="w-full px-3 py-2 pr-9 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none transition-all"
+                    />
+                    <User className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
+                  </div>
                 </div>
               </div>
 
@@ -263,7 +318,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full px-3 py-2 pr-9 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono"
+                    className="w-full px-3 py-2 pr-9 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-black outline-none transition-all"
                   />
                   <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
                 </div>
@@ -272,32 +327,17 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full py-3 bg-black hover:bg-slate-800 text-white rounded-xl font-bold text-xs transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                className="w-full py-3 bg-black hover:bg-slate-800 text-white rounded-xl font-bold text-xs transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 mt-2"
               >
                 {isLoading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
-                  <Lock className="w-4 h-4" />
+                  <LogIn className="w-4 h-4" />
                 )}
-                <span>تسجيل الدخول للنظام المحاسبي</span>
+                <span>دخول النظام المحاسبي</span>
               </button>
             </form>
           )}
-
-          {/* Quick Demo Instant Access */}
-          <div className="mt-5 pt-4 border-t border-slate-100 text-center">
-            <button
-              type="button"
-              onClick={() => {
-                const admin = users[0] || { id: 'usr_admin', name: 'المدير العام', username: 'admin', role: 'مدير' as const, active: true };
-                onLoginSuccess(signInManual(admin));
-              }}
-              className="text-[11px] font-bold text-slate-500 hover:text-black flex items-center justify-center gap-1 mx-auto transition-colors cursor-pointer"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-              <span>دخول تجريبي سريع بصلاحية المدير العام</span>
-            </button>
-          </div>
         </div>
       </div>
     </div>

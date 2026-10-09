@@ -21,8 +21,8 @@ googleProvider.setCustomParameters({
   prompt: 'select_account'
 });
 
-const GOOGLE_TOKEN_KEY = 'hesabaty_google_access_token';
-const AUTH_USER_KEY = 'hesabaty_active_user';
+export const GOOGLE_TOKEN_KEY = 'hesabaty_google_access_token';
+export const AUTH_USER_KEY = 'hesabaty_active_user';
 
 export interface AuthSession {
   user: AppUser;

@@ -253,9 +253,7 @@ export function createSeedData(): AccountingDB {
   ];
 
   const users = [
-    { id: 'usr_admin', name: 'أحمد محمود', username: 'admin', role: 'مدير' as const, active: true },
-    { id: 'usr_acc', name: 'سارة خالد', username: 'accountant', role: 'محاسب' as const, active: true },
-    { id: 'usr_cashier', name: 'محمد علي', username: 'cashier', role: 'كاشير' as const, active: true }
+    { id: 'usr_main', name: 'مدير النظام', username: 'admin', role: 'مدير' as const, active: true }
   ];
 
   return {
@@ -330,16 +328,22 @@ export function loadDatabase(): AccountingDB {
       return initial;
     }
 
-    // Safety check: if parsed database contains any previous demo products or parties, clean them
+    // Safety check: if parsed database contains any previous demo products, parties, or mock demo accounts, clean them
     const hasDemoData = parsed.invoices?.some((i: any) => i.id === 'inv_1001' || i.id === 'inv_2001' || i.number === 'INV-001001') ||
       parsed.stockMovements?.some((sm: any) => sm.id === 'sm_1') ||
       parsed.products?.some((p: any) => p.id === 'prod_1' || p.code === 'PRD-101') ||
       parsed.customers?.some((c: any) => c.id === 'cust_1') ||
       parsed.suppliers?.some((s: any) => s.id === 'supp_1') ||
-      parsed.treasury?.some((tr: any) => tr.id === 'tr_1');
+      parsed.treasury?.some((tr: any) => tr.id === 'tr_1') ||
+      parsed.users?.some((u: any) => u.id === 'usr_acc' || u.id === 'usr_cashier' || u.name === 'أحمد محمود' || u.name === 'سارة خالد' || u.name === 'محمد علي');
 
     if (hasDemoData) {
       const cleaned = cleanAllDemoTransactions(parsed);
+      // Ensure users list is also cleaned of demo accounts
+      cleaned.users = [
+        { id: 'usr_main', name: 'مدير النظام', username: 'admin', role: 'مدير' as const, active: true }
+      ];
+      cleaned.currentUser = cleaned.users[0];
       saveDatabase(cleaned);
       return cleaned;
     }

@@ -46,9 +46,10 @@ export default function App() {
   const [canGoBack, setCanGoBack] = useState(false);
   const pageHistoryRef = useRef<PageId[]>(['dashboard']);
 
-  // Authentication & Google Drive states
+  // Authentication & Google Drive states:
+  // When opening the link for the first time or logged out, login is strictly required
   const [authSession, setAuthSession] = useState<AuthSession | null>(() => getStoredAuthSession());
-  const [showLoginView, setShowLoginView] = useState(false);
+  const [showLoginView, setShowLoginView] = useState(() => !getStoredAuthSession());
   const [showDriveBackupModal, setShowDriveBackupModal] = useState(false);
 
   // Modals
@@ -501,8 +502,10 @@ export default function App() {
           <LoginView
             settings={db.settings}
             users={db.users}
-            canCancel={true}
-            onCancel={() => setShowLoginView(false)}
+            canCancel={!!authSession}
+            onCancel={() => {
+              if (authSession) setShowLoginView(false);
+            }}
             onLoginSuccess={(session) => {
               setAuthSession(session);
               setShowLoginView(false);
