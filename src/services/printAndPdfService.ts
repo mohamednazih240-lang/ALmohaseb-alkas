@@ -2,7 +2,7 @@ import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 
 export interface PdfExportOptions {
-  format?: 'a4' | 'thermal' | 'barcode';
+  format?: 'a4' | 'a5' | 'thermal' | 'barcode';
   orientation?: 'portrait' | 'landscape';
   margin?: number;
   filename?: string;
@@ -69,6 +69,36 @@ export async function downloadElementAsPdf(
       });
 
       pdf.addImage(imgData, 'JPEG', 0, 0, mmWidth, mmHeight);
+      pdf.save(filename);
+      return true;
+    }
+
+    if (format === 'a5') {
+      const pdf = new jsPDF({
+        orientation,
+        unit: 'mm',
+        format: 'a5'
+      });
+      const pageWidth = orientation === 'landscape' ? 210 : 148;
+      const pageHeight = orientation === 'landscape' ? 148 : 210;
+      const contentWidth = pageWidth - margin * 2;
+      const contentHeight = (canvas.height * contentWidth) / canvas.width;
+
+      if (contentHeight <= pageHeight - margin * 2) {
+        pdf.addImage(imgData, 'JPEG', margin, margin, contentWidth, contentHeight);
+      } else {
+        let heightLeft = contentHeight;
+        let position = margin;
+        const effectivePageHeight = pageHeight - margin * 2;
+        pdf.addImage(imgData, 'JPEG', margin, position, contentWidth, contentHeight);
+        heightLeft -= effectivePageHeight;
+        while (heightLeft > 0) {
+          position -= effectivePageHeight;
+          pdf.addPage();
+          pdf.addImage(imgData, 'JPEG', margin, position, contentWidth, contentHeight);
+          heightLeft -= effectivePageHeight;
+        }
+      }
       pdf.save(filename);
       return true;
     }

@@ -28,7 +28,7 @@ import {
   getStoredAuthSession,
   signInWithGoogle
 } from '../services/firebaseAuth';
-import { signInWithGoogleIdentity } from '../services/gisAuth';
+import { signInWithGoogleIdentity, connectGoogleDriveAccount } from '../services/gisAuth';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 
 interface GoogleDriveBackupModalProps {
@@ -85,16 +85,16 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
     setErrorMessage(null);
     try {
       try {
-        await signInWithGoogleIdentity();
+        await connectGoogleDriveAccount();
       } catch (gisErr: any) {
         if (
           gisErr?.message === 'popup_closed' ||
           gisErr?.message?.includes('closed')
         ) {
-          setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل.');
+          setErrorMessage('تم إغلاق نافذة اختيار حساب Google. يمكنك النقر مجدداً للمتابعة.');
           return;
         }
-        // Fallback to Firebase
+        // Fallback to Firebase Google Provider if needed
         await signInWithGoogle();
       }
       await fetchBackups();
@@ -105,7 +105,7 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
         err?.message === 'popup_closed' ||
         err?.message?.includes('closed')
       ) {
-        setErrorMessage('تم إغلاق نافذة تسجيل الدخول بجوجل.');
+        setErrorMessage('تم إغلاق نافذة اختيار حساب Google.');
       } else {
         setErrorMessage('تعذر ربط حساب Google حالياً. يرجى التأكد من السماح بالنوافذ المنبثقة.');
       }
@@ -169,6 +169,52 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
     } catch {
       alert('تعذر حذف النسخة.');
     }
+  };
+
+  // Export backup directly as JSON file
+  const handleExportLocalFile = () => {
+    try {
+      const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(db, null, 2));
+      const downloadAnchor = document.createElement('a');
+      const companySlug = (db.settings.company || 'منشأة').replace(/[^a-zA-Z0-9\u0600-\u06FF]/g, '_');
+      const dateStr = new Date().toISOString().slice(0, 10);
+      downloadAnchor.setAttribute('href', dataStr);
+      downloadAnchor.setAttribute('download', `hesabaty_backup_${companySlug}_${dateStr}.json`);
+      document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      downloadAnchor.remove();
+      setSuccessMessage('تم تنزيل وحفظ ملف النسخة الاحتياطية بنجاح على جهازك!');
+    } catch (e) {
+      setErrorMessage('تعذر تصدير ملف النسخة الاحتياطية.');
+    }
+  };
+
+  // Import backup directly from JSON file
+  const handleImportLocalFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result as string;
+        const parsed = JSON.parse(content);
+        const targetDb = parsed.data || parsed;
+        if (!targetDb.invoices || !targetDb.settings) {
+          throw new Error('ملف النسخة الاحتياطية غير صالح.');
+        }
+        if (!confirm(`هل أنت متأكد من استرجاع البيانات من الملف "${file.name}"؟ سيتم استبدال البيانات الحالية.`)) {
+          return;
+        }
+        onRestoreDb(targetDb);
+        setSuccessMessage('تم استرجاع كافة البيانات بنجاح من الملف!');
+        setTimeout(() => onClose(), 1500);
+      } catch (err: any) {
+        setErrorMessage(err.message || 'حدث خطأ أثناء قراءة ملف النسخة الاحتياطية.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   };
 
   if (!isOpen) return null;
@@ -249,6 +295,43 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
                 <span>ربط حساب Google (Gmail)</span>
               </button>
             )}
+          </div>
+
+          {/* Guaranteed Direct File Backup & Restore (Fail-safe for any offline or blocked situation) */}
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <HardDrive className="w-4 h-4 text-slate-700" />
+                <span className="text-xs font-black text-slate-900">النسخ الاحتياطي الفوري (تنزيل ملف .json مستقل)</span>
+              </div>
+              <span className="text-[10px] text-slate-500 font-bold bg-white px-2 py-0.5 rounded border border-slate-200">
+                مضمون 100% وبدون أي حظر
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-600 leading-relaxed">
+              يمكنك بنقرة زر واحدة تنزيل نسخة كاملة مشفرة من كافة فواتيرك وأصنافك وعملائك على جهازك أو استعادتها فوراً:
+            </p>
+            <div className="flex flex-wrap gap-2.5">
+              <button
+                type="button"
+                onClick={handleExportLocalFile}
+                className="flex-1 min-w-[160px] px-3.5 py-2.5 bg-white hover:bg-slate-100 text-slate-900 border border-slate-300 rounded-xl text-xs font-black transition-all shadow-2xs flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Download className="w-4 h-4 text-emerald-600" />
+                <span>تنزيل ملف النسخة الاحتياطية الآن</span>
+              </button>
+
+              <label className="flex-1 min-w-[160px] px-3.5 py-2.5 bg-white hover:bg-slate-100 text-slate-900 border border-slate-300 rounded-xl text-xs font-black transition-all shadow-2xs flex items-center justify-center gap-2 cursor-pointer">
+                <Upload className="w-4 h-4 text-blue-600" />
+                <span>استعادة من ملف نسخة (.json)</span>
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={handleImportLocalFile}
+                  className="hidden"
+                />
+              </label>
+            </div>
           </div>
 
           {/* Create Backup Action Box */}

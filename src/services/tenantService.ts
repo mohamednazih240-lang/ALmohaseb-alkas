@@ -113,7 +113,7 @@ export function registerCompany(data: {
   const cleanName = data.name.trim().toLowerCase().replace(/[^a-z0-9\u0600-\u06FF]/g, '_').slice(0, 15);
   const randomSuffix = Math.random().toString(36).substring(2, 7);
   const id = data.isGoogle && data.googleEmail
-    ? `comp_g_${data.googleEmail.toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 20)}`
+    ? `comp_g_${data.googleEmail.toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 60)}`
     : `comp_${cleanName}_${Date.now().toString(36)}_${randomSuffix}`;
 
   // Check if already exists (especially for Google logins)

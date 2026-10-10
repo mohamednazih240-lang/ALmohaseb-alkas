@@ -51,14 +51,13 @@ export default defineConfig(() => {
           skipWaiting: true,
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(__dirname || process.cwd(), '.'),
       },
     },
     server: {

@@ -42,8 +42,8 @@ export function usePWAInstall() {
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     window.addEventListener('appinstalled', handleAppInstalled);
 
-    // 4. Auto-check for Service Worker updates (when deployed on Vercel)
-    if ('serviceWorker' in navigator) {
+    // 4. Auto-check for Service Worker updates (when deployed on Vercel/Production)
+    if ('serviceWorker' in navigator && import.meta.env.PROD) {
       navigator.serviceWorker.ready.then((registration) => {
         // Periodically check for new version every 60 seconds
         const interval = setInterval(() => {
@@ -111,7 +111,7 @@ export function usePWAInstall() {
   }, [deferredPrompt]);
 
   const updateApp = useCallback(() => {
-    if ('serviceWorker' in navigator) {
+    if ('serviceWorker' in navigator && import.meta.env.PROD) {
       navigator.serviceWorker.getRegistration().then((reg) => {
         if (reg && reg.waiting) {
           reg.waiting.postMessage({ type: 'SKIP_WAITING' });

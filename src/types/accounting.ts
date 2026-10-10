@@ -101,6 +101,7 @@ export interface InvoiceItem {
   discount: number;
   taxRate: number;
   total: number;
+  notes?: string;
 }
 
 export interface InvoicePaymentLine {
@@ -142,6 +143,8 @@ export interface Invoice {
   costCenterName?: string;
   currencyCode?: string;
   exchangeRate?: number;
+  createdBy?: string;
+  deliveryFee?: number;
 }
 
 export interface ReturnInvoice {
@@ -382,6 +385,7 @@ export interface AppSettings {
   tax: 'disabled' | 'enabled';
   taxRate: number;
   notes: string;
+  logo?: string;
   nextSale: number;
   nextPurchase: number;
   nextReceipt: number;

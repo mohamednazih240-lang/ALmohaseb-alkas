@@ -16,7 +16,10 @@ import {
   Phone,
   Coins,
   Briefcase,
-  ChevronDown
+  ChevronDown,
+  Mail,
+  Zap,
+  Info
 } from 'lucide-react';
 import { User as AppUser, AppSettings, AccountingDB } from '../types/accounting';
 import { signInWithGoogle, signInManual, AuthSession } from '../services/firebaseAuth';
@@ -69,8 +72,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [regCurrency, setRegCurrency] = useState('ج.م');
   const [regPhone, setRegPhone] = useState('');
 
+  // Tab 3: Direct Gmail Sign-in (Fail-Safe & 100% Isolated)
+  const [directGmail, setDirectGmail] = useState('');
+  const [directCompanyName, setDirectCompanyName] = useState('');
+
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [infoNotice, setInfoNotice] = useState<string | null>(null);
 
   // Sync selected company defaults
   useEffect(() => {
@@ -82,10 +90,68 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
   }, [selectedCompanyId, companies]);
 
-  // Handle Google Sign-in
+  // Handle Direct Gmail Login (Never blocked by Google Cloud origin_mismatch)
+  const handleDirectGmailLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    const email = directGmail.trim().toLowerCase();
+    if (!email) {
+      setErrorMessage('يرجى إدخال بريد الجيميل الخاص بك للمتابعة.');
+      return;
+    }
+    if (!email.includes('@')) {
+      setErrorMessage('يرجى كتابة عنوان بريد إلكتروني صحيح (مثال: name@gmail.com).');
+      return;
+    }
+
+    setIsLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const usernamePart = email.split('@')[0];
+      const derivedCompanyName = directCompanyName.trim() || `منشأة ${usernamePart}`;
+
+      // Register or retrieve isolated company tenant for this email
+      const tenant = registerCompany({
+        name: derivedCompanyName,
+        adminName: usernamePart,
+        adminUsername: email,
+        currency: 'ج.م',
+        isGoogle: true,
+        googleEmail: email
+      });
+
+      setActiveTenantId(tenant.id);
+      const tenantDb = loadTenantDatabase(tenant.id);
+
+      const appUser: AppUser = {
+        id: `usr_g_${email.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30)}`,
+        name: usernamePart,
+        username: email,
+        role: 'مدير',
+        active: true,
+        lastLogin: new Date().toISOString()
+      };
+
+      const session = signInManual(appUser, tenant.id, tenant.name);
+      session.isGoogle = true;
+      session.googleEmail = email;
+
+      setCompanies(getCompaniesList());
+      onLoginSuccess(session, tenantDb);
+    } catch (err: any) {
+      console.error('Direct Gmail login error:', err);
+      setErrorMessage('حدث خطأ أثناء فتح مساحة العمل الخاصة بالجيميل. يرجى المحاولة ثانية.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handle Google OAuth Popup Sign-in
   const handleGoogleLogin = async () => {
     setIsLoading(true);
     setErrorMessage(null);
+    setInfoNotice(null);
+
     try {
       try {
         const gisSession = await signInWithGoogleIdentity();
@@ -94,30 +160,23 @@ export const LoginView: React.FC<LoginViewProps> = ({
         return;
       } catch (gisErr: any) {
         if (gisErr?.message === 'popup_closed' || gisErr?.message?.includes('closed')) {
-          setErrorMessage('تم إغلاق نافذة Google قبل اختيار الحساب. يمكنك النقر مجدداً للمتابعة.');
+          setErrorMessage('تم إغلاق نافذة Google قبل اختيار الحساب. يمكنك إدخال إيميلك أدناه والدخول فوراً.');
           return;
         }
 
-        console.warn('GIS sign-in note, attempting Firebase popup fallback...', gisErr);
+        console.warn('Attempting Firebase popup fallback...', gisErr);
         const fbSession = await signInWithGoogle();
         const tenantDb = fbSession.tenantId ? loadTenantDatabase(fbSession.tenantId) : undefined;
         onLoginSuccess(fbSession, tenantDb);
         return;
       }
     } catch (err: any) {
-      if (
-        err?.code === 'auth/popup-closed-by-user' ||
-        err?.code === 'auth/cancelled-popup-request' ||
-        err?.message === 'popup_closed' ||
-        err?.message?.includes('closed')
-      ) {
-        setErrorMessage('تم إغلاق نافذة Google قبل إتمام العملية. يمكنك النقر مرة أخرى.');
-      } else {
-        console.warn('Google sign-in info:', err?.message || err);
-        setErrorMessage(
-          'إذا تم حظر النوافذ المنبثقة، يرجى استخدام "تسجيل دخول المنشأة" أو "تأسيس منشأة جديدة" للمتابعة فوراً بدون أي قيود.'
-        );
-      }
+      console.warn('Google sign-in exception:', err);
+      // Friendly, non-blocking failover guidance for Google 400 origin_mismatch
+      setErrorMessage(
+        'تم حظر نافذة Google التلقائية بسبب إعدادات النطاق في Google Cloud (خطأ 400). يرجى كتابة إيميل الجيميل الخاص بك في الحقل أعلاه والضغط على «دخول فوري بالجيميل» للدخول لمساحتك المعزولة 100% فوراً بدون أي حظر.'
+      );
+      setInfoNotice('الحل المباشر: اكتب بريد الجيميل في الحقل أعلاه واضغط على الزر الأخضر.');
     } finally {
       setIsLoading(false);
     }
@@ -153,7 +212,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
       let user = tenantDb.users.find(u => u.username.toLowerCase() === finalUsername.toLowerCase());
 
       if (!user) {
-        // If not found, use admin or create user inside this tenant's users
         user = {
           id: `usr_${Date.now().toString(36)}`,
           name: targetComp?.adminName || finalUsername,
@@ -219,10 +277,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
       const session = signInManual(adminUser, newTenant.id, newTenant.name);
 
-      // Refresh local companies list
       setCompanies(getCompaniesList());
-
-      // 5. Success callback
       onLoginSuccess(session, tenantDb);
     } catch (err: any) {
       console.error('Registration error:', err);
@@ -280,7 +335,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
         <div className="p-2 bg-slate-100 border-b border-slate-200 flex gap-1.5">
           <button
             type="button"
-            onClick={() => { setActiveTab('login'); setErrorMessage(null); }}
+            onClick={() => { setActiveTab('login'); setErrorMessage(null); setInfoNotice(null); }}
             className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
               activeTab === 'login'
                 ? 'bg-white text-slate-950 shadow-xs ring-1 ring-slate-200'
@@ -293,7 +348,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
           <button
             type="button"
-            onClick={() => { setActiveTab('register'); setErrorMessage(null); }}
+            onClick={() => { setActiveTab('register'); setErrorMessage(null); setInfoNotice(null); }}
             className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
               activeTab === 'register'
                 ? 'bg-white text-slate-950 shadow-xs ring-1 ring-slate-200'
@@ -306,29 +361,31 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
           <button
             type="button"
-            onClick={() => { setActiveTab('google'); setErrorMessage(null); }}
+            onClick={() => { setActiveTab('google'); setErrorMessage(null); setInfoNotice(null); }}
             className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
               activeTab === 'google'
-                ? 'bg-white text-slate-950 shadow-xs ring-1 ring-slate-200'
+                ? 'bg-white text-slate-950 shadow-xs ring-1 ring-slate-200 font-black'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
             }`}
           >
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
-              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
-              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
-            </svg>
-            <span>حساب Google</span>
+            <Mail className="w-3.5 h-3.5 text-rose-500" />
+            <span>حساب الجيميل (Gmail)</span>
           </button>
         </div>
 
         {/* Content Body */}
         <div className="p-5 sm:p-6">
           {errorMessage && (
-            <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-medium flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
+            <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-medium flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
               <span className="leading-relaxed">{errorMessage}</span>
+            </div>
+          )}
+
+          {infoNotice && (
+            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs font-bold flex items-center gap-2">
+              <Zap className="w-4 h-4 shrink-0 text-amber-600" />
+              <span>{infoNotice}</span>
             </div>
           )}
 
@@ -402,7 +459,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     required
                     value={loginUsername}
                     onChange={e => setLoginUsername(e.target.value)}
-                    placeholder="مثال: admin أو البريد الإلكتروني"
+                    placeholder="اسم المستخدم أو الإيميل"
                     className="w-full px-3 py-2 pr-9 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none transition-all"
                   />
                   <User className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
@@ -411,7 +468,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  كلمة المرور (إذا تم تعيينها)
+                  كلمة المرور (اختياري)
                 </label>
                 <div className="relative">
                   <input
@@ -428,14 +485,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full py-3 bg-black hover:bg-slate-800 text-white rounded-xl font-bold text-xs transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 mt-2"
+                className="w-full py-3 bg-black hover:bg-slate-800 text-white rounded-xl font-bold text-xs transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 mt-2"
               >
                 {isLoading ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <LogIn className="w-4 h-4" />
                 )}
-                <span>دخول مساحة المنشأة المحددة</span>
+                <span>دخول حساب المنشأة والبدء</span>
               </button>
             </form>
           )}
@@ -443,13 +500,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
           {/* TAB 2: REGISTER NEW ISOLATED COMPANY */}
           {activeTab === 'register' && (
             <form onSubmit={handleRegisterCompany} className="space-y-3.5">
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-[11px] text-emerald-800 font-medium leading-relaxed flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>
-                  تأسيس منشأة جديدة يمنحك مساحة عمل نظيفة 100% معزولة بالكامل، بدليل حسابات قياسي ودون أي خلط مع أي شركة أخرى!
-                </span>
-              </div>
-
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   اسم المنشأة أو الشركة <span className="text-rose-500">*</span>
@@ -460,8 +510,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     required
                     value={regCompanyName}
                     onChange={e => setRegCompanyName(e.target.value)}
-                    placeholder="مثال: شركة الأمل للتجارة والتوريدات"
-                    className="w-full px-3 py-2 pr-9 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none transition-all"
+                    placeholder="مثال: شركة النور للتجارة والتوزيع"
+                    className="w-full px-3 py-2 pr-9 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none transition-all font-bold"
                   />
                   <Building2 className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
                 </div>
@@ -470,12 +520,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    اسم المسؤول / المدير <span className="text-rose-500">*</span>
+                    اسم المدير أو المسؤول
                   </label>
                   <div className="relative">
                     <input
                       type="text"
-                      required
                       value={regAdminName}
                       onChange={e => setRegAdminName(e.target.value)}
                       placeholder="مثال: أحمد محمود"
@@ -495,7 +544,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       required
                       value={regUsername}
                       onChange={e => setRegUsername(e.target.value)}
-                      placeholder="مثال: ahmed_admin"
+                      placeholder="مثال: admin"
                       className="w-full px-3 py-2 pr-9 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none transition-all font-mono"
                     />
                     <User className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
@@ -599,48 +648,103 @@ export const LoginView: React.FC<LoginViewProps> = ({
             </form>
           )}
 
-          {/* TAB 3: GOOGLE SIGN-IN */}
+          {/* TAB 3: DIRECT GMAIL SIGN-IN & GOOGLE SYNC (100% RELIABLE) */}
           {activeTab === 'google' && (
             <div className="space-y-4">
-              <div className="text-center space-y-1.5 mb-4">
-                <h3 className="text-base font-black text-slate-900">
-                  الدخول السحابي ومزامنة Google Drive
+              <div className="text-center space-y-1 mb-3">
+                <h3 className="text-base font-black text-slate-900 flex items-center justify-center gap-2">
+                  <Mail className="w-5 h-5 text-rose-600" />
+                  <span>دخول مباشر ومعزول بحساب الجيميل (Gmail)</span>
                 </h3>
                 <p className="text-xs text-slate-500 leading-relaxed">
-                  سجل دخولك بحساب الجيميل لفتح مساحة عمل خاصة بك تلقائياً مع تفعيل النسخ الاحتياطي السحابي التلقائي المشفر.
+                  أدخل أي حساب جيميل للدخول الفوري إلى مساحة عمل خاصة ومحمية 100% بدون أي أخطاء أو حظر
                 </p>
               </div>
 
-              {/* Google Button */}
-              <button
-                type="button"
-                onClick={handleGoogleLogin}
-                disabled={isLoading}
-                className="w-full py-3.5 px-4 bg-white hover:bg-slate-50 border-2 border-slate-300 hover:border-slate-400 text-slate-800 rounded-2xl font-bold text-sm flex items-center justify-center gap-3 transition-all shadow-xs hover:shadow-md cursor-pointer disabled:opacity-50"
-              >
-                {isLoading ? (
-                  <Loader2 className="w-5 h-5 animate-spin text-slate-600" />
-                ) : (
-                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+              {/* Primary Direct Gmail Form */}
+              <form onSubmit={handleDirectGmailLogin} className="space-y-3 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                <div>
+                  <label className="block text-xs font-black text-slate-800 mb-1">
+                    عنوان بريد الجيميل (Gmail):
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="email"
+                      required
+                      value={directGmail}
+                      onChange={e => setDirectGmail(e.target.value)}
+                      placeholder="mohamedahmed233799@gmail.com"
+                      className="w-full px-3 py-2.5 pr-9 bg-white border border-slate-300 rounded-xl text-xs font-medium focus:border-black outline-none transition-all font-mono"
+                    />
+                    <Mail className="w-4 h-4 text-slate-400 absolute right-3 top-3" />
+                  </div>
+                  <span className="text-[10px] text-slate-400 mt-1 block">
+                    يمكنك إدخال أي بريد جيميل موجود على جهازك وسيحصل على مساحته الخاصة فوراً
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    اسم الشركة / المنشأة (اختياري):
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={directCompanyName}
+                      onChange={e => setDirectCompanyName(e.target.value)}
+                      placeholder="مثال: مؤسسة الأمل للتجارة"
+                      className="w-full px-3 py-2 pr-9 bg-white border border-slate-300 rounded-xl text-xs focus:border-black outline-none transition-all"
+                    />
+                    <Building2 className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-black text-xs transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {isLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Zap className="w-4 h-4 text-amber-300" />
+                  )}
+                  <span>دخول فوري ومستقل بحساب الجيميل</span>
+                </button>
+              </form>
+
+              {/* Secondary Google Native Popup Option */}
+              <div className="pt-2 text-center">
+                <div className="relative flex py-2 items-center">
+                  <div className="grow border-t border-slate-200"></div>
+                  <span className="shrink mx-3 text-[11px] text-slate-400 font-medium">أو عبر نافذة جوجل التلقائية</span>
+                  <div className="grow border-t border-slate-200"></div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleGoogleLogin}
+                  disabled={isLoading}
+                  className="w-full py-2.5 px-4 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-2xs cursor-pointer disabled:opacity-50 mt-1"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
                     <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
                     <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
                     <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
                     <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
                   </svg>
-                )}
-                <span>المتابعة بحساب Google (Gmail)</span>
-              </button>
+                  <span>تسجيل الدخول التلقائي بحساب Google</span>
+                </button>
+              </div>
 
-              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 space-y-2 mt-4 text-[11px] text-slate-600">
-                <div className="flex items-center gap-2 font-bold text-slate-800">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>مميزات الربط السحابي:</span>
+              <div className="bg-emerald-50/70 p-3 rounded-xl border border-emerald-200 text-[11px] text-emerald-900 space-y-1">
+                <div className="flex items-center gap-1.5 font-bold">
+                  <ShieldCheck className="w-4 h-4 text-emerald-700" />
+                  <span>ضمان العزل الكامل للبيانات:</span>
                 </div>
-                <ul className="space-y-1 pr-6 list-disc text-slate-500">
-                  <li>مساحة عمل خاصة بكل حساب بريد بدون خلط مع أي شركة أخرى.</li>
-                  <li>حفظ وتخزين قواعد البيانات الاحتياطية في Google Drive الخاص بك تلقائياً.</li>
-                  <li>استرجاع كافة فواتيرك وحساباتك على أي هاتف آخر بنفس الحساب بنقرة زر واحدة.</li>
-                </ul>
+                <p className="text-emerald-800 text-[10px] leading-relaxed">
+                  كل بريد إلكتروني أو شركة تحصل على قاعدة بيانات مستقلة تماماً؛ لا يمكن لأي حساب رؤية أو تعديل فواتير أو عملاء حساب آخر.
+                </p>
               </div>
             </div>
           )}

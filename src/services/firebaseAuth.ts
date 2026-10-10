@@ -29,6 +29,7 @@ export const AUTH_USER_KEY = 'hesabaty_active_user';
 export interface AuthSession {
   user: AppUser;
   isGoogle: boolean;
+  isGoogleLinked?: boolean;
   googleEmail?: string;
   googlePhoto?: string;
   token?: string;

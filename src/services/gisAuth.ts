@@ -1,7 +1,7 @@
 import firebaseConfig from '../../firebase-applet-config.json';
 import { User as AppUser } from '../types/accounting';
 import { AuthSession, setGoogleAccessToken, AUTH_USER_KEY } from './firebaseAuth';
-import { registerCompany, setActiveTenantId } from './tenantService';
+import { registerCompany, setActiveTenantId, getActiveTenantId, updateCompany } from './tenantService';
 
 declare global {
   interface Window {
@@ -181,7 +181,98 @@ export async function signInWithGoogleIdentity(): Promise<AuthSession> {
         }
       });
 
-      client.requestAccessToken();
+      // Force account selector so the user can select ANY Gmail on their device
+      client.requestAccessToken({ prompt: 'select_account' });
+    } catch (e: any) {
+      reject(e);
+    }
+  });
+}
+
+/**
+ * Connects / Authorizes Google Drive for the current user and company
+ * WITHOUT resetting the company or switching tenants!
+ * Allows user to pick ANY Google account on their device.
+ */
+export async function connectGoogleDriveAccount(): Promise<{ token: string; email?: string; name?: string }> {
+  await loadGoogleIdentityScript();
+
+  if (!window.google?.accounts?.oauth2) {
+    throw new Error('تعذر تحميل واجهة تسجيل الدخول من Google');
+  }
+
+  const clientId = firebaseConfig.oAuthClientId;
+  if (!clientId) {
+    throw new Error('معرف OAuth Client ID غير متوفر في إعدادات النظام');
+  }
+
+  return new Promise<{ token: string; email?: string; name?: string }>((resolve, reject) => {
+    try {
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: SCOPES,
+        callback: async (tokenResponse: any) => {
+          if (tokenResponse.error) {
+            console.error('Google token error:', tokenResponse);
+            return reject(new Error(tokenResponse.error_description || tokenResponse.error || 'فشل الاتصال بحساب Google'));
+          }
+
+          const accessToken = tokenResponse.access_token;
+          if (!accessToken) {
+            return reject(new Error('لم يتم استلام رمز التحقق من Google'));
+          }
+
+          setGoogleAccessToken(accessToken);
+
+          let email: string | undefined;
+          let name: string | undefined;
+          let picture: string | undefined;
+
+          try {
+            const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+              headers: { Authorization: `Bearer ${accessToken}` }
+            });
+            if (userInfoRes.ok) {
+              const info = await userInfoRes.json();
+              email = info.email;
+              name = info.name;
+              picture = info.picture;
+            }
+          } catch (err) {
+            console.warn('Could not fetch user profile details:', err);
+          }
+
+          // Link to existing session without touching tenant isolation
+          const currentRaw = localStorage.getItem(AUTH_USER_KEY);
+          if (currentRaw) {
+            try {
+              const currentSession: AuthSession = JSON.parse(currentRaw);
+              currentSession.token = accessToken;
+              if (email) currentSession.googleEmail = email;
+              if (picture) currentSession.googlePhoto = picture;
+              currentSession.isGoogleLinked = true;
+              localStorage.setItem(AUTH_USER_KEY, JSON.stringify(currentSession));
+            } catch (e) {}
+          }
+
+          // Link Google email to active company
+          const activeTenantId = getActiveTenantId();
+          if (activeTenantId && email) {
+            updateCompany(activeTenantId, { googleEmail: email });
+          }
+
+          resolve({ token: accessToken, email, name });
+        },
+        error_callback: (err: any) => {
+          if (err?.type === 'popup_closed' || err?.type === 'popup_blocked_by_browser') {
+            reject(new Error('popup_closed'));
+            return;
+          }
+          reject(new Error(err?.message || 'تعذر استكمال الاتصال بحساب Google'));
+        }
+      });
+
+      client.requestAccessToken({ prompt: 'select_account' });
     } catch (e: any) {
       reject(e);
     }
