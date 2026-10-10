@@ -16,8 +16,7 @@ import {
   ChevronDown,
   Mail,
   Zap,
-  Layers,
-  Sparkles
+  Layers
 } from 'lucide-react';
 import { User as AppUser, AppSettings, AccountingDB } from '../types/accounting';
 import { signInManual, AuthSession } from '../services/firebaseAuth';
@@ -640,13 +639,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       required
                       value={quickEmailOrUser}
                       onChange={e => setQuickEmailOrUser(e.target.value)}
-                      placeholder="mohamednazih188@gmail.com أو أي اسم"
+                      placeholder="اسم المستخدم أو البريد الإلكتروني"
                       className="w-full px-3 py-2.5 pr-9 bg-white border border-slate-300 rounded-xl text-xs font-bold focus:border-black outline-none transition-all font-mono"
                     />
                     <Mail className="w-4 h-4 text-slate-400 absolute right-3 top-3" />
                   </div>
                   <span className="text-[10px] text-slate-500 mt-1 block">
-                    يمكنك كتابة بريدك الإلكتروني (مثل الجيميل الخاص بك) وسينشئ النظام لك مساحة محاسبية معزولة فوراً
+                    يمكنك كتابة اسم المستخدم أو البريد الإلكتروني وسينشئ النظام لك مساحة محاسبية معزولة فوراً
                   </span>
                 </div>
 
