@@ -84,8 +84,9 @@ export async function downloadElementAsPdf(
       const contentWidth = pageWidth - margin * 2;
       const contentHeight = (canvas.height * contentWidth) / canvas.width;
 
-      if (contentHeight <= pageHeight - margin * 2) {
-        pdf.addImage(imgData, 'JPEG', margin, margin, contentWidth, contentHeight);
+      if (contentHeight <= (pageHeight - margin * 2) * 1.1) {
+        const fitHeight = Math.min(contentHeight, pageHeight - margin * 2);
+        pdf.addImage(imgData, 'JPEG', margin, margin, contentWidth, fitHeight);
       } else {
         let heightLeft = contentHeight;
         let position = margin;
@@ -115,9 +116,10 @@ export async function downloadElementAsPdf(
     const contentWidth = pageWidth - margin * 2;
     const contentHeight = (canvas.height * contentWidth) / canvas.width;
 
-    if (contentHeight <= pageHeight - margin * 2) {
+    if (contentHeight <= (pageHeight - margin * 2) * 1.1) {
       // Single Page Fit
-      pdf.addImage(imgData, 'JPEG', margin, margin, contentWidth, contentHeight);
+      const fitHeight = Math.min(contentHeight, pageHeight - margin * 2);
+      pdf.addImage(imgData, 'JPEG', margin, margin, contentWidth, fitHeight);
     } else {
       // Multi-Page Slicing
       let heightLeft = contentHeight;

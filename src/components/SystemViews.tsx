@@ -442,22 +442,22 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Google Drive Cloud Card */}
-            <div className="md:col-span-3 bg-gradient-to-r from-blue-900 to-slate-900 text-white p-6 rounded-3xl shadow-lg border border-blue-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            {/* Backup & Data Protection Center Card */}
+            <div className="md:col-span-3 bg-gradient-to-r from-slate-900 via-slate-800 to-emerald-950 text-white p-6 rounded-3xl shadow-lg border border-emerald-800/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
-                  <div className="p-2 bg-blue-600 rounded-xl">
-                    <Cloud className="w-6 h-6 text-white" />
+                  <div className="p-2 bg-emerald-600 rounded-xl">
+                    <ShieldCheck className="w-6 h-6 text-white" />
                   </div>
                   <h3 className="text-base font-black text-white">
-                    النسخ الاحتياطي السحابي عبر Google Drive (المزامنة الشاملة)
+                    مركز النسخ الاحتياطي وحماية البيانات المتقدم
                   </h3>
-                  <span className="bg-blue-500/30 text-blue-200 border border-blue-400/30 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                    مزامنة بين الهواتف
+                  <span className="bg-emerald-500/30 text-emerald-200 border border-emerald-400/30 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                    حماية تامة 100%
                   </span>
                 </div>
                 <p className="text-xs text-slate-300 leading-relaxed max-w-2xl">
-                  اربط حساب Google (الجيميل) لحفظ وتخزين قواعد البيانات السحابية واسترجاعها فوراً على أي هاتف أو جهاز كمبيوتر آخر بمجرد تسجيل الدخول بنفس الجيميل!
+                  تخزين واسترجاع قواعد البيانات ونقاط الاسترجاع بنقرة واحدة، وتنزيل نسخ مشفرة كاملة لأي هاتف أو جهاز كمبيوتر لحماية كافة معاملاتك المحاسبية.
                 </p>
               </div>
 
@@ -467,8 +467,8 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   onClick={onOpenGoogleDriveBackup}
                   className="px-5 py-3 bg-white hover:bg-slate-100 text-slate-950 font-bold text-xs rounded-2xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
                 >
-                  <Cloud className="w-4 h-4 text-blue-600" />
-                  <span>فتح مركز Google Drive السحابي</span>
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                  <span>فتح مركز النسخ الاحتياطي</span>
                 </button>
               )}
             </div>

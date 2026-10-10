@@ -116,15 +116,15 @@ export const Header: React.FC<HeaderProps> = ({
           {/* PWA Mobile Install Button */}
           <PWAInstallButton />
 
-          {/* Google Drive Backup Button */}
+          {/* Backup & Data Protection Button */}
           {onOpenDriveBackup && (
             <button
               onClick={onOpenDriveBackup}
-              className="p-2 text-blue-700 hover:text-blue-900 hover:bg-blue-50 rounded-lg transition-colors border border-blue-200 cursor-pointer flex items-center gap-1 text-xs font-bold"
-              title="النسخ الاحتياطي السحابي عبر Google Drive"
+              className="p-2 text-emerald-800 hover:text-emerald-950 hover:bg-emerald-50 rounded-lg transition-colors border border-emerald-300 cursor-pointer flex items-center gap-1.5 text-xs font-bold"
+              title="مركز النسخ الاحتياطي وحماية البيانات"
             >
-              <Cloud className="w-4 h-4 text-blue-600" />
-              <span className="hidden sm:inline text-[11px]">Drive</span>
+              <Cloud className="w-4 h-4 text-emerald-600" />
+              <span className="hidden sm:inline text-[11px]">النسخ الاحتياطي</span>
             </button>
           )}
 
@@ -249,8 +249,8 @@ export const Header: React.FC<HeaderProps> = ({
                     onClick={onOpenDriveBackup}
                     className="w-full px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 hover:text-black flex items-center gap-2 text-right cursor-pointer"
                   >
-                    <Cloud className="w-4 h-4 text-blue-600" />
-                    <span>مزامنة Google Drive</span>
+                    <Cloud className="w-4 h-4 text-emerald-600" />
+                    <span>مركز النسخ الاحتياطي وحماية البيانات</span>
                   </button>
                 )}
 

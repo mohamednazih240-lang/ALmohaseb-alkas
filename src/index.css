@@ -22,11 +22,11 @@
 }
 
 /* ----------------------------------------------------
-   1. تنسيقات الفاتورة وإعدادات الورق (A4 / A5 / الحراري)
+   1. تنسيقات الفاتورة الأساسية وإعدادات الورق (A4 / A5 / الحراري)
 ---------------------------------------------------- */
 .invoice-container { 
   background: #fff; 
-  margin: 10px auto; 
+  margin: 0 auto; 
   padding: 8mm; 
   border: 2px solid #000; 
   display: flex;
@@ -36,61 +36,51 @@
   box-sizing: border-box;
 }
 
-/* --- مقاس A4 --- */
-[data-paper-size="A4"] .invoice-container,
-.invoice-wrapper-A4 .invoice-container {
-  width: 210mm;
-  min-height: 297mm;
-}
-
-/* --- مقاس A5 --- */
-[data-paper-size="A5"] .invoice-container,
-.invoice-wrapper-A5 .invoice-container {
-  width: 148mm;
-  min-height: 210mm;
-  padding: 5mm;
-  font-size: 0.9em;
-}
-
-/* --- المقاس الحراري (Thermal 80mm) --- */
-[data-paper-size="thermal"] .invoice-container,
-.invoice-wrapper-thermal .invoice-container {
-  width: 76mm;
-  min-height: auto;
-  padding: 3mm;
-  border: none;
-  box-shadow: none;
-}
-[data-paper-size="thermal"] .invoice-header,
-.invoice-wrapper-thermal .invoice-header {
-  flex-direction: column;
-  text-align: center;
-  gap: 4px;
-}
-[data-paper-size="thermal"] .header-right,
-[data-paper-size="thermal"] .header-left,
-.invoice-wrapper-thermal .header-right,
-.invoice-wrapper-thermal .header-left {
-  text-align: center !important;
-  justify-content: center !important;
-}
-[data-paper-size="thermal"] .info-box,
-.invoice-wrapper-thermal .info-box {
-  flex-direction: column;
-  gap: 4px;
-  text-align: center;
-}
-[data-paper-size="thermal"] .info-item,
-.invoice-wrapper-thermal .info-item {
-  text-align: center !important;
-}
-[data-paper-size="thermal"] .bottom-section,
-.invoice-wrapper-thermal .bottom-section {
+/* --- مقاس A4 في المعاينة على الشاشة --- */
+.invoice-wrapper-A4 {
+  width: 100%;
+  max-width: 210mm;
+  display: flex;
   justify-content: center;
 }
-[data-paper-size="thermal"] .summary-vertical-list,
-.invoice-wrapper-thermal .summary-vertical-list {
+.invoice-wrapper-A4 .invoice-container {
+  width: 210mm;
+  max-width: 100%;
+  min-height: 297mm;
+  box-sizing: border-box;
+}
+
+/* --- مقاس A5 في المعاينة على الشاشة --- */
+.invoice-wrapper-A5 {
   width: 100%;
+  max-width: 148mm;
+  display: flex;
+  justify-content: center;
+}
+.invoice-wrapper-A5 .invoice-container {
+  width: 148mm;
+  max-width: 100%;
+  min-height: 210mm;
+  padding: 5mm;
+  font-size: 0.88em;
+  box-sizing: border-box;
+}
+
+/* --- المقاس الحراري في المعاينة على الشاشة --- */
+.invoice-wrapper-thermal {
+  width: 100%;
+  max-width: 76mm;
+  display: flex;
+  justify-content: center;
+}
+.invoice-wrapper-thermal .invoice-container {
+  width: 76mm;
+  max-width: 100%;
+  min-height: auto;
+  padding: 3mm;
+  border: 1px dashed #000;
+  box-shadow: none;
+  box-sizing: border-box;
 }
 
 /* عناصر الفاتورة الداخلية */
@@ -100,7 +90,7 @@
   align-items: center; 
   border-bottom: 2px solid #000; 
   padding-bottom: 6px; 
-  margin-bottom: 8px;
+  margin-bottom: 8px; 
   width: 100%;
 }
 .invoice-header.is-empty { display: none !important; }
@@ -133,6 +123,7 @@
   line-height: 1.4;
   width: 100%;
   background-color: #fafafa;
+  box-sizing: border-box;
 }
 .info-item p { margin: 1px 0; }
 
@@ -169,56 +160,149 @@
 
 .hide-row { display: none !important; }
 
+/* قواعد الحجم الحراري على الشاشة والطباعة */
+.invoice-wrapper-thermal .invoice-header,
+[data-paper-size="thermal"] .invoice-header {
+  flex-direction: column;
+  text-align: center;
+  gap: 4px;
+}
+.invoice-wrapper-thermal .header-right,
+.invoice-wrapper-thermal .header-left,
+[data-paper-size="thermal"] .header-right,
+[data-paper-size="thermal"] .header-left {
+  text-align: center !important;
+  justify-content: center !important;
+}
+.invoice-wrapper-thermal .info-box,
+[data-paper-size="thermal"] .info-box {
+  flex-direction: column;
+  gap: 4px;
+  text-align: center;
+}
+.invoice-wrapper-thermal .info-item,
+[data-paper-size="thermal"] .info-item {
+  text-align: center !important;
+}
+.invoice-wrapper-thermal .bottom-section,
+[data-paper-size="thermal"] .bottom-section {
+  justify-content: center;
+}
+.invoice-wrapper-thermal .summary-vertical-list,
+[data-paper-size="thermal"] .summary-vertical-list {
+  width: 100%;
+}
+
 /* ----------------------------------------------------
-   3. إعدادات الطباعة الرسمية
+   2. إعدادات الطباعة الرسمية الخالية من أي انكسار أو قص للهوامش
 ---------------------------------------------------- */
 @media print {
-  body { 
-    background: none !important; 
+  html, body { 
+    background: #ffffff !important; 
     padding: 0 !important; 
     margin: 0 !important; 
     color: #000000 !important;
-  }
-  
-  @page {
-    size: auto;
-    margin: 0;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
   }
 
+  /* إخفاء عناصر واجهة التطبيق والتحكم */
   .no-print {
     display: none !important;
   }
 
-  .print-only {
+  /* إزالة أي قيود نافذة أو خلفية داكنة أثناء الطباعة */
+  .invoice-modal-overlay {
+    position: static !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    display: block !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  .invoice-modal-card {
+    position: static !important;
+    max-width: none !important;
+    max-height: none !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .invoice-preview-viewport {
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+    overflow: visible !important;
+    width: 100% !important;
     display: block !important;
   }
 
-  .invoice-container { 
-    box-shadow: none !important;
-    margin: 0 auto !important;
-    page-break-after: avoid;
-    page-break-inside: avoid;
-  }
-
-  body[data-paper-size="A4"] .invoice-container {
-    width: 100vw !important;
-    height: 98vh !important;
-    border: 2px solid #000 !important;
-  }
-
-  body[data-paper-size="A5"] .invoice-container {
-    width: 100vw !important;
-    height: 98vh !important;
-    border: 2px solid #000 !important;
-  }
-
-  body[data-paper-size="thermal"] .invoice-container {
+  #invoice-printable-content {
     width: 100% !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    display: block !important;
+  }
+
+  /* الحاوية الأساسية للفاتورة: منع التقسيم نهائياً (صفحة واحدة 100%) */
+  .invoice-container { 
+    box-sizing: border-box !important;
+    box-shadow: none !important;
+    border: 2px solid #000 !important;
+    margin: 0 auto !important;
+    page-break-after: avoid !important;
+    page-break-inside: avoid !important;
+    break-after: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* مقاس A4 في الطباعة: أبعاد محسوبة بدقة لتناسب صفحة واحدة بكامل إطاراتها وبدون أي كسر */
+  body[data-paper-size="A4"] .invoice-container {
+    width: 198mm !important;
+    max-width: 198mm !important;
+    height: 282mm !important;
+    max-height: 284mm !important;
+    padding: 7mm !important;
+    margin: 0 auto !important;
+    font-size: 1rem !important;
+  }
+
+  /* مقاس A5 في الطباعة: أبعاد محسوبة بدقة لتناسب صفحة A5 واحدة بكامل إطاراتها وبدون أي كسر أو قص جانبي */
+  body[data-paper-size="A5"] .invoice-container {
+    width: 138mm !important;
+    max-width: 138mm !important;
+    height: 196mm !important;
+    max-height: 198mm !important;
+    padding: 4mm !important;
+    margin: 0 auto !important;
+    font-size: 0.82rem !important;
+  }
+
+  /* المقاس الحراري 80mm في الطباعة */
+  body[data-paper-size="thermal"] .invoice-container {
+    width: 74mm !important;
+    max-width: 74mm !important;
     height: auto !important;
     border: none !important;
+    padding: 2mm !important;
+    margin: 0 auto !important;
   }
 
   tr, .print-card {
     page-break-inside: avoid !important;
+    break-inside: avoid !important;
   }
 }
