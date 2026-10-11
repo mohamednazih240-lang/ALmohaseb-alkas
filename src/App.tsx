@@ -3,7 +3,8 @@ import {
   loadDatabase,
   saveDatabase,
   loadTenantDatabase,
-  calculateFinancialSummary
+  calculateFinancialSummary,
+  loadFromIndexedDB
 } from './services/accountingStorage';
 import {
   AccountingDB,
@@ -26,6 +27,8 @@ import { SystemViews } from './components/SystemViews';
 import { InvoicePrintModal } from './components/InvoicePrintModal';
 import { QuickSearchModal } from './components/QuickSearchModal';
 import { ProductModal } from './components/ProductModal';
+import { DailyClosingView } from './components/DailyClosingView';
+import { ProfitsView } from './components/ProfitsView';
 import { YearEndClosingView } from './components/YearEndClosingView';
 import { BankReconciliationView } from './components/BankReconciliationView';
 import { CostCentersView } from './components/CostCentersView';
@@ -38,11 +41,19 @@ import { GoogleDriveBackupModal } from './components/GoogleDriveBackupModal';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { getStoredAuthSession, logoutUser, AuthSession } from './services/firebaseAuth';
-import { loadFromIndexedDB } from './services/accountingStorage';
 import { getActiveTenantId } from './services/tenantService';
+import { mergeCatalogIntoDb } from './data/defaultCatalog1001';
 
 export default function App() {
-  const [db, setDb] = useState<AccountingDB>(() => loadDatabase());
+  const [db, setDb] = useState<AccountingDB>(() => {
+    const loaded = loadDatabase();
+    if (!loaded.products || loaded.products.length < 1000) {
+      const merged = mergeCatalogIntoDb(loaded);
+      saveDatabase(merged.db);
+      return merged.db;
+    }
+    return loaded;
+  });
   const [currentPage, setCurrentPage] = useState<PageId>('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
@@ -75,7 +86,13 @@ export default function App() {
   useEffect(() => {
     loadFromIndexedDB().then(idbData => {
       if (idbData && idbData.invoices && idbData.settings) {
-        setDb(idbData);
+        if (!idbData.products || idbData.products.length < 1000) {
+          const merged = mergeCatalogIntoDb(idbData);
+          setDb(merged.db);
+          saveDatabase(merged.db);
+        } else {
+          setDb(idbData);
+        }
       }
     });
   }, []);
@@ -92,6 +109,7 @@ export default function App() {
     'warehouses', 'stock', 'inventory', 'prices', 'treasury',
     'bank_reconciliation', 'cost_centers', 'currencies', 'fixed_assets',
     'expenses', 'revenues', 'accounts', 'journals', 'ledger',
+    'daily_closing', 'profits',
     'reports', 'closing', 'users', 'audit', 'periods', 'backup', 'settings'
   ];
 
@@ -218,6 +236,8 @@ export default function App() {
       case 'accounts': return 'دليل الحسابات (شجرة الحسابات)';
       case 'journals': return 'دفتر القيود اليومية المزدوجة';
       case 'ledger': return 'دفتر الأستاذ وميزان المراجعة';
+      case 'daily_closing': return 'تقفيل اليومية والورديات وحساب أرباح الشفت';
+      case 'profits': return 'تحليل أرباح الفواتير والأصناف';
       case 'reports': return 'التقارير المالية والأرباح';
       case 'closing': return 'إقفال الفترات والترحيل السنوي للأرصدة';
       case 'users': return 'المستخدمون والصلاحيات';
@@ -343,6 +363,24 @@ export default function App() {
             <FixedAssetsView
               db={db}
               onUpdateDb={handleUpdateDb}
+            />
+          )}
+
+          {currentPage === 'daily_closing' && (
+            <DailyClosingView
+              db={db}
+              onUpdateDb={handleUpdateDb}
+            />
+          )}
+
+          {currentPage === 'profits' && (
+            <ProfitsView
+              db={db}
+              onUpdateDb={handleUpdateDb}
+              onPreviewInvoice={setPreviewInvoice}
+              onEditInvoice={(inv) => {
+                navigateToPage('sales');
+              }}
             />
           )}
 

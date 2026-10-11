@@ -210,6 +210,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   // Lookup modal states
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [lookupSearch, setLookupSearch] = useState<string>('');
+  const [lookupPageLimit, setLookupPageLimit] = useState<number>(40);
+
+  // Inline Quick Product Search above items table
+  const [inlineProductSearch, setInlineProductSearch] = useState<string>('');
+  const [showInlineDropdown, setShowInlineDropdown] = useState<boolean>(false);
 
   // Modify modal states
   const [modifyIndex, setModifyIndex] = useState<number>(-1);
@@ -930,15 +935,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             </div>
           </div>
 
-          {/* Top Actions Grid (2 Buttons) */}
-          <div className="grid grid-cols-2 gap-1">
+          {/* Top Actions & Dynamic Product Search Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
             <button
               type="button"
               onClick={() => setShowLookupModal(true)}
               className="py-1.5 px-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-colors shadow-2xs"
             >
               <Boxes className="w-3.5 h-3.5" />
-              <span>دليل الأصناف (إضافة سريعة)</span>
+              <span>دليل الأصناف الكلي (1001 صنف)</span>
             </button>
             <button
               type="button"
@@ -948,6 +953,102 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               <Sliders className="w-3.5 h-3.5" />
               <span>الخصم، الضريبة والدفع</span>
             </button>
+          </div>
+
+          {/* Dynamic Instant Product Search & Quick Add Field */}
+          <div className="relative">
+            <div className="flex items-center gap-1 bg-white border border-blue-400 rounded p-1 shadow-2xs">
+              <Search className="w-3.5 h-3.5 text-blue-600 shrink-0 mr-1" />
+              <input
+                type="text"
+                placeholder="بحث ديناميكي لإضافة صنف فوراً بالاسم أو الكود (أكثر من 1000 صنف)..."
+                value={inlineProductSearch}
+                onFocus={() => setShowInlineDropdown(true)}
+                onChange={e => {
+                  setInlineProductSearch(e.target.value);
+                  setShowInlineDropdown(true);
+                }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const trimmed = inlineProductSearch.trim().toLowerCase();
+                    const match = db.products.find(p =>
+                      p.name.toLowerCase().includes(trimmed) ||
+                      p.code.toLowerCase() === trimmed ||
+                      (p.barcode && p.barcode === trimmed)
+                    );
+                    if (match) {
+                      quickAddItem(match);
+                      setInlineProductSearch('');
+                      setShowInlineDropdown(false);
+                    }
+                  }
+                }}
+                className="flex-1 text-[10px] outline-none font-bold bg-transparent"
+              />
+              {inlineProductSearch && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInlineProductSearch('');
+                    setShowInlineDropdown(false);
+                  }}
+                  className="p-0.5 text-slate-400 hover:text-slate-700"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            {/* Instant Product Search Suggestions Dropdown */}
+            {showInlineDropdown && inlineProductSearch.trim().length > 0 && (
+              <div className="absolute top-full right-0 left-0 bg-white border border-blue-500 rounded-lg max-h-56 overflow-y-auto z-50 shadow-xl mt-0.5 divide-y divide-slate-100">
+                {(() => {
+                  const s = inlineProductSearch.trim().toLowerCase();
+                  const matches = db.products.filter(p =>
+                    p.name.toLowerCase().includes(s) ||
+                    p.code.toLowerCase().includes(s) ||
+                    (p.barcode && p.barcode.toLowerCase().includes(s))
+                  ).slice(0, 10);
+
+                  if (matches.length === 0) {
+                    return (
+                      <div className="p-2.5 text-center text-[9px] text-slate-500">
+                        لا توجد نتائج مطابقة لـ "{inlineProductSearch}"
+                      </div>
+                    );
+                  }
+
+                  return matches.map(p => (
+                    <div
+                      key={p.id}
+                      onClick={() => {
+                        quickAddItem(p);
+                        setInlineProductSearch('');
+                        setShowInlineDropdown(false);
+                      }}
+                      className="p-2 hover:bg-blue-50 cursor-pointer flex items-center justify-between text-[9px] transition-colors"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="font-bold text-slate-900 truncate">
+                          {p.name}
+                        </div>
+                        <div className="text-[8px] text-slate-500 flex items-center gap-2 mt-0.5 font-mono">
+                          <span>كود: {p.code}</span>
+                          <span>المتاح: {p.currentQty}</span>
+                        </div>
+                      </div>
+                      <div className="text-left shrink-0 mr-2">
+                        <span className="font-bold text-emerald-700 font-mono text-[10px]">
+                          {mode === 'purchase' ? p.buyPrice.toFixed(2) : (mode === 'wholesale' ? p.wholesalePrice.toFixed(2) : p.sellPrice.toFixed(2))}
+                        </span>
+                        <span className="block text-[7.5px] text-blue-600 font-bold">+ إضافة</span>
+                      </div>
+                    </div>
+                  ));
+                })()}
+              </div>
+            )}
           </div>
 
           {/* Invoice Items Table */}
@@ -1343,57 +1444,103 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   <Search className="w-3 h-3 text-slate-400" />
                   <input
                     type="text"
-                    placeholder="بحث بالاسم أو الكود..."
+                    placeholder="بحث ديناميكي بالاسم، الكود، أو الباركود..."
                     value={lookupSearch}
-                    onChange={e => setLookupSearch(e.target.value)}
+                    onChange={e => {
+                      setLookupSearch(e.target.value);
+                      setLookupPageLimit(40);
+                    }}
                     className="flex-1 text-[9.5px] border-0 focus:outline-hidden"
                   />
+                  {lookupSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setLookupSearch('')}
+                      className="p-0.5 text-slate-400 hover:text-slate-700"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex-1 overflow-y-auto flex flex-col gap-1 p-0.5">
-                  {db.products
-                    .filter(p => selectedCategory === 'all' || p.category === selectedCategory)
-                    .filter(p => !lookupSearch || p.name.toLowerCase().includes(lookupSearch.toLowerCase()) || p.code.toLowerCase().includes(lookupSearch.toLowerCase()))
-                    .map(item => {
-                      const isLow = item.currentQty <= item.minStock;
-                      return (
-                        <div
-                          key={item.id}
-                          onClick={() => quickAddItem(item)}
-                          className={`bg-white border rounded p-1.5 flex flex-col gap-0.5 cursor-pointer shadow-2xs hover:border-blue-500 hover:bg-blue-50/40 transition-colors ${
-                            isLow ? 'border-rose-400 bg-rose-50/30' : 'border-slate-300'
-                          }`}
-                        >
-                          <div className="flex justify-between items-center text-[9.5px] font-bold text-slate-900 border-b border-slate-100 pb-0.5">
-                            <span>
-                              {item.name} <small className="font-normal text-slate-500 text-[8px]">({item.category || 'عامة'})</small>
-                            </span>
-                            <span className="text-sky-600 font-mono text-[8.5px]">{item.code}</span>
-                          </div>
+                  {(() => {
+                    const filtered = db.products
+                      .filter(p => selectedCategory === 'all' || p.category === selectedCategory)
+                      .filter(p => !lookupSearch || p.name.toLowerCase().includes(lookupSearch.toLowerCase()) || p.code.toLowerCase().includes(lookupSearch.toLowerCase()) || (p.barcode && p.barcode.toLowerCase().includes(lookupSearch.toLowerCase())));
 
-                          <div className="grid grid-cols-4 gap-1 text-[8px] text-center pt-0.5">
-                            <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
-                              <span className="block text-[6.5px] text-slate-500">المتاح</span>
-                              <strong className={`font-mono text-[9px] ${item.currentQty <= 0 ? 'text-rose-600' : 'text-blue-600'}`}>
-                                {item.currentQty}
-                              </strong>
-                            </div>
-                            <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
-                              <span className="block text-[6.5px] text-slate-500">نقدي</span>
-                              <strong className="font-mono text-emerald-600">{item.sellPrice.toFixed(2)}</strong>
-                            </div>
-                            <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
-                              <span className="block text-[6.5px] text-slate-500">جملة</span>
-                              <strong className="font-mono text-amber-600">{item.wholesalePrice.toFixed(2)}</strong>
-                            </div>
-                            <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
-                              <span className="block text-[6.5px] text-slate-500">شراء</span>
-                              <strong className="font-mono text-rose-600">{item.buyPrice.toFixed(2)}</strong>
-                            </div>
-                          </div>
+                    const visible = filtered.slice(0, lookupPageLimit);
+
+                    if (visible.length === 0) {
+                      return (
+                        <div className="p-6 text-center text-slate-400 text-[10px]">
+                          لا توجد أصناف مطابقة للبحث
                         </div>
                       );
-                    })}
+                    }
+
+                    return (
+                      <>
+                        <div className="text-[8px] text-slate-500 font-bold px-1 flex justify-between items-center">
+                          <span>إجمالي النتائج: {filtered.length} صنف</span>
+                          {filtered.length > lookupPageLimit && (
+                            <span>معروض {visible.length} من {filtered.length}</span>
+                          )}
+                        </div>
+
+                        {visible.map(item => {
+                          const isLow = item.currentQty <= item.minStock;
+                          return (
+                            <div
+                              key={item.id}
+                              onClick={() => quickAddItem(item)}
+                              className={`bg-white border rounded p-1.5 flex flex-col gap-0.5 cursor-pointer shadow-2xs hover:border-blue-500 hover:bg-blue-50/40 transition-colors ${
+                                isLow ? 'border-rose-400 bg-rose-50/30' : 'border-slate-300'
+                              }`}
+                            >
+                              <div className="flex justify-between items-center text-[9.5px] font-bold text-slate-900 border-b border-slate-100 pb-0.5">
+                                <span>
+                                  {item.name} <small className="font-normal text-slate-500 text-[8px]">({item.category || 'عامة'})</small>
+                                </span>
+                                <span className="text-sky-600 font-mono text-[8.5px]">{item.code}</span>
+                              </div>
+
+                              <div className="grid grid-cols-4 gap-1 text-[8px] text-center pt-0.5">
+                                <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
+                                  <span className="block text-[6.5px] text-slate-500">المتاح</span>
+                                  <strong className={`font-mono text-[9px] ${item.currentQty <= 0 ? 'text-rose-600' : 'text-blue-600'}`}>
+                                    {item.currentQty}
+                                  </strong>
+                                </div>
+                                <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
+                                  <span className="block text-[6.5px] text-slate-500">نقدي</span>
+                                  <strong className="font-mono text-emerald-600">{item.sellPrice.toFixed(2)}</strong>
+                                </div>
+                                <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
+                                  <span className="block text-[6.5px] text-slate-500">جملة</span>
+                                  <strong className="font-mono text-amber-600">{item.wholesalePrice.toFixed(2)}</strong>
+                                </div>
+                                <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
+                                  <span className="block text-[6.5px] text-slate-500">شراء</span>
+                                  <strong className="font-mono text-rose-600">{item.buyPrice.toFixed(2)}</strong>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {filtered.length > lookupPageLimit && (
+                          <button
+                            type="button"
+                            onClick={() => setLookupPageLimit(prev => prev + 50)}
+                            className="w-full py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-[9px] rounded border border-blue-200 my-1 transition-colors"
+                          >
+                            + عرض 50 صنفاً إضافياً (متبقي {filtered.length - visible.length} صنف)
+                          </button>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
             </div>

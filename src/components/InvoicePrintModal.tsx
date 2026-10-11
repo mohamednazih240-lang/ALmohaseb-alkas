@@ -221,7 +221,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             <div className="invoice-container">
               <div>
                 {/* 1. الترويسة الديناميكية */}
-                <div className="invoice-header" id="invoiceHeader">
+                <div className="header invoice-header" id="invoiceHeader">
                   <div className="header-right">
                     <h2 id="settingCompanyName">{settings.company || 'اسم المنشأة'}</h2>
                     <p id="settingCompanyAddress">{settings.address || 'المقر الرئيسي'}</p>
@@ -293,7 +293,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
 
                 {/* 3. جدول الأصناف (بدون أعمدة خصم أو ضريبة وبدون كسور للأرقام) */}
                 <div className="table-wrapper">
-                  <table className="invoice-table">
+                  <table className="items-table invoice-table">
                     <thead>
                       <tr>
                         <th style={{ width: '38%' }}>اسم الصنف</th>

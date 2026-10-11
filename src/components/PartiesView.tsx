@@ -14,7 +14,10 @@ import {
   CreditCard,
   Phone,
   MapPin,
-  AlertTriangle
+  AlertTriangle,
+  Filter,
+  ArrowUpDown,
+  CheckCircle2
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -45,6 +48,8 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 }) => {
   const isCustomer = type === 'customer';
   const [searchTerm, setSearchTerm] = useState('');
+  const [balanceFilter, setBalanceFilter] = useState<'all' | 'due' | 'settled'>('all');
+  const [sortBy, setSortBy] = useState<'name_asc' | 'balance_desc' | 'balance_asc'>('name_asc');
   const [showModal, setShowModal] = useState(false);
   const [editingParty, setEditingParty] = useState<Party | null>(null);
 
@@ -66,11 +71,31 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
   const partiesList = isCustomer ? db.customers : db.suppliers;
 
-  const filteredParties = partiesList.filter(p =>
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.phone?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.address?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredParties = partiesList.filter(p => {
+    const s = searchTerm.trim().toLowerCase();
+    const matchSearch = !s ||
+      p.name.toLowerCase().includes(s) ||
+      (p.phone && p.phone.toLowerCase().includes(s)) ||
+      (p.address && p.address.toLowerCase().includes(s)) ||
+      (p.taxNumber && p.taxNumber.toLowerCase().includes(s));
+
+    const bal = isCustomer ? calculateCustomerBalance(db, p.id) : calculateSupplierBalance(db, p.id);
+    let matchBalance = true;
+    if (balanceFilter === 'due') {
+      matchBalance = bal > 0;
+    } else if (balanceFilter === 'settled') {
+      matchBalance = bal <= 0;
+    }
+
+    return matchSearch && matchBalance;
+  }).sort((a, b) => {
+    if (sortBy === 'name_asc') return a.name.localeCompare(b.name, 'ar');
+    const balA = isCustomer ? calculateCustomerBalance(db, a.id) : calculateSupplierBalance(db, a.id);
+    const balB = isCustomer ? calculateCustomerBalance(db, b.id) : calculateSupplierBalance(db, b.id);
+    if (sortBy === 'balance_desc') return balB - balA;
+    if (sortBy === 'balance_asc') return balA - balB;
+    return 0;
+  });
 
   const totalBalance = partiesList.reduce((sum, p) => {
     const bal = isCustomer ? calculateCustomerBalance(db, p.id) : calculateSupplierBalance(db, p.id);
@@ -321,17 +346,75 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
         </div>
       </div>
 
-      {/* Search */}
-      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
-        <div className="relative max-w-sm">
+      {/* Dynamic Search & Filter Toolbar */}
+      <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+        {/* Search Input */}
+        <div className="relative flex-1 max-w-md">
           <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
           <input
             type="text"
-            placeholder={`بحث باسم ${isCustomer ? 'العميل' : 'المورد'} أو رقم الهاتف...`}
+            placeholder={`بحث ديناميكي باسم ${isCustomer ? 'العميل' : 'المورد'}، الهاتف، أو العنوان...`}
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className="w-full pr-9 pl-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium focus:outline-hidden focus:border-black"
+            className="w-full pr-9 pl-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-hidden focus:border-black focus:bg-white transition-all"
           />
+          {searchTerm && (
+            <button
+              type="button"
+              onClick={() => setSearchTerm('')}
+              className="absolute left-2.5 top-2.5 text-slate-400 hover:text-slate-700 p-0.5"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+
+        {/* Filters and Sorting */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Balance Filter */}
+          <div className="flex items-center bg-slate-100 p-1 rounded-xl text-xs font-bold">
+            <button
+              type="button"
+              onClick={() => setBalanceFilter('all')}
+              className={`px-3 py-1 rounded-lg transition-colors ${
+                balanceFilter === 'all' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              الكل ({partiesList.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setBalanceFilter('due')}
+              className={`px-3 py-1 rounded-lg transition-colors ${
+                balanceFilter === 'due' ? 'bg-white text-rose-700 shadow-xs' : 'text-slate-600 hover:text-rose-700'
+              }`}
+            >
+              {isCustomer ? 'عليهم مديونية' : 'مستحق له'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setBalanceFilter('settled')}
+              className={`px-3 py-1 rounded-lg transition-colors ${
+                balanceFilter === 'settled' ? 'bg-white text-emerald-700 shadow-xs' : 'text-slate-600 hover:text-emerald-700'
+              }`}
+            >
+              خالص / رصيد 0
+            </button>
+          </div>
+
+          {/* Sort Selector */}
+          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1.5 rounded-xl">
+            <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
+            <select
+              value={sortBy}
+              onChange={e => setSortBy(e.target.value as any)}
+              className="bg-transparent text-xs font-bold text-slate-700 outline-none cursor-pointer"
+            >
+              <option value="name_asc">الاسم (أ - ي)</option>
+              <option value="balance_desc">الأعلى رصيداً</option>
+              <option value="balance_asc">الأقل رصيداً</option>
+            </select>
+          </div>
         </div>
       </div>
 

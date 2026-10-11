@@ -58,6 +58,7 @@ export default defineConfig(() => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname || process.cwd(), '.'),
+        html2canvas: 'html2canvas-pro',
       },
     },
     server: {

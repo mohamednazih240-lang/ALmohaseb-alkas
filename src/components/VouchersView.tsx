@@ -4,8 +4,10 @@ import {
   CreditCard,
   Plus,
   Trash2,
+  Edit,
   Printer,
   Download,
+  FileSpreadsheet,
   Calendar,
   X,
   FileText
@@ -25,6 +27,8 @@ import {
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { VoucherPrintModal } from './VoucherPrintModal';
+import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
+import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 
 interface VouchersViewProps {
@@ -42,10 +46,15 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 }) => {
   const isReceipt = type === 'receipt';
   const [showModal, setShowModal] = useState(false);
+  const [editingVoucher, setEditingVoucher] = useState<Voucher | null>(null);
   const [printingVoucher, setPrintingVoucher] = useState<Voucher | null>(null);
+  const [batchPrintOpen, setBatchPrintOpen] = useState(false);
 
   // Hook for mobile back button: closes new voucher modal without jumping to dashboard
-  useModalBackHandler(showModal, () => setShowModal(false), 'new_voucher_modal');
+  useModalBackHandler(showModal, () => {
+    setShowModal(false);
+    setEditingVoucher(null);
+  }, 'new_voucher_modal');
 
   // Form states
   const [voucherDate, setVoucherDate] = useState(getTodayDate());
@@ -61,12 +70,23 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   const totalAmount = vouchersList.reduce((sum, v) => sum + v.amount, 0);
 
   const handleOpenNewModal = () => {
+    setEditingVoucher(null);
     setVoucherDate(getTodayDate());
     const defaultParty = isReceipt ? db.customers[0]?.id : db.suppliers[0]?.id;
     setPartyId(preselectedPartyId || defaultParty || '');
     setAmount(0);
     setPaymentMethod('نقدي');
     setDescription(isReceipt ? 'دفعة نقدية سداد حساب' : 'سداد دفعة للمورد');
+    setShowModal(true);
+  };
+
+  const handleOpenEditModal = (v: Voucher) => {
+    setEditingVoucher(v);
+    setVoucherDate(v.date);
+    setPartyId(v.partyId || '');
+    setAmount(v.amount);
+    setPaymentMethod(v.paymentMethod);
+    setDescription(v.description);
     setShowModal(true);
   };
 
@@ -78,6 +98,51 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     const list = isReceipt ? updated.customers : updated.suppliers;
     const party = list.find(p => p.id === partyId);
     const partyName = party ? party.name : (isReceipt ? 'عميل نقدي' : 'مورد عام');
+
+    if (editingVoucher) {
+      // Update existing voucher
+      const vIdx = updated.vouchers.findIndex(v => v.id === editingVoucher.id);
+      if (vIdx !== -1) {
+        updated.vouchers[vIdx] = {
+          ...editingVoucher,
+          date: voucherDate,
+          partyId: partyId || undefined,
+          partyName,
+          amount,
+          paymentMethod,
+          description
+        };
+
+        // Update corresponding treasury entry
+        const trIdx = updated.treasury.findIndex(t => t.sourceId === editingVoucher.id);
+        if (trIdx !== -1) {
+          updated.treasury[trIdx].amount = amount;
+          updated.treasury[trIdx].date = voucherDate;
+          updated.treasury[trIdx].method = paymentMethod;
+          updated.treasury[trIdx].description = `${isReceipt ? 'سند قبض' : 'سند صرف'} ${editingVoucher.number} - ${partyName}: ${description}`;
+        }
+
+        // Update journal entry
+        const jIdx = updated.journals.findIndex(j => j.sourceId === editingVoucher.id);
+        if (jIdx !== -1) {
+          const freshJournal = createVoucherJournal(updated, updated.vouchers[vIdx]);
+          freshJournal.id = updated.journals[jIdx].id;
+          freshJournal.number = updated.journals[jIdx].number;
+          updated.journals[jIdx] = freshJournal;
+        }
+
+        logAudit(
+          updated,
+          isReceipt ? 'تعديل سند قبض' : 'تعديل سند صرف',
+          `تعديل سند رقم ${editingVoucher.number} بقيمة ${formatMoney(amount, updated.settings.currency)}`
+        );
+
+        onUpdateDb(updated);
+        setShowModal(false);
+        setEditingVoucher(null);
+        return;
+      }
+    }
 
     const nextSettingKey = isReceipt ? 'nextReceipt' : 'nextPayment';
     const vNumber = isReceipt
@@ -128,6 +193,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
     onUpdateDb(updated);
     setShowModal(false);
+    setEditingVoucher(null);
   };
 
   const handleDeleteVoucher = (v: Voucher) => {
@@ -150,6 +216,60 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     onUpdateDb(updated);
   };
 
+  const handleBatchExportExcel = () => {
+    if (vouchersList.length === 0) return alert('لا توجد سندات للتصدير');
+    const headers = ['رقم السند', 'التاريخ', 'الطرف', 'طريقة السداد', 'البيان', 'المبلغ'];
+    const rows = vouchersList.map(v => [
+      v.number,
+      v.date,
+      v.partyName,
+      v.paymentMethod,
+      v.description,
+      v.amount
+    ]);
+    exportTableToCsv(`سندات_${isReceipt ? 'القبض' : 'الصرف'}_${Date.now()}.csv`, headers, rows);
+  };
+
+  const batchPrintBlocks: MovementPrintBlock[] = vouchersList.map(v => {
+    const voucherTitle = isReceipt ? 'سند قبض نقدية وشيكات' : 'سند صرف نقدية وشيكات';
+    const partyLabel = isReceipt ? 'استلمنا من السيد / السادة:' : 'اصرفوا إلى السيد / السادة:';
+    return {
+      title: voucherTitle,
+      serialNo: v.number,
+      date: v.date,
+      time: '12:00',
+      partyLabel,
+      partyName: v.partyName || 'طرف نقدي عام',
+      partySubId: `طريقة السداد: ${v.paymentMethod}`,
+      badge: v.paymentMethod,
+      typeTitle: voucherTitle,
+      tableHeaders: [
+        { label: 'البيان / تفاصيل السند', width: '60%', align: 'right' },
+        { label: 'طريقة الدفع', width: '20%', align: 'center' },
+        { label: 'المبلغ المسدد', width: '20%', align: 'center' }
+      ],
+      tableRows: [
+        {
+          cols: [
+            v.description || (isReceipt ? 'دفعة نقدية تحت الحساب' : 'مصروفات / دفعة نقدية'),
+            v.paymentMethod,
+            `${formatCleanNumber(v.amount)} ${v.currencyCode || db.settings.currency}`
+          ],
+          isBold: true
+        }
+      ],
+      summaryLines: [
+        {
+          label: 'صافي قيمة السند الإجمالية',
+          value: `${formatCleanNumber(v.amount)} ${v.currencyCode || db.settings.currency}`,
+          isTotal: true
+        }
+      ],
+      footerNotes: db.settings.notes || 'سند رسمي معتمد وموثق بالسجلات المالية.',
+      createdBy: db.settings.company || 'المسؤول المالي'
+    };
+  });
+
   return (
     <div className="space-y-6 pb-12">
       {/* Header */}
@@ -164,13 +284,35 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
           </p>
         </div>
 
-        <button
-          onClick={handleOpenNewModal}
-          className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
-        >
-          <Plus className="w-4 h-4" />
-          <span>{isReceipt ? 'سند قبض جديد (+)' : 'سند صرف جديد (-)'}</span>
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handleBatchExportExcel}
+            className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+            title="تصدير السندات إلى Excel"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+            <span>تصدير Excel</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setBatchPrintOpen(true)}
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+            title="طباعة وتصدير جماعي لجميع السندات في PDF بتنسيق رسمي"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>طباعة وتصدير جماعي PDF</span>
+          </button>
+
+          <button
+            onClick={handleOpenNewModal}
+            className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>{isReceipt ? 'سند قبض جديد (+)' : 'سند صرف جديد (-)'}</span>
+          </button>
+        </div>
       </div>
 
       {/* KPI */}
@@ -287,8 +429,16 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                 </button>
 
                 <button
+                  onClick={() => handleOpenEditModal(v)}
+                  className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors cursor-pointer"
+                  title="تعديل بيانات السند"
+                >
+                  <Edit className="w-3.5 h-3.5" />
+                </button>
+
+                <button
                   onClick={() => handleDeleteVoucher(v)}
-                  className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+                  className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
                   title="حذف السند وعكس القيود"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -299,11 +449,20 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
         </div>
       )}
 
-      {/* Voucher Print & PDF Modal */}
+      {/* Single Voucher Print & PDF Modal */}
       <VoucherPrintModal
         voucher={printingVoucher}
         settings={db.settings}
         onClose={() => setPrintingVoucher(null)}
+      />
+
+      {/* Batch Vouchers Print Modal */}
+      <UniversalPrintModal
+        isOpen={batchPrintOpen}
+        onClose={() => setBatchPrintOpen(false)}
+        documentTitle={`سندات_${isReceipt ? 'القبض' : 'الصرف'}_المجمعة`}
+        documents={batchPrintBlocks}
+        settings={db.settings}
       />
 
       {/* Modal: New Voucher */}
@@ -312,7 +471,9 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
           <div className="bg-white rounded-2xl w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl border border-slate-200">
             <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl">
               <h2 className="text-base font-black text-slate-900">
-                {isReceipt ? 'تسجيل سند قبض مالي' : 'تسجيل سند صرف مالي'}
+                {editingVoucher
+                  ? (isReceipt ? `تعديل سند قبض (${editingVoucher.number})` : `تعديل سند صرف (${editingVoucher.number})`)
+                  : (isReceipt ? 'تسجيل سند قبض مالي' : 'تسجيل سند صرف مالي')}
               </h2>
               <button onClick={() => setShowModal(false)} className="p-1 hover:bg-slate-200 rounded">
                 <X className="w-5 h-5 text-slate-500" />

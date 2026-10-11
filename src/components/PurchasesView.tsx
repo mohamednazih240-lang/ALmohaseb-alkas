@@ -10,7 +10,8 @@ import {
   X,
   FileText,
   Receipt,
-  List
+  List,
+  ArrowUpDown
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -36,6 +37,8 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   const [activeTab, setActiveTab] = useState<'editor' | 'list'>('list');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'مدفوع' | 'جزئي' | 'آجل'>('all');
+  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'month'>('all');
+  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'highest' | 'lowest'>('newest');
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
 
   // Mobile back button: If inside purchase invoice editor, phone back button exits editor to list
@@ -49,17 +52,34 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   );
 
   // Filter purchase invoices
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const currentMonthStr = todayStr.slice(0, 7);
+
   const purchaseInvoices = db.invoices
     .filter(inv => inv.type === 'purchase')
     .filter(inv => {
-      const matchSearch =
-        inv.number.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        inv.partyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        inv.notes?.toLowerCase().includes(searchTerm.toLowerCase());
+      const s = searchTerm.trim().toLowerCase();
+      const matchSearch = !s ||
+        inv.number.toLowerCase().includes(s) ||
+        inv.partyName.toLowerCase().includes(s) ||
+        (inv.notes && inv.notes.toLowerCase().includes(s)) ||
+        inv.items.some(it => it.productName.toLowerCase().includes(s));
+
       const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
-      return matchSearch && matchStatus;
+
+      let matchDate = true;
+      if (dateFilter === 'today') matchDate = inv.date === todayStr;
+      else if (dateFilter === 'month') matchDate = inv.date.startsWith(currentMonthStr);
+
+      return matchSearch && matchStatus && matchDate;
     })
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    .sort((a, b) => {
+      if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
+      if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
+      if (sortBy === 'highest') return b.total - a.total;
+      if (sortBy === 'lowest') return a.total - b.total;
+      return 0;
+    });
 
   // Statistics
   const totalPurchases = db.invoices
@@ -185,33 +205,85 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
         </div>
       </div>
 
-      {/* Search & Filter */}
-      <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-3">
-        <div className="relative w-full sm:w-80">
-          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
-          <input
-            type="text"
-            placeholder="بحث برقم الفاتورة، اسم المورد..."
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
-            className="w-full pr-9 pl-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium focus:outline-hidden focus:border-black"
-          />
+      {/* Dynamic Search & Advanced Filter Bar */}
+      <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs space-y-2.5">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+          <div className="relative flex-1 max-w-md">
+            <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
+            <input
+              type="text"
+              placeholder="بحث ديناميكي برقم فاتورة التوريد، اسم المورد، الصنف، أو ملاحظة..."
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              className="w-full pr-9 pl-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-hidden focus:border-black focus:bg-white transition-all"
+            />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm('')}
+                className="absolute left-2.5 top-2.5 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Sort Selector */}
+          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 px-2.5 py-1.5 rounded-xl self-start sm:self-auto">
+            <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
+            <select
+              value={sortBy}
+              onChange={e => setSortBy(e.target.value as any)}
+              className="bg-transparent text-xs font-bold text-slate-700 outline-none cursor-pointer"
+            >
+              <option value="newest">الأحدث تاريخاً</option>
+              <option value="oldest">الأقدم تاريخاً</option>
+              <option value="highest">الأعلى قيمة</option>
+              <option value="lowest">الأقل قيمة</option>
+            </select>
+          </div>
         </div>
 
-        <div className="flex items-center gap-1.5 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0">
-          {(['all', 'مدفوع', 'جزئي', 'آجل'] as const).map(st => (
+        {/* Filter Badges & Date Range */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100">
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+            <span className="text-[11px] font-bold text-slate-500 ml-1">الحالة:</span>
+            {(['all', 'مدفوع', 'جزئي', 'آجل'] as const).map(st => (
+              <button
+                key={st}
+                onClick={() => setStatusFilter(st)}
+                className={`px-3 py-1 rounded-lg text-xs font-bold whitespace-nowrap transition-colors ${
+                  statusFilter === st
+                    ? 'bg-black text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {st === 'all' ? 'جميع فواتير التوريد' : st}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1 text-xs font-bold">
+            <span className="text-[11px] font-bold text-slate-500 ml-1">الفترة:</span>
             <button
-              key={st}
-              onClick={() => setStatusFilter(st)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-colors ${
-                statusFilter === st
-                  ? 'bg-black text-white'
-                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-              }`}
+              onClick={() => setDateFilter('all')}
+              className={`px-2.5 py-1 rounded-lg transition-colors ${dateFilter === 'all' ? 'bg-slate-200 text-slate-900' : 'text-slate-600 hover:text-slate-900'}`}
             >
-              {st === 'all' ? 'جميع الفواتير' : st}
+              الكل
             </button>
-          ))}
+            <button
+              onClick={() => setDateFilter('today')}
+              className={`px-2.5 py-1 rounded-lg transition-colors ${dateFilter === 'today' ? 'bg-slate-200 text-slate-900' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              اليوم
+            </button>
+            <button
+              onClick={() => setDateFilter('month')}
+              className={`px-2.5 py-1 rounded-lg transition-colors ${dateFilter === 'month' ? 'bg-slate-200 text-slate-900' : 'text-slate-600 hover:text-slate-900'}`}
+            >
+              هذا الشهر
+            </button>
+          </div>
         </div>
       </div>
 

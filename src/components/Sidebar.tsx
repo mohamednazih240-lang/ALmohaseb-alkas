@@ -22,6 +22,7 @@ import {
   FileSpreadsheet,
   BookMarked,
   BarChart3,
+  TrendingUp,
   UserCheck,
   ShieldCheck,
   Lock,
@@ -67,6 +68,8 @@ export type PageId =
   | 'journals'
   | 'ledger'
   | 'reports'
+  | 'daily_closing'
+  | 'profits'
   | 'closing'
   | 'users'
   | 'audit'
@@ -148,7 +151,9 @@ const navSections: NavSection[] = [
   {
     title: 'التقارير والإدارة المالية',
     items: [
-      { id: 'reports', label: 'التقارير المالية والأرباح', icon: BarChart3 },
+      { id: 'daily_closing', label: 'تقفيل اليومية والورديات', icon: ShieldCheck, badge: 'جديد' },
+      { id: 'profits', label: 'تحليل أرباح الفواتير والأصناف', icon: TrendingUp },
+      { id: 'reports', label: 'التقارير المالية والمحاسبية', icon: BarChart3 },
       { id: 'closing', label: 'إقفال الفترات والترحيل السنوي', icon: LockKeyhole },
       { id: 'users', label: 'المستخدمون والصلاحيات', icon: UserCheck },
       { id: 'audit', label: 'سجل النشاط والتدقيق', icon: ShieldCheck },

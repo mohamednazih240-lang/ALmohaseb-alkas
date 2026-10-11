@@ -27,12 +27,11 @@
 .invoice-container { 
   background: #fff; 
   margin: 0 auto; 
-  padding: 8mm; 
-  border: 2px solid #000; 
+  border: 1.5px solid #000; 
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   box-sizing: border-box;
 }
 
@@ -41,13 +40,15 @@
   width: 100%;
   max-width: 210mm;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
 }
-.invoice-wrapper-A4 .invoice-container {
+body[data-paper-size="A4"] .invoice-container,
+[data-paper-size="A4"] .invoice-container {
   width: 210mm;
   max-width: 100%;
   min-height: 297mm;
-  box-sizing: border-box;
+  padding: 8mm 10mm;
 }
 
 /* --- مقاس A5 في المعاينة على الشاشة --- */
@@ -55,15 +56,19 @@
   width: 100%;
   max-width: 148mm;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
 }
-.invoice-wrapper-A5 .invoice-container {
+body[data-paper-size="A5"] .invoice-container,
+[data-paper-size="A5"] .invoice-container {
   width: 148mm;
   max-width: 100%;
   min-height: 210mm;
-  padding: 5mm;
-  font-size: 0.88em;
-  box-sizing: border-box;
+  padding: 5mm 6mm;
+}
+body[data-paper-size="A5"],
+[data-paper-size="A5"] {
+  font-size: 0.82rem;
 }
 
 /* --- المقاس الحراري في المعاينة على الشاشة --- */
@@ -71,45 +76,48 @@
   width: 100%;
   max-width: 76mm;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
 }
-.invoice-wrapper-thermal .invoice-container {
+body[data-paper-size="thermal"] .invoice-container,
+[data-paper-size="thermal"] .invoice-container {
   width: 76mm;
   max-width: 100%;
   min-height: auto;
-  padding: 3mm;
+  padding: 4mm 3mm;
   border: 1px dashed #000;
   box-shadow: none;
-  box-sizing: border-box;
 }
 
 /* عناصر الفاتورة الداخلية */
+.header,
 .invoice-header { 
   display: flex; 
   justify-content: space-between; 
   align-items: center; 
-  border-bottom: 2px solid #000; 
+  border-bottom: 1.5px solid #000; 
   padding-bottom: 6px; 
   margin-bottom: 8px; 
   width: 100%;
 }
+.header.is-empty,
 .invoice-header.is-empty { display: none !important; }
 
-.header-right { text-align: right; flex: 1; }
-.header-right h2 { margin: 0 0 2px 0; font-size: 1.15rem; font-weight: bold; }
-.header-right p { margin: 0; font-size: 0.75rem; color: #333; }
+.header-right { text-align: right; flex: 1.2; }
+.header-right h2 { margin: 0 0 2px 0; font-size: 1.1rem; font-weight: bold; }
+.header-right p { margin: 0; font-size: 0.73rem; color: #333; }
 
 .header-center {
   display: flex;
   justify-content: center;
   align-items: center;
-  min-width: 70px;
-  flex: 1;
+  min-width: 80px;
+  flex: 0.8;
 }
-.logo-img { max-width: 90px; max-height: 55px; object-fit: contain; }
+.logo-img { max-width: 80px; max-height: 45px; object-fit: contain; }
 
-.header-left { flex: 1; display: flex; justify-content: flex-end; }
-.phones-list { list-style: none; padding: 0; margin: 0; font-size: 0.75rem; direction: ltr; text-align: left; }
+.header-left { flex: 1.2; display: flex; justify-content: flex-end; }
+.phones-list { list-style: none; padding: 0; margin: 0; font-size: 0.73rem; direction: ltr; text-align: left; }
 .phones-list li { margin-bottom: 1px; font-weight: 600; }
 
 .info-box { 
@@ -117,7 +125,7 @@
   justify-content: space-between; 
   align-items: center; 
   border: 1.5px solid #000; 
-  padding: 5px 8px; 
+  padding: 5px 10px; 
   margin-bottom: 8px; 
   font-size: 0.8rem;
   line-height: 1.4;
@@ -128,22 +136,30 @@
 .info-item p { margin: 1px 0; }
 
 .table-wrapper { width: 100%; flex-grow: 1; }
+table.items-table,
 .invoice-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+table.items-table th, table.items-table td,
 .invoice-table th, .invoice-table td { border: 1px solid #000; padding: 4px 6px; text-align: center; font-size: 0.8rem; }
+table.items-table th,
 .invoice-table th { background-color: #ededed; font-weight: bold; font-size: 0.78rem; }
 
 .bottom-section { display: flex; justify-content: flex-end; margin-top: 6px; margin-bottom: 8px; width: 100%; }
 .summary-vertical-list { width: 240px; display: flex; flex-direction: column; gap: 2px; font-size: 0.82rem; font-weight: bold; }
 .summary-line { display: flex; justify-content: space-between; align-items: center; padding: 1px 0; }
-.summary-line.total-line { border-top: 1.5px solid #000; margin-top: 2px; padding-top: 3px; font-size: 0.95rem; }
+.summary-line.total-line { 
+  border-top: 1.5px solid #000; 
+  margin-top: 3px; 
+  padding-top: 3px; 
+  font-size: 0.95rem; 
+}
 
 .invoice-footer-note {
   border-top: 1.5px solid #000;
-  padding-top: 4px;
+  padding-top: 5px;
   margin-top: auto; 
   display: flex;
   justify-content: space-between;
-  font-size: 0.75rem;
+  font-size: 0.73rem;
   font-weight: 600;
   width: 100%;
 }
@@ -154,7 +170,7 @@
   font-size: 0.68rem;
   font-weight: bold;
   color: #444;
-  padding: 4px 0;
+  padding: 5px 0;
   direction: ltr;
 }
 
@@ -269,37 +285,40 @@
     break-inside: avoid !important;
   }
 
-  /* مقاس A4 في الطباعة: أبعاد محسوبة بدقة لتناسب صفحة واحدة بكامل إطاراتها وبدون أي كسر */
+  /* طباعة A4 */
   body[data-paper-size="A4"] .invoice-container {
-    width: 198mm !important;
-    max-width: 198mm !important;
-    height: 282mm !important;
-    max-height: 284mm !important;
-    padding: 7mm !important;
+    width: 210mm !important;
+    min-height: 297mm !important;
+    padding: 8mm 10mm !important;
     margin: 0 auto !important;
-    font-size: 1rem !important;
+    border: 1.5px solid #000 !important;
+    box-shadow: none !important;
+    page-break-after: avoid !important;
+    page-break-inside: avoid !important;
   }
 
-  /* مقاس A5 في الطباعة: أبعاد محسوبة بدقة لتناسب صفحة A5 واحدة بكامل إطاراتها وبدون أي كسر أو قص جانبي */
+  /* طباعة A5 */
   body[data-paper-size="A5"] .invoice-container {
-    width: 138mm !important;
-    max-width: 138mm !important;
-    height: 196mm !important;
-    max-height: 198mm !important;
-    padding: 4mm !important;
+    width: 148mm !important;
+    min-height: 210mm !important;
+    padding: 5mm 6mm !important;
     margin: 0 auto !important;
-    font-size: 0.82rem !important;
+    border: 1.5px solid #000 !important;
+    box-shadow: none !important;
+    page-break-after: avoid !important;
+    page-break-inside: avoid !important;
   }
 
-  /* المقاس الحراري 80mm في الطباعة */
+  /* الطباعة الحرارية */
   body[data-paper-size="thermal"] .invoice-container {
-    width: 74mm !important;
-    max-width: 74mm !important;
-    height: auto !important;
+    width: 76mm !important;
+    min-height: auto !important;
+    padding: 3mm !important;
     border: none !important;
-    padding: 2mm !important;
-    margin: 0 auto !important;
+    box-shadow: none !important;
   }
+  
+  .copyright-outside { display: none !important; }
 
   tr, .print-card {
     page-break-inside: avoid !important;

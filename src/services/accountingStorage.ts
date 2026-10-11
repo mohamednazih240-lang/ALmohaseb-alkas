@@ -37,6 +37,7 @@ import {
   registerCompany,
   CompanyTenant
 } from './tenantService';
+import { DEFAULT_CATALOG_1001, mergeCatalogIntoDb } from '../data/defaultCatalog1001';
 
 const STORAGE_KEY = 'hesabaty_pro_db_v6';
 const IDB_NAME = 'hesabaty_accounting_db';
@@ -263,7 +264,7 @@ export function createSeedData(
     { id: 'wh_branch', name: 'مخزن الفرع', location: 'الفرع الإضافي', isDefault: false }
   ];
 
-  const products: Product[] = [];
+  const products: Product[] = JSON.parse(JSON.stringify(DEFAULT_CATALOG_1001));
   const customers: Party[] = [];
   const suppliers: Party[] = [];
 
@@ -314,6 +315,7 @@ export function createSeedData(
     fixedAssets: [],
     bankReconciliations: [],
     goodsReceivedNotes: [],
+    dailyClosings: [],
     audit
   };
 }
@@ -369,6 +371,7 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
     if (!parsed.fixedAssets) parsed.fixedAssets = [];
     if (!parsed.bankReconciliations) parsed.bankReconciliations = [];
     if (!parsed.goodsReceivedNotes) parsed.goodsReceivedNotes = [];
+    if (!parsed.dailyClosings) parsed.dailyClosings = [];
     if (!parsed.settings.nextGRN) parsed.settings.nextGRN = 7001;
 
     // Guarantee default accounts exist
@@ -378,6 +381,13 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
         parsed.accounts.push(defAcc);
       }
     });
+
+    // Ensure catalog of 1001 products is populated
+    if (parsed.products.length < 1000) {
+      const merged = mergeCatalogIntoDb(parsed);
+      saveTenantDatabase(tenantId, merged.db);
+      return merged.db;
+    }
 
     return parsed;
   } catch (err) {
@@ -429,6 +439,10 @@ export function loadDatabase(): AccountingDB {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.accounts)) {
+        if (parsed.products && parsed.products.length < 1000) {
+          const merged = mergeCatalogIntoDb(parsed);
+          parsed.products = merged.db.products;
+        }
         const companyName = parsed.settings?.company || 'المنشأة الرئيسية';
         const primaryTenant = registerCompany({
           name: companyName,

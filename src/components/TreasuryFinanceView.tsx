@@ -7,6 +7,10 @@ import {
   FileSpreadsheet,
   BookMarked,
   Plus,
+  Edit,
+  Trash2,
+  Printer,
+  Download,
   ArrowLeftRight,
   Search,
   CheckCircle2,
@@ -33,6 +37,8 @@ import {
   logAudit
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
+import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
+import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 
 interface TreasuryFinanceViewProps {
@@ -78,6 +84,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   const [simpleAmount, setSimpleAmount] = useState<number>(0);
   const [simpleMethod, setSimpleMethod] = useState<PaymentMethod>('نقدي');
   const [simpleDesc, setSimpleDesc] = useState('');
+  const [editingSimple, setEditingSimple] = useState<SimpleRecord | null>(null);
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
+  const [printDocTitle, setPrintDocTitle] = useState('تقرير مالي');
 
   // Account form
   const [accCode, setAccCode] = useState('');
@@ -262,11 +272,260 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       });
     }
 
+    if (editingSimple) {
+      if (isExpense) {
+        const idx = updated.expenses.findIndex(e => e.id === editingSimple.id);
+        if (idx !== -1) {
+          updated.expenses[idx] = { ...editingSimple, date: simpleDate, category: simpleCategory, amount: simpleAmount, method: simpleMethod, description: simpleDesc };
+        }
+      } else {
+        const idx = updated.revenues.findIndex(r => r.id === editingSimple.id);
+        if (idx !== -1) {
+          updated.revenues[idx] = { ...editingSimple, date: simpleDate, category: simpleCategory, amount: simpleAmount, method: simpleMethod, description: simpleDesc };
+        }
+      }
+      const trIdx = updated.treasury.findIndex(t => t.sourceId === editingSimple.id);
+      if (trIdx !== -1) {
+        updated.treasury[trIdx].amount = simpleAmount;
+        updated.treasury[trIdx].date = simpleDate;
+        updated.treasury[trIdx].method = simpleMethod;
+        updated.treasury[trIdx].description = `${isExpense ? 'مصروف' : 'إيراد'}: ${simpleCategory} (${simpleDesc})`;
+      }
+      logAudit(updated, isExpense ? 'تعديل مصروف' : 'تعديل إيراد', `${simpleCategory} بمبلغ ${formatMoney(simpleAmount, updated.settings.currency)}`);
+      onUpdateDb(updated);
+      setShowSimpleModal(false);
+      setEditingSimple(null);
+      setSimpleAmount(0);
+      setSimpleDesc('');
+      return;
+    }
+
     logAudit(updated, isExpense ? 'تسجيل مصروف' : 'تسجيل إيراد', `${record.category} بمبلغ ${formatMoney(simpleAmount, updated.settings.currency)}`);
     onUpdateDb(updated);
     setShowSimpleModal(false);
     setSimpleAmount(0);
     setSimpleDesc('');
+  };
+
+  const handleDeleteTreasuryEntry = (tr: TreasuryEntry) => {
+    if (!confirm(`هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)}؟`)) return;
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    updated.treasury = updated.treasury.filter(t => t.id !== tr.id);
+    if (tr.sourceId) {
+      updated.journals = updated.journals.filter(j => j.sourceId !== tr.sourceId);
+    }
+    logAudit(updated, 'حذف حركة خزينة', `تم حذف حركة ${tr.direction === 'in' ? 'وارد' : 'صادر'} بقيمة ${tr.amount}`);
+    onUpdateDb(updated);
+  };
+
+  const handleDeleteSimpleRecord = (item: SimpleRecord) => {
+    const isExp = subPage === 'expenses';
+    if (!confirm(`هل أنت متأكد من حذف ${isExp ? 'المصروف' : 'الإيراد'} "${item.category}"؟`)) return;
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    if (isExp) {
+      updated.expenses = updated.expenses.filter(e => e.id !== item.id);
+    } else {
+      updated.revenues = updated.revenues.filter(r => r.id !== item.id);
+    }
+    updated.treasury = updated.treasury.filter(t => t.sourceId !== item.id);
+    updated.journals = updated.journals.filter(j => j.sourceId !== item.id);
+    logAudit(updated, isExp ? 'حذف مصروف' : 'حذف إيراد', `تم حذف ${item.category} بقيمة ${item.amount}`);
+    onUpdateDb(updated);
+  };
+
+  const handleOpenEditSimple = (item: SimpleRecord) => {
+    setEditingSimple(item);
+    setSimpleDate(item.date);
+    setSimpleCategory(item.category);
+    setSimpleAmount(item.amount);
+    setSimpleMethod(item.method);
+    setSimpleDesc(item.description || '');
+    setShowSimpleModal(true);
+  };
+
+  const handleExportTreasuryCsv = () => {
+    if (db.treasury.length === 0) return alert('لا توجد حركات للتصدير');
+    const headers = ['التاريخ', 'الاتجاه', 'طريقة الدفع', 'البيان', 'المبلغ'];
+    const rows = db.treasury.map(t => [
+      t.date,
+      t.direction === 'in' ? 'وارد (+)' : 'صادر (-)',
+      t.method,
+      t.description || '',
+      t.amount
+    ]);
+    exportTableToCsv(`حركات_الخزينة_${Date.now()}.csv`, headers, rows);
+  };
+
+  const handleExportSimpleCsv = () => {
+    const list = subPage === 'expenses' ? db.expenses : db.revenues;
+    if (list.length === 0) return alert('لا توجد بيانات للتصدير');
+    const headers = ['التاريخ', 'التصنيف', 'الخزينة / الطريقة', 'البيان', 'المبلغ'];
+    const rows = list.map(item => [
+      item.date,
+      item.category,
+      item.method,
+      item.description || '',
+      item.amount
+    ]);
+    exportTableToCsv(`${subPage === 'expenses' ? 'المصروفات' : 'الإيرادات'}_${Date.now()}.csv`, headers, rows);
+  };
+
+  const handlePrintTreasurySingle = (tr: TreasuryEntry) => {
+    const block: MovementPrintBlock = {
+      title: tr.direction === 'in' ? 'حركة إيداع وقبض خزينة' : 'حركة صرف وسحب خزينة',
+      serialNo: `#TR-${tr.id.slice(-6).toUpperCase()}`,
+      date: tr.date,
+      time: '12:00',
+      partyLabel: 'القناة / الخزينة:',
+      partyName: tr.method,
+      partySubId: `الاتجاه: ${tr.direction === 'in' ? 'وارد (+)' : 'صادر (-)'}`,
+      badge: tr.direction === 'in' ? 'إيداع نقدي' : 'صرف نقدي',
+      typeTitle: 'حركة خزينة ونقدية',
+      tableHeaders: [
+        { label: 'البيان / تفاصيل الحركة', width: '60%', align: 'right' },
+        { label: 'طريقة الدفع', width: '20%', align: 'center' },
+        { label: 'المبلغ', width: '20%', align: 'center' }
+      ],
+      tableRows: [
+        {
+          cols: [
+            tr.description || 'حركة نقدية بالخزينة',
+            tr.method,
+            `${formatCleanNumber(tr.amount)} ${db.settings.currency}`
+          ],
+          isBold: true
+        }
+      ],
+      summaryLines: [
+        { label: 'المبلغ الإجمالي للحركة', value: `${formatCleanNumber(tr.amount)} ${db.settings.currency}`, isTotal: true }
+      ],
+      footerNotes: db.settings.notes || 'حركة نقدية رسمية موثقة بحسابات الخزينة.',
+      createdBy: db.currentUser?.name
+    };
+
+    setPrintDocuments([block]);
+    setPrintDocTitle(`حركة_خزينة_${tr.id.slice(-6)}`);
+    setPrintModalOpen(true);
+  };
+
+  const handlePrintTreasuryBatch = () => {
+    if (db.treasury.length === 0) return alert('لا توجد حركات للطباعة');
+    const blocks: MovementPrintBlock[] = db.treasury.map(tr => ({
+      title: tr.direction === 'in' ? 'حركة إيداع خزينة' : 'حركة صرف خزينة',
+      serialNo: `#TR-${tr.id.slice(-6).toUpperCase()}`,
+      date: tr.date,
+      time: '12:00',
+      partyLabel: 'الخزينة:',
+      partyName: tr.method,
+      partySubId: tr.direction === 'in' ? 'وارد (+)' : 'صادر (-)',
+      badge: tr.method,
+      typeTitle: 'حركة نقدية',
+      tableHeaders: [
+        { label: 'البيان', width: '60%', align: 'right' },
+        { label: 'الخزينة', width: '20%', align: 'center' },
+        { label: 'المبلغ', width: '20%', align: 'center' }
+      ],
+      tableRows: [
+        {
+          cols: [
+            tr.description || 'حركة نقدية',
+            tr.method,
+            `${formatCleanNumber(tr.amount)} ${db.settings.currency}`
+          ],
+          isBold: true
+        }
+      ],
+      summaryLines: [
+        { label: 'المبلغ', value: `${formatCleanNumber(tr.amount)} ${db.settings.currency}`, isTotal: true }
+      ],
+      footerNotes: db.settings.notes || 'سجل موثق بالنظام المحاسبي',
+      createdBy: db.currentUser?.name
+    }));
+
+    setPrintDocuments(blocks);
+    setPrintDocTitle('سجل_حركات_الخزينة_المجمعة');
+    setPrintModalOpen(true);
+  };
+
+  const handlePrintSimpleSingle = (item: SimpleRecord) => {
+    const isExp = subPage === 'expenses';
+    const block: MovementPrintBlock = {
+      title: isExp ? 'إيصال إثبات مصروف' : 'إيصال إثبات إيراد',
+      serialNo: `#REC-${item.id.slice(-6).toUpperCase()}`,
+      date: item.date,
+      time: '12:00',
+      partyLabel: isExp ? 'بند المصروف:' : 'بند الإيراد:',
+      partyName: item.category,
+      partySubId: `الخزينة: ${item.method}`,
+      badge: item.method,
+      typeTitle: isExp ? 'مصروف تشغيلي' : 'إيراد إضافي',
+      tableHeaders: [
+        { label: 'البيان والتفاصيل', width: '60%', align: 'right' },
+        { label: 'الخزينة المسدد منها', width: '20%', align: 'center' },
+        { label: 'المبلغ', width: '20%', align: 'center' }
+      ],
+      tableRows: [
+        {
+          cols: [
+            item.description || item.category,
+            item.method,
+            `${formatCleanNumber(item.amount)} ${db.settings.currency}`
+          ],
+          isBold: true
+        }
+      ],
+      summaryLines: [
+        { label: 'القيمة الإجمالية', value: `${formatCleanNumber(item.amount)} ${db.settings.currency}`, isTotal: true }
+      ],
+      footerNotes: db.settings.notes || 'إيصال محاسبي رسمي معتمد',
+      createdBy: db.currentUser?.name
+    };
+
+    setPrintDocuments([block]);
+    setPrintDocTitle(`${isExp ? 'مصروف' : 'إيراد'}_${item.id.slice(-6)}`);
+    setPrintModalOpen(true);
+  };
+
+  const handlePrintSimpleBatch = () => {
+    const list = subPage === 'expenses' ? db.expenses : db.revenues;
+    if (list.length === 0) return alert('لا توجد سجلات للطباعة');
+    const isExp = subPage === 'expenses';
+
+    const blocks: MovementPrintBlock[] = list.map(item => ({
+      title: isExp ? 'إيصال مصروف' : 'إيصال إيراد',
+      serialNo: `#REC-${item.id.slice(-6).toUpperCase()}`,
+      date: item.date,
+      time: '12:00',
+      partyLabel: 'التصنيف:',
+      partyName: item.category,
+      partySubId: `الخزينة: ${item.method}`,
+      badge: item.method,
+      typeTitle: isExp ? 'سجل المصروفات' : 'سجل الإيرادات',
+      tableHeaders: [
+        { label: 'البيان والتفاصيل', width: '60%', align: 'right' },
+        { label: 'الخزينة', width: '20%', align: 'center' },
+        { label: 'المبلغ', width: '20%', align: 'center' }
+      ],
+      tableRows: [
+        {
+          cols: [
+            item.description || item.category,
+            item.method,
+            `${formatCleanNumber(item.amount)} ${db.settings.currency}`
+          ],
+          isBold: true
+        }
+      ],
+      summaryLines: [
+        { label: 'القيمة الإجمالية', value: `${formatCleanNumber(item.amount)} ${db.settings.currency}`, isTotal: true }
+      ],
+      footerNotes: db.settings.notes || 'سجل موثق بالنظام المحاسبي',
+      createdBy: db.currentUser?.name
+    }));
+
+    setPrintDocuments(blocks);
+    setPrintDocTitle(`سجل_${isExp ? 'المصروفات' : 'الإيرادات'}_المجمعة`);
+    setPrintModalOpen(true);
   };
 
   // Add Account to Chart of Accounts
@@ -373,17 +632,37 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                 متابعة أرصدة الكاش، فودافون كاش، إنستاباي، والفيزا مع إمكانية التحويل الداخلي بين الخزائن
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleExportTreasuryCsv}
+                className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                title="تصدير حركات الخزينة إلى Excel"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                <span>تصدير Excel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePrintTreasuryBatch}
+                className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                title="طباعة وتصدير جماعي لحركات الخزينة PDF"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>طباعة وتصدير جماعي PDF</span>
+              </button>
+
               <button
                 onClick={() => setShowTransferModal(true)}
-                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5"
+                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
               >
                 <ArrowLeftRight className="w-4 h-4" />
                 <span>تحويل بين الخزائن</span>
               </button>
               <button
                 onClick={() => setShowMoveModal(true)}
-                className="px-3.5 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
+                className="px-3.5 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
                 <span>حركة نقدية حرة</span>
@@ -452,6 +731,26 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                           {formatMoney(tr.amount, db.settings.currency)}
                         </span>
                       </div>
+
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-1.5 no-print">
+                        <button
+                          type="button"
+                          onClick={() => handlePrintTreasurySingle(tr)}
+                          className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
+                          title="طباعة / تصدير PDF"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                          <span>PDF</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteTreasuryEntry(tr)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                          title="حذف حركة الخزينة"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -476,18 +775,41 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                   : 'إثبات الإيرادات الإضافية من الخدمات والاستشارات مع إيداعها التلقائي بالخزينة'}
               </p>
             </div>
-            <button
-              onClick={() => {
-                setSimpleCategory(subPage === 'expenses' ? 'إيجار المقر' : 'أرباح خدمات');
-                setSimpleAmount(0);
-                setSimpleDesc('');
-                setShowSimpleModal(true);
-              }}
-              className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
-            >
-              <Plus className="w-4 h-4" />
-              <span>{subPage === 'expenses' ? 'تسجيل مصروف جديد' : 'تسجيل إيراد جديد'}</span>
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleExportSimpleCsv}
+                className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                title="تصدير إلى Excel"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                <span>تصدير Excel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePrintSimpleBatch}
+                className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                title="طباعة وتصدير جماعي PDF"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                <span>طباعة وتصدير جماعي PDF</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setEditingSimple(null);
+                  setSimpleCategory(subPage === 'expenses' ? 'إيجار المقر' : 'أرباح خدمات');
+                  setSimpleAmount(0);
+                  setSimpleDesc('');
+                  setShowSimpleModal(true);
+                }}
+                className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{subPage === 'expenses' ? 'تسجيل مصروف جديد' : 'تسجيل إيراد جديد'}</span>
+              </button>
+            </div>
           </div>
 
           {(subPage === 'expenses' ? db.expenses : db.revenues).length === 0 ? (
@@ -521,6 +843,34 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                     <span className={`text-base font-black font-mono ${subPage === 'expenses' ? 'text-rose-700' : 'text-emerald-700'}`}>
                       {formatMoney(item.amount, db.settings.currency)}
                     </span>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-1.5 no-print">
+                    <button
+                      type="button"
+                      onClick={() => handlePrintSimpleSingle(item)}
+                      className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
+                      title="طباعة / تصدير PDF"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>PDF</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditSimple(item)}
+                      className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors cursor-pointer"
+                      title="تعديل"
+                    >
+                      <Edit className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSimpleRecord(item)}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                      title="حذف"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
               ))}
@@ -1109,6 +1459,15 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Universal Print & PDF Modal */}
+      <UniversalPrintModal
+        isOpen={printModalOpen}
+        onClose={() => setPrintModalOpen(false)}
+        documentTitle={printDocTitle}
+        documents={printDocuments}
+        settings={db.settings}
+      />
     </div>
   );
 };

@@ -12,7 +12,14 @@ import {
   AlertTriangle,
   X,
   FileSpreadsheet,
-  Boxes
+  Boxes,
+  Sparkles,
+  Filter,
+  ArrowUpDown,
+  ChevronLeft,
+  ChevronRight,
+  Layers,
+  CheckCircle2
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -21,6 +28,7 @@ import {
   StockAdjustment,
   StockTransfer
 } from '../types/accounting';
+import { mergeCatalogIntoDb } from '../data/defaultCatalog1001';
 import {
   formatMoney,
   generateId,
@@ -70,12 +78,61 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [actualQty, setActualQty] = useState<number>(0);
   const [adjustReason, setAdjustReason] = useState('مطابقة الجرد الدوري');
 
-  // Filtered products
-  const filteredProducts = db.products.filter(p =>
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.code.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    p.barcode?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  // Filter & Search states for Products
+  const [stockStatusFilter, setStockStatusFilter] = useState<'all' | 'in_stock' | 'out_of_stock' | 'low_stock'>('all');
+  const [sortBy, setSortBy] = useState<'name_asc' | 'name_desc' | 'code_asc' | 'qty_desc' | 'qty_asc' | 'price_desc' | 'price_asc'>('name_asc');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(36);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  // Statistics
+  const inStockCount = db.products.filter(p => p.currentQty > 0).length;
+  const zeroStockCount = db.products.filter(p => p.currentQty === 0).length;
+  const lowStockCount = db.products.filter(p => p.currentQty <= p.minStock && p.currentQty > 0).length;
+  const totalStockValue = db.products.reduce((acc, p) => acc + (p.currentQty * (p.avgCost || p.buyPrice)), 0);
+
+  // Filtered and sorted products
+  const filteredProducts = db.products.filter(p => {
+    const s = searchTerm.trim().toLowerCase();
+    const matchSearch = !s ||
+      p.name.toLowerCase().includes(s) ||
+      p.code.toLowerCase().includes(s) ||
+      (p.barcode && p.barcode.toLowerCase().includes(s)) ||
+      (p.notes && p.notes.toLowerCase().includes(s));
+
+    let matchStock = true;
+    if (stockStatusFilter === 'in_stock') matchStock = p.currentQty > 0;
+    else if (stockStatusFilter === 'out_of_stock') matchStock = p.currentQty === 0;
+    else if (stockStatusFilter === 'low_stock') matchStock = p.currentQty <= p.minStock && p.currentQty > 0;
+
+    return matchSearch && matchStock;
+  }).sort((a, b) => {
+    if (sortBy === 'name_asc') return a.name.localeCompare(b.name, 'ar');
+    if (sortBy === 'name_desc') return b.name.localeCompare(a.name, 'ar');
+    if (sortBy === 'code_asc') return a.code.localeCompare(b.code);
+    if (sortBy === 'qty_desc') return b.currentQty - a.currentQty;
+    if (sortBy === 'qty_asc') return a.currentQty - b.currentQty;
+    if (sortBy === 'price_desc') return b.sellPrice - a.sellPrice;
+    if (sortBy === 'price_asc') return a.sellPrice - b.sellPrice;
+    return 0;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / itemsPerPage));
+  const currentSafePage = Math.min(currentPage, totalPages);
+  const paginatedProducts = filteredProducts.slice((currentSafePage - 1) * itemsPerPage, currentSafePage * itemsPerPage);
+
+  const handleMergeCatalogAction = () => {
+    const { db: updatedDb, addedCount } = mergeCatalogIntoDb(db);
+    if (addedCount > 0) {
+      logAudit(updatedDb, 'دمج كتالوج الأصناف', `تم استيراد ودمج ${addedCount} صنف من كتالوج المؤسسة بنجاح`);
+      onUpdateDb(updatedDb);
+      setToastMsg(`✓ تم دمج وإضافة ${addedCount} صنف جديد من كتالوج المؤسسة بنجاح! إجمالي الأصناف الآن: ${updatedDb.products.length} صنف.`);
+      setTimeout(() => setToastMsg(null), 5000);
+    } else {
+      setToastMsg(`جميع أصناف الكتالوج الـ 1001 مدرجة ومحدثة بالفعل في النظام (${db.products.length} صنف).`);
+      setTimeout(() => setToastMsg(null), 4000);
+    }
+  };
 
   // Save new Warehouse
   const handleSaveWarehouse = (e: React.FormEvent) => {
@@ -288,55 +345,245 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       {/* 1. PRODUCTS SUBPAGE */}
       {subPage === 'products' && (
         <>
+          {/* Toast Notification */}
+          {toastMsg && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs rounded-xl flex items-center justify-between font-bold shadow-xs animate-in fade-in">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{toastMsg}</span>
+              </div>
+              <button onClick={() => setToastMsg(null)} className="text-emerald-700 hover:text-emerald-950 p-1">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {/* Top Header & Actions */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
             <div>
               <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
                 <Package className="w-6 h-6" />
                 <span>دليل الأصناف والمستودعات</span>
+                <span className="text-xs bg-slate-900 text-white font-bold px-2.5 py-0.5 rounded-full font-mono">
+                  {db.products.length} صنف
+                </span>
               </h1>
               <p className="text-xs text-slate-500 font-medium mt-0.5">
-                تعريف الأصناف، الباركود، أسعار البيع والتكلفة، والحد الأدنى للطلب
+                كتالوج الأصناف الكامل، المشتريات، باركودات الأصناف، الأسعار ومتابعة الأرصدة
               </p>
             </div>
-            <button
-              onClick={() => onOpenProductModal()}
-              className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
-            >
-              <Plus className="w-4 h-4" />
-              <span>إضافة صنف جديد</span>
-            </button>
-          </div>
 
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
-            <div className="relative max-w-sm">
-              <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
-              <input
-                type="text"
-                placeholder="بحث بالاسم، الكود، أو الباركود..."
-                value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                className="w-full pr-9 pl-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium focus:outline-hidden focus:border-black"
-              />
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleMergeCatalogAction}
+                className="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                title="دمج كتالوج الـ 1001 صنف المرفق في ملف المؤسسة"
+              >
+                <Sparkles className="w-4 h-4 text-amber-300" />
+                <span>دمج كتالوج الـ 1001 صنف</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onOpenProductModal()}
+                className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>إضافة صنف يدوي</span>
+              </button>
             </div>
           </div>
 
-          {/* Products Responsive Card System (No Horizontal Scroll) */}
+          {/* KPI Summary Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">إجمالي الأصناف</span>
+              <span className="text-base sm:text-lg font-black font-mono text-slate-950">
+                {db.products.length} <span className="text-xs font-normal text-slate-500">صنف</span>
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">جاهزة للتوريد (رصيد 0)</span>
+              <span className="text-base sm:text-lg font-black font-mono text-blue-700">
+                {zeroStockCount} <span className="text-xs font-normal text-slate-500">صنف</span>
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">أصناف متوفرة بالمخزن</span>
+              <span className="text-base sm:text-lg font-black font-mono text-emerald-700">
+                {inStockCount} <span className="text-xs font-normal text-slate-500">صنف</span>
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">إجمالي قيمة المخزون</span>
+              <span className="text-base sm:text-lg font-black font-mono text-slate-950">
+                {formatMoney(totalStockValue, db.settings.currency)}
+              </span>
+            </div>
+          </div>
+
+          {/* Dynamic Search & Advanced Filter Toolbar */}
+          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs space-y-3">
+            <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+              {/* Search input */}
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="بحث سريع بالاسم، الكود، الباركود، أو الوصف..."
+                  value={searchTerm}
+                  onChange={e => {
+                    setSearchTerm(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  className="w-full pr-9 pl-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:outline-hidden focus:border-black focus:bg-white transition-all"
+                />
+                {searchTerm && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchTerm('');
+                      setCurrentPage(1);
+                    }}
+                    className="absolute left-2.5 top-2.5 text-slate-400 hover:text-slate-700"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Sort selector */}
+              <div className="flex items-center gap-2">
+                <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1 shrink-0">
+                  <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
+                  <span>الترتيب:</span>
+                </label>
+                <select
+                  value={sortBy}
+                  onChange={e => {
+                    setSortBy(e.target.value as any);
+                    setCurrentPage(1);
+                  }}
+                  className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-800 outline-none cursor-pointer"
+                >
+                  <option value="name_asc">الاسم (أ - ي)</option>
+                  <option value="name_desc">الاسم (ي - أ)</option>
+                  <option value="code_asc">الكود التسلسلي</option>
+                  <option value="qty_desc">الأعلى رصيداً</option>
+                  <option value="qty_asc">الأقل رصيداً</option>
+                  <option value="price_desc">الأعلى سعراً</option>
+                  <option value="price_asc">الأقل سعراً</option>
+                </select>
+
+                <select
+                  value={itemsPerPage}
+                  onChange={e => {
+                    setItemsPerPage(Number(e.target.value));
+                    setCurrentPage(1);
+                  }}
+                  className="px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-800 outline-none cursor-pointer"
+                  title="عدد الأصناف بالصفحة"
+                >
+                  <option value={24}>24 صنف</option>
+                  <option value={36}>36 صنف</option>
+                  <option value={60}>60 صنف</option>
+                  <option value={120}>120 صنف</option>
+                  <option value={500}>500 صنف</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Filter chips */}
+            <div className="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-slate-100">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11px] font-bold text-slate-500 ml-1">حالة الرصيد:</span>
+                <button
+                  type="button"
+                  onClick={() => { setStockStatusFilter('all'); setCurrentPage(1); }}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    stockStatusFilter === 'all'
+                      ? 'bg-black text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  الكل ({db.products.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setStockStatusFilter('out_of_stock'); setCurrentPage(1); }}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    stockStatusFilter === 'out_of_stock'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  بدون رصيد (جاهزة للتوريد) ({zeroStockCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setStockStatusFilter('in_stock'); setCurrentPage(1); }}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    stockStatusFilter === 'in_stock'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  متوفر بالمستودع ({inStockCount})
+                </button>
+                {lowStockCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => { setStockStatusFilter('low_stock'); setCurrentPage(1); }}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      stockStatusFilter === 'low_stock'
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    قارب على النفاد ({lowStockCount})
+                  </button>
+                )}
+              </div>
+
+              <div className="text-[11px] font-bold text-slate-500 font-mono">
+                نتائج البحث: <span className="text-slate-900 font-black">{filteredProducts.length}</span> صنف
+                {filteredProducts.length > itemsPerPage && (
+                  <span> (صفحة {currentSafePage} من {totalPages})</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Products Responsive Card Grid */}
           {filteredProducts.length === 0 ? (
             <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
               <Package className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-              <div className="text-sm font-bold text-slate-700">لا توجد أصناف تطابق البحث</div>
-              <button
-                onClick={() => onOpenProductModal()}
-                className="mt-3 px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
-              >
-                <Plus className="w-4 h-4" />
-                <span>إضافة صنف جديد</span>
-              </button>
+              <div className="text-sm font-bold text-slate-700">لا توجد أصناف تطابق البحث والفلاتر المحددة</div>
+              <p className="text-xs text-slate-400 mt-1">جرّب تغيير عبارة البحث أو اختيار تصفية أخرى</p>
+              <div className="mt-3 flex items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setSearchTerm(''); setStockStatusFilter('all'); }}
+                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition-all"
+                >
+                  إعادة ضبط الفلاتر
+                </button>
+                <button
+                  type="button"
+                  onClick={handleMergeCatalogAction}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>دمج كتالوج الـ 1001 صنف</span>
+                </button>
+              </div>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
-              {filteredProducts.map(p => {
-                const isLow = p.currentQty <= p.minStock;
+              {paginatedProducts.map(p => {
+                const isZero = p.currentQty === 0;
+                const isLow = !isZero && p.currentQty <= p.minStock;
                 const val = p.currentQty * (p.avgCost || p.buyPrice);
 
                 return (
@@ -347,7 +594,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     {/* Card Header */}
                     <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-slate-100">
                       <div>
-                        <h3 className="font-black text-sm text-slate-900">
+                        <h3 className="font-black text-sm text-slate-900 leading-snug">
                           {p.name}
                         </h3>
                         <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-2">
@@ -357,13 +604,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       </div>
 
                       <span
-                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-black border ${
-                          isLow
+                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-black border shrink-0 ${
+                          isZero
+                            ? 'bg-slate-100 text-slate-600 border-slate-200'
+                            : isLow
                             ? 'bg-amber-50 text-amber-800 border-amber-300'
                             : 'bg-emerald-50 text-emerald-800 border-emerald-300'
                         }`}
                       >
-                        {isLow ? 'منخفض الرصيد' : 'متوفر بالمستودع'}
+                        {isZero ? 'رصيد صفر (جاهز للتوريد)' : isLow ? 'منخفض الرصيد' : 'متوفر بالمستودع'}
                       </span>
                     </div>
 
@@ -374,19 +623,19 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         <div>
                           <span className="text-[10px] text-slate-500 block">سعر القطاعي</span>
                           <span className="font-bold font-mono text-slate-950">
-                            {formatMoney(p.sellPrice, db.settings.currency)}
+                            {p.sellPrice > 0 ? formatMoney(p.sellPrice, db.settings.currency) : '—'}
                           </span>
                         </div>
                         <div>
                           <span className="text-[10px] text-slate-500 block">سعر الجملة</span>
                           <span className="font-bold font-mono text-slate-700">
-                            {formatMoney(p.wholesalePrice, db.settings.currency)}
+                            {p.wholesalePrice > 0 ? formatMoney(p.wholesalePrice, db.settings.currency) : '—'}
                           </span>
                         </div>
                         <div>
                           <span className="text-[10px] text-slate-500 block">التكلفة / شراء</span>
                           <span className="font-bold font-mono text-slate-600">
-                            {formatMoney(p.buyPrice, db.settings.currency)}
+                            {p.buyPrice > 0 ? formatMoney(p.buyPrice, db.settings.currency) : '—'}
                           </span>
                         </div>
                       </div>
@@ -412,21 +661,21 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     {/* Card Footer */}
                     <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between">
                       <span className="text-[10px] px-2 py-0.5 bg-slate-100 text-slate-600 rounded">
-                        {p.category || 'عامة'}
+                        الوحدة: {p.unit || 'عدد'}
                       </span>
 
                       <div className="flex items-center gap-1">
                         <button
                           onClick={() => onOpenProductModal(p)}
-                          className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1"
-                          title="تعديل بيانات الصنف"
+                          className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                          title="تعديل بيانات الصنف أو تسجيل سعر/رصيد"
                         >
                           <Edit className="w-3.5 h-3.5" />
                           <span>تعديل</span>
                         </button>
                         <button
                           onClick={() => handleDeleteProduct(p)}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
                           title="حذف الصنف"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -436,6 +685,63 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Pagination Controls */}
+          {totalPages > 1 && (
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-3">
+              <div className="text-xs font-bold text-slate-600 font-mono">
+                عرض {((currentSafePage - 1) * itemsPerPage) + 1} - {Math.min(currentSafePage * itemsPerPage, filteredProducts.length)} من أصل {filteredProducts.length} صنف
+              </div>
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  disabled={currentSafePage === 1}
+                  onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                  className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 cursor-pointer"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                  <span>السابق</span>
+                </button>
+
+                <div className="flex items-center gap-1 px-1">
+                  {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                    let pageNum = i + 1;
+                    if (totalPages > 5 && currentSafePage > 3) {
+                      pageNum = currentSafePage - 2 + i;
+                      if (pageNum > totalPages) pageNum = totalPages - 4 + i;
+                    }
+                    if (pageNum < 1 || pageNum > totalPages) return null;
+
+                    return (
+                      <button
+                        key={pageNum}
+                        type="button"
+                        onClick={() => setCurrentPage(pageNum)}
+                        className={`w-8 h-8 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                          currentSafePage === pageNum
+                            ? 'bg-black text-white shadow-xs'
+                            : 'bg-slate-50 text-slate-700 hover:bg-slate-200 border border-slate-200'
+                        }`}
+                      >
+                        {pageNum}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={currentSafePage === totalPages}
+                  onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                  className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-100 text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 cursor-pointer"
+                >
+                  <span>التالي</span>
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           )}
         </>

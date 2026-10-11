@@ -271,6 +271,30 @@ export interface FiscalPeriod {
   retainedEarningsAccountId?: string;
 }
 
+export interface DailyClosing {
+  id: string;
+  shiftNumber: string;
+  date: string;
+  time?: string;
+  openedBy: string;
+  closedBy: string;
+  startingCash: number;
+  cashIn: number;
+  cashOut: number;
+  salesTotal: number;
+  returnsTotal: number;
+  netSales: number;
+  cogs: number;
+  grossProfit: number;
+  profitMargin: number;
+  actualCash: number;
+  expectedCash: number;
+  difference: number;
+  status: 'مفتوح' | 'مغلق';
+  notes?: string;
+  createdAt: string;
+}
+
 export interface CostCenter {
   id: string;
   code: string;
@@ -423,5 +447,6 @@ export interface AccountingDB {
   fixedAssets: FixedAsset[];
   bankReconciliations: BankReconciliation[];
   goodsReceivedNotes: GoodsReceivedNote[];
+  dailyClosings?: DailyClosing[];
   audit: AuditLog[];
 }

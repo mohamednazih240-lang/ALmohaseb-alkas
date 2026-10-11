@@ -1,5 +1,5 @@
 import jsPDF from 'jspdf';
-import html2canvas from 'html2canvas';
+import html2canvas from 'html2canvas-pro';
 
 export interface PdfExportOptions {
   format?: 'a4' | 'a5' | 'thermal' | 'barcode';
@@ -31,12 +31,40 @@ export async function downloadElementAsPdf(
       filename = `doc_${Date.now()}.pdf`
     } = options;
 
-    // Render HTML element to high-res canvas
+    // Render HTML element to high-res canvas using html2canvas-pro (full support for oklch, oklab & modern CSS)
     const canvas = await html2canvas(el, {
       scale: 2.5, // 2.5x for sharp crisp text and lines
       useCORS: true,
       logging: false,
-      backgroundColor: '#ffffff'
+      backgroundColor: '#ffffff',
+      onclone: (clonedDoc, clonedEl) => {
+        // Normalize any modern CSS color functions for 100% fail-safe compatibility
+        try {
+          const styleTags = clonedDoc.querySelectorAll('style');
+          styleTags.forEach(style => {
+            if (style.textContent && style.textContent.includes('oklch')) {
+              style.textContent = style.textContent.replace(/oklch\([^)]+\)/g, '#000000');
+            }
+          });
+          const allEls = clonedEl.querySelectorAll('*');
+          allEls.forEach(node => {
+            const elem = node as HTMLElement;
+            if (elem.style) {
+              if (elem.style.color && elem.style.color.includes('oklch')) {
+                elem.style.color = '#000000';
+              }
+              if (elem.style.backgroundColor && elem.style.backgroundColor.includes('oklch')) {
+                elem.style.backgroundColor = '#ffffff';
+              }
+              if (elem.style.borderColor && elem.style.borderColor.includes('oklch')) {
+                elem.style.borderColor = '#000000';
+              }
+            }
+          });
+        } catch {
+          // Continue if dom traversal in clone encounters non-standard nodes
+        }
+      }
     });
 
     const imgData = canvas.toDataURL('image/jpeg', 0.98);

@@ -80,7 +80,10 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
   const [hasGoogleToken, setHasGoogleToken] = useState(() => !!getGoogleAccessToken());
   const [connectedEmail, setConnectedEmail] = useState<string | null>(() => {
     const s = getStoredAuthSession();
-    return s?.googleEmail || null;
+    return s?.googleEmail || localStorage.getItem('hesabaty_backup_gmail') || null;
+  });
+  const [gmailInput, setGmailInput] = useState(() => {
+    return localStorage.getItem('hesabaty_backup_gmail') || connectedEmail || 'mwdrnalrwdt@gmail.com';
   });
 
   const activeTenantId = getActiveTenantId() || 'comp_main';
@@ -147,6 +150,8 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
       const { email } = await linkGoogleDriveAccount();
       setHasGoogleToken(true);
       setConnectedEmail(email);
+      setGmailInput(email);
+      localStorage.setItem('hesabaty_backup_gmail', email);
       setSuccessMessage(`تم ربط حساب Google بنجاح (${email})! جاري جلب النسخ من Drive...`);
       await fetchDriveBackups();
     } catch (err: any) {
@@ -161,6 +166,16 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
     } finally {
       setIsLinkingGoogle(false);
     }
+  };
+
+  const handleSaveGmail = () => {
+    if (!gmailInput.trim() || !gmailInput.includes('@')) {
+      setErrorMessage('يرجى كتابة عنوان بريد Gmail صحيح (مثال: name@gmail.com)');
+      return;
+    }
+    localStorage.setItem('hesabaty_backup_gmail', gmailInput.trim());
+    setConnectedEmail(gmailInput.trim());
+    setSuccessMessage(`تم حفظ بريد Gmail المخصص للنسخ الاحتياطي: ${gmailInput.trim()}`);
   };
 
   // Upload database to Google Drive
@@ -449,7 +464,7 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
           {activeTab === 'drive' && (
             <div className="space-y-4">
               {/* Google Account Connection Status Card */}
-              <div className="bg-gradient-to-r from-blue-50 via-indigo-50/40 to-slate-50 border border-blue-200/80 rounded-2xl p-4">
+              <div className="bg-gradient-to-r from-blue-50 via-indigo-50/40 to-slate-50 border border-blue-200/80 rounded-2xl p-4 space-y-3.5">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <div className="w-11 h-11 bg-white rounded-xl shadow-xs border border-blue-100 flex items-center justify-center shrink-0">
@@ -470,12 +485,12 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
                           </span>
                         ) : (
                           <span className="text-amber-800 font-bold bg-amber-100 px-2 py-0.5 rounded-full text-[10px]">
-                            غير متصل
+                            {connectedEmail ? 'تم تحديد البريد' : 'غير متصل'}
                           </span>
                         )}
                       </div>
-                      <div className="text-[11px] text-slate-600 mt-0.5 font-mono">
-                        {connectedEmail ? connectedEmail : 'لم يتم ربط حساب Gmail بعد'}
+                      <div className="text-[11px] text-slate-700 font-bold mt-0.5 font-mono">
+                        {connectedEmail ? connectedEmail : 'لم يتم تحديد بريد Gmail بعد'}
                       </div>
                     </div>
                   </div>
@@ -491,8 +506,31 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
                     ) : (
                       <RefreshCw className="w-3.5 h-3.5 text-blue-600" />
                     )}
-                    <span>{hasGoogleToken ? 'تغيير أو إعادة ربط Gmail' : 'ربط واختيار Gmail من هاتفك'}</span>
+                    <span>{hasGoogleToken ? 'تغيير أو إعادة ربط حساب Google' : 'ربط واختيار Gmail من الهاتف'}</span>
                   </button>
+                </div>
+
+                {/* Explicit Gmail Add / Configure Box */}
+                <div className="pt-2 border-t border-blue-200/60 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  <div className="text-[11px] font-bold text-slate-700 shrink-0">
+                    تعيين بريد Gmail لدرايف:
+                  </div>
+                  <div className="flex-1 flex gap-2">
+                    <input
+                      type="email"
+                      value={gmailInput}
+                      onChange={e => setGmailInput(e.target.value)}
+                      placeholder="أدخل بريدك الإلكتروني (مثال: name@gmail.com)"
+                      className="flex-1 px-3 py-1.5 bg-white border border-slate-300 rounded-xl text-xs font-mono outline-none focus:border-blue-600"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveGmail}
+                      className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer shadow-2xs"
+                    >
+                      حفظ وتثبيت البريد
+                    </button>
+                  </div>
                 </div>
               </div>
 
