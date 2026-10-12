@@ -11,7 +11,10 @@ import {
   FileText,
   Receipt,
   List,
-  ArrowUpDown
+  ArrowUpDown,
+  Printer,
+  Download,
+  FileSpreadsheet
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -20,6 +23,12 @@ import {
 import { formatMoney, logAudit } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import {
+  UniversalPrintModal,
+  MovementPrintBlock,
+  formatCleanNumber
+} from './UniversalPrintModal';
+import { exportTableToCsv } from '../services/exportService';
 
 interface PurchasesViewProps {
   db: AccountingDB;
@@ -40,6 +49,11 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'month'>('all');
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'highest' | 'lowest'>('newest');
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
+
+  // Print modal state for batch and single invoice
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
+  const [printDocTitle, setPrintDocTitle] = useState('فواتير المشتريات');
 
   // Mobile back button: If inside purchase invoice editor, phone back button exits editor to list
   useModalBackHandler(
@@ -91,6 +105,77 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     .reduce((s, i) => s + i.paid, 0);
 
   const totalDue = totalPurchases - totalPaid;
+
+  // Print all filtered purchase invoices in approved design
+  const handlePrintBatch = () => {
+    if (purchaseInvoices.length === 0) {
+      alert('لا توجد فواتير مشتريات للطباعة!');
+      return;
+    }
+
+    const docs: MovementPrintBlock[] = purchaseInvoices.map(inv => ({
+      title: 'فاتورة مشتريات وتوريد بضائع',
+      serialNo: inv.number,
+      date: inv.date,
+      time: inv.time,
+      partyLabel: 'المورد:',
+      partyName: inv.partyName,
+      partySubId: inv.partyPhone,
+      badge: inv.status,
+      tableHeaders: [
+        { label: 'م', width: '6%', align: 'center' },
+        { label: 'الصنف المورد', width: '40%', align: 'right' },
+        { label: 'الكمية', width: '14%', align: 'center' },
+        { label: 'سعر الشراء', width: '20%', align: 'center' },
+        { label: 'الإجمالي', width: '20%', align: 'center' }
+      ],
+      tableRows: inv.items.map((it, idx) => ({
+        cols: [
+          idx + 1,
+          it.productName,
+          `${it.qty} ${it.unit || ''}`,
+          formatMoney(it.unitPrice, db.settings.currency),
+          formatMoney(it.total, db.settings.currency)
+        ]
+      })),
+      summaryLines: [
+        { label: 'إجمالي المشتريات', value: formatMoney(inv.subtotal || inv.total, db.settings.currency) },
+        inv.discount ? { label: 'الخصم الممنوح', value: formatMoney(inv.discount, db.settings.currency) } : null,
+        inv.tax ? { label: 'ضريبة القيمة المضافة', value: formatMoney(inv.tax, db.settings.currency) } : null,
+        { label: 'الصافي النهائي', value: formatMoney(inv.total, db.settings.currency), isTotal: true },
+        { label: 'المدفوع نقداً للمورد', value: formatMoney(inv.paid, db.settings.currency) },
+        { label: 'المتبقي آجل للمورد', value: formatMoney(inv.remaining, db.settings.currency), highlight: inv.remaining > 0 }
+      ].filter(Boolean) as any[],
+      footerNotes: inv.notes || 'تم استلام وتوريد البضاعة للمخزن وقيد الحساب'
+    }));
+
+    setPrintDocuments(docs);
+    setPrintDocTitle(`فواتير المشتريات المحددة (${purchaseInvoices.length} فاتورة)`);
+    setPrintModalOpen(true);
+  };
+
+  // Export CSV
+  const handleExportCsv = () => {
+    if (purchaseInvoices.length === 0) {
+      alert('لا توجد فواتير مشتريات للتصدير!');
+      return;
+    }
+
+    const headers = ['رقم الفاتورة', 'التاريخ', 'المورد', 'طريقة السداد', 'عدد الأصناف', 'الإجمالي', 'المدفوع', 'المستحق', 'الحالة'];
+    const rows = purchaseInvoices.map(inv => [
+      inv.number,
+      inv.date,
+      inv.partyName,
+      inv.paymentMethod,
+      inv.items.length,
+      inv.total,
+      inv.paid,
+      inv.remaining,
+      inv.status
+    ]);
+
+    exportTableToCsv(`purchases_invoices_${Date.now()}.csv`, headers, rows);
+  };
 
   const handleDeleteInvoice = (inv: Invoice) => {
     if (!confirm(`هل أنت متأكد من حذف فاتورة الشراء "${inv.number}"؟ سيتم عكس كميات المخزون والمصروفات والقيود المحاسبية.`)) {
@@ -165,16 +250,38 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
           </div>
         </div>
 
-        <button
-          onClick={() => {
-            setEditingInvoice(null);
-            setActiveTab('editor');
-          }}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>+ إنشاء فاتورة شراء جديدة</span>
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+            title="تصدير جدول المشتريات بصيغة Excel"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+            <span>Excel</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handlePrintBatch}
+            className="px-3 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+            title="طباعة وتصدير جميع فواتير المشتريات المحددة PDF وورقياً"
+          >
+            <Printer className="w-4 h-4" />
+            <span>طباعة وتصدير PDF ({purchaseInvoices.length})</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setEditingInvoice(null);
+              setActiveTab('editor');
+            }}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>+ إنشاء فاتورة شراء جديدة</span>
+          </button>
+        </div>
       </div>
 
       {/* KPI Cards */}
@@ -421,6 +528,15 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
           ))}
         </div>
       )}
+
+      {/* Universal Print Modal for Purchases */}
+      <UniversalPrintModal
+        isOpen={printModalOpen}
+        onClose={() => setPrintModalOpen(false)}
+        documentTitle={printDocTitle}
+        documents={printDocuments}
+        settings={db.settings}
+      />
     </div>
   );
 };

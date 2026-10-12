@@ -705,6 +705,32 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     // 5. Save to invoices array
     updated.invoices.unshift(savedInvoice);
 
+    // If this is a return invoice, also populate db.returns items for individual return tracking
+    if (mode === 'sale_return' || mode === 'purchase_return') {
+      if (!updated.returns) updated.returns = [];
+      savedInvoice.items.forEach(it => {
+        updated.returns.unshift({
+          id: generateId('ret'),
+          number: savedInvoice.number,
+          type: mode === 'sale_return' ? 'sale' : 'purchase',
+          date: savedInvoice.date,
+          originalInvoiceId: savedInvoice.id,
+          originalInvoiceNumber: savedInvoice.number,
+          partyId: savedInvoice.partyId,
+          partyName: savedInvoice.partyName,
+          warehouseId: savedInvoice.warehouseId,
+          paymentMethod: savedInvoice.paymentMethod,
+          productId: it.productId,
+          productName: it.productName,
+          qty: it.qty,
+          price: it.unitPrice,
+          total: it.total,
+          notes: savedInvoice.notes,
+          journalEntryId: savedInvoice.journalEntryId
+        });
+      });
+    }
+
     // 6. Audit
     logAudit(
       updated,

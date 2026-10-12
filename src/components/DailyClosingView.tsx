@@ -18,7 +18,8 @@ import {
   AlertCircle,
   RefreshCw,
   Search,
-  ChevronDown
+  ChevronDown,
+  X
 } from 'lucide-react';
 import {
   AccountingDB,

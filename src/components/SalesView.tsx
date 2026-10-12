@@ -18,7 +18,9 @@ import {
   FileText,
   Receipt,
   List,
-  ArrowUpDown
+  ArrowUpDown,
+  Download,
+  FileSpreadsheet
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -27,6 +29,12 @@ import {
 import { formatMoney, logAudit } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import {
+  UniversalPrintModal,
+  MovementPrintBlock,
+  formatCleanNumber
+} from './UniversalPrintModal';
+import { exportTableToCsv } from '../services/exportService';
 
 interface SalesViewProps {
   db: AccountingDB;
@@ -48,6 +56,11 @@ export const SalesView: React.FC<SalesViewProps> = ({
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'month'>('all');
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'highest' | 'lowest'>('newest');
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
+
+  // Print modal state for batch & single invoice
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
+  const [printDocTitle, setPrintDocTitle] = useState('فواتير المبيعات');
 
   // Mobile back button: If inside invoice editor, phone back button exits editor to list
   useModalBackHandler(
@@ -99,6 +112,78 @@ export const SalesView: React.FC<SalesViewProps> = ({
     .reduce((s, i) => s + i.paid, 0);
 
   const totalPending = totalSales - totalCollected;
+
+  // Print all filtered sales invoices in approved design
+  const handlePrintBatch = () => {
+    if (salesInvoices.length === 0) {
+      alert('لا توجد فواتير مبيعات للطباعة!');
+      return;
+    }
+
+    const docs: MovementPrintBlock[] = salesInvoices.map(inv => ({
+      title: inv.invoiceKind === 'wholesale' ? 'فاتورة مبيعات جملة' : 'فاتورة مبيعات',
+      serialNo: inv.number,
+      date: inv.date,
+      time: inv.time,
+      partyLabel: 'العميل:',
+      partyName: inv.partyName,
+      partySubId: inv.partyPhone,
+      badge: inv.status,
+      tableHeaders: [
+        { label: 'م', width: '6%', align: 'center' },
+        { label: 'الصنف', width: '40%', align: 'right' },
+        { label: 'الكمية', width: '14%', align: 'center' },
+        { label: 'السعر', width: '20%', align: 'center' },
+        { label: 'الإجمالي', width: '20%', align: 'center' }
+      ],
+      tableRows: inv.items.map((it, idx) => ({
+        cols: [
+          idx + 1,
+          it.productName,
+          `${it.qty} ${it.unit || ''}`,
+          formatMoney(it.unitPrice, db.settings.currency),
+          formatMoney(it.total, db.settings.currency)
+        ]
+      })),
+      summaryLines: [
+        { label: 'إجمالي المبيعات', value: formatMoney(inv.subtotal || inv.total, db.settings.currency) },
+        inv.discount ? { label: 'الخصم', value: formatMoney(inv.discount, db.settings.currency) } : null,
+        inv.tax ? { label: 'ضريبة القيمة المضافة', value: formatMoney(inv.tax, db.settings.currency) } : null,
+        { label: 'الصافي النهائي', value: formatMoney(inv.total, db.settings.currency), isTotal: true },
+        { label: 'المحصل نقدياً', value: formatMoney(inv.paid, db.settings.currency) },
+        { label: 'المتبقي آجل', value: formatMoney(inv.remaining, db.settings.currency), highlight: inv.remaining > 0 }
+      ].filter(Boolean) as any[],
+      footerNotes: inv.notes || 'شكراً لتعاملكم معنا'
+    }));
+
+    setPrintDocuments(docs);
+    setPrintDocTitle(`فواتير المبيعات المحددة (${salesInvoices.length} فاتورة)`);
+    setPrintModalOpen(true);
+  };
+
+  // Export CSV
+  const handleExportCsv = () => {
+    if (salesInvoices.length === 0) {
+      alert('لا توجد فواتير مبيعات للتصدير!');
+      return;
+    }
+
+    const headers = ['رقم الفاتورة', 'النوع', 'التاريخ', 'العميل', 'طريقة السداد', 'عدد الأصناف', 'الإجمالي', 'المدفوع', 'المتبقي', 'الحالة'];
+    const rows = salesInvoices.map(inv => [
+      inv.number,
+      inv.invoiceKind === 'wholesale' ? 'جملة' : 'قطاعي',
+      inv.date,
+      inv.partyName,
+      inv.paymentMethod,
+      inv.items.length,
+      inv.total,
+      inv.paid,
+      inv.remaining,
+      inv.status
+    ]);
+
+    exportTableToCsv(`sales_invoices_${Date.now()}.csv`, headers, rows);
+  };
 
   const handleDeleteInvoice = (inv: Invoice) => {
     if (!confirm(`هل أنت متأكد من حذف فاتورة البيع "${inv.number}"؟ سيتم عكس المخزون والقيود المحاسبية بالكامل.`)) {
@@ -175,7 +260,27 @@ export const SalesView: React.FC<SalesViewProps> = ({
         </div>
 
         {/* Primary Action Buttons */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+            title="تصدير جدول المبيعات بصيغة Excel"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+            <span>Excel</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handlePrintBatch}
+            className="px-3 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+            title="طباعة وتصدير جميع فواتير المبيعات المحددة PDF وورقياً"
+          >
+            <Printer className="w-4 h-4" />
+            <span>طباعة وتصدير PDF ({salesInvoices.length})</span>
+          </button>
+
           <button
             onClick={() => {
               setEditingInvoice(null);
@@ -458,6 +563,15 @@ export const SalesView: React.FC<SalesViewProps> = ({
           })}
         </div>
       )}
+
+      {/* Universal Print Modal for Sales */}
+      <UniversalPrintModal
+        isOpen={printModalOpen}
+        onClose={() => setPrintModalOpen(false)}
+        documentTitle={printDocTitle}
+        documents={printDocuments}
+        settings={db.settings}
+      />
     </div>
   );
 };
