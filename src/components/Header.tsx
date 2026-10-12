@@ -66,17 +66,19 @@ export const Header: React.FC<HeaderProps> = ({
 
           <div 
             onClick={onOpenLogin}
-            className="flex items-center gap-2 cursor-pointer hover:opacity-85 transition-opacity"
-            title="انقر لتبديل المنشأة أو تأسيس شركة جديدة"
+            className="flex items-center gap-2.5 cursor-pointer hover:opacity-85 transition-opacity"
+            title="انقر لتبديل المستخدم أو تسجيل الدخول"
           >
-            <div className="w-9 h-9 rounded-lg bg-black text-white flex items-center justify-center font-black text-base shadow-xs">
-              <Building2 className="w-5 h-5" />
-            </div>
+            <img
+              src="/icon.svg"
+              alt="شعار حساباتي"
+              className="w-9 h-9 rounded-xl object-contain shadow-xs border border-slate-200 bg-white p-0.5"
+            />
             <div>
-              <div className="font-extrabold text-slate-900 text-sm leading-tight flex items-center gap-1.5">
+              <div className="font-black text-slate-900 text-sm leading-tight flex items-center gap-1.5">
                 <span>{settings.company || 'حساباتي'}</span>
                 <span className="text-[10px] bg-emerald-50 text-emerald-800 font-bold px-1.5 py-0.5 rounded-sm border border-emerald-200">
-                  مساحة معزولة
+                  حساباتي الشخصي
                 </span>
               </div>
               <div className="text-[11px] text-slate-500 font-medium">

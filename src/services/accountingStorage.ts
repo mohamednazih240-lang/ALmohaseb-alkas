@@ -316,6 +316,9 @@ export function createSeedData(
     bankReconciliations: [],
     goodsReceivedNotes: [],
     dailyClosings: [],
+    branches: [
+      { id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }
+    ],
     audit
   };
 }
@@ -372,6 +375,11 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
     if (!parsed.bankReconciliations) parsed.bankReconciliations = [];
     if (!parsed.goodsReceivedNotes) parsed.goodsReceivedNotes = [];
     if (!parsed.dailyClosings) parsed.dailyClosings = [];
+    if (!parsed.branches || parsed.branches.length === 0) {
+      parsed.branches = [
+        { id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }
+      ];
+    }
     if (!parsed.settings.nextGRN) parsed.settings.nextGRN = 7001;
 
     // Guarantee default accounts exist

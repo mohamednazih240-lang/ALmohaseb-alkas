@@ -387,6 +387,15 @@ export interface AuditLog {
   detail: string;
 }
 
+export interface Branch {
+  id: string;
+  name: string;
+  code: string;
+  address?: string;
+  phone?: string;
+  isMain?: boolean;
+}
+
 export interface User {
   id: string;
   name: string;
@@ -394,6 +403,17 @@ export interface User {
   password?: string;
   role: 'مدير' | 'محاسب' | 'مبيعات' | 'مخزن' | 'كاشير';
   active: boolean;
+  branchId?: string;
+  branchName?: string;
+  permissions?: {
+    canViewInvoices?: boolean;
+    canCreateInvoices?: boolean;
+    canViewReports?: boolean;
+    canViewProfits?: boolean;
+    canManageTreasury?: boolean;
+    canManageStock?: boolean;
+    canManageUsers?: boolean;
+  };
   lastLogin?: string;
 }
 
@@ -448,5 +468,6 @@ export interface AccountingDB {
   bankReconciliations: BankReconciliation[];
   goodsReceivedNotes: GoodsReceivedNote[];
   dailyClosings?: DailyClosing[];
+  branches?: Branch[];
   audit: AuditLog[];
 }

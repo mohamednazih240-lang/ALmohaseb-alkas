@@ -189,16 +189,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
       >
         {/* Company Quick Banner */}
         <div className="p-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-md bg-slate-950 text-white flex items-center justify-center font-black text-xs">
-              ح
-            </div>
+          <div className="flex items-center gap-2.5">
+            <img
+              src="/icon.svg"
+              alt="شعار حساباتي"
+              className="w-8 h-8 rounded-lg object-contain shadow-2xs border border-slate-200 bg-white p-0.5"
+            />
             <div>
               <div className="font-extrabold text-xs text-slate-900 leading-tight">
                 {companyName || 'حساباتي'}
               </div>
-              <div className="text-[10px] text-slate-500 font-medium">
-                نظام محاسبي متكامل
+              <div className="text-[10px] text-emerald-700 font-bold">
+                برنامج حساباتي المحاسبي
               </div>
             </div>
           </div>

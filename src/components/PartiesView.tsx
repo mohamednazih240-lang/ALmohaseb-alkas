@@ -32,6 +32,12 @@ import {
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import {
+  UniversalPrintModal,
+  MovementPrintBlock,
+  formatCleanNumber
+} from './UniversalPrintModal';
+import { exportTableToCsv } from '../services/exportService';
 
 interface PartiesViewProps {
   type: 'customer' | 'supplier';
@@ -55,6 +61,11 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
   // Statement modal state
   const [statementParty, setStatementParty] = useState<Party | null>(null);
+
+  // Universal print modal state
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
+  const [printDocTitle, setPrintDocTitle] = useState('');
 
   // Mobile back button handlers
   useModalBackHandler(showModal, () => setShowModal(false), 'party_modal');
@@ -292,6 +303,128 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
     return rows.sort((a, b) => (a.date > b.date ? 1 : -1));
   };
 
+  // Open full statement in UniversalPrintModal
+  const handleOpenStatement = (party: Party) => {
+    const rows = getStatementRows(party);
+    const curr = db.settings.currency;
+    const currentBalance = isCustomer
+      ? calculateCustomerBalance(db, party.id)
+      : calculateSupplierBalance(db, party.id);
+
+    const totalDebit = rows.reduce((s, r) => s + r.debit, 0);
+    const totalCredit = rows.reduce((s, r) => s + r.credit, 0);
+
+    const doc: MovementPrintBlock = {
+      title: `كشف حساب تفصيلي: ${party.name}`,
+      serialNo: `#STMT-${party.id.slice(0, 8)}`,
+      date: new Date().toISOString().slice(0, 10),
+      partyLabel: isCustomer ? 'العميل:' : 'المورد:',
+      partyName: `${party.name}${party.phone ? ` - هاتف: ${party.phone}` : ''}${party.address ? ` (${party.address})` : ''}`,
+      badge: isCustomer ? 'كشف حساب عميل' : 'كشف حساب مورد',
+      tableHeaders: [
+        { label: 'التاريخ', width: '15%', align: 'center' },
+        { label: 'البيان والحركة المالية', width: '40%', align: 'right' },
+        { label: 'مدين (+)', width: '15%', align: 'center' },
+        { label: 'دائن (-)', width: '15%', align: 'center' },
+        { label: 'الرصيد التراكمي', width: '15%', align: 'center' }
+      ],
+      tableRows: rows.map(r => ({
+        cols: [
+          r.date,
+          r.desc,
+          r.debit > 0 ? formatMoney(r.debit, curr) : '—',
+          r.credit > 0 ? formatMoney(r.credit, curr) : '—',
+          formatMoney(r.balance, curr)
+        ],
+        highlight: r.balance > 0,
+        isBold: r.balance !== 0
+      })),
+      summaryLines: [
+        { label: 'إجمالي الحركات المدينة', value: formatMoney(totalDebit, curr) },
+        { label: 'إجمالي الحركات الدائنة', value: formatMoney(totalCredit, curr) },
+        { label: 'الرصيد الصافي المستحق', value: formatMoney(currentBalance, curr), isTotal: true, highlight: true }
+      ],
+      footerNotes: 'هذا الكشف صادر إلكترونياً ويعتبر مطابقاً لحسابات المنشأة حتى تاريخه.'
+    };
+
+    setPrintDocTitle(`كشف حساب - ${party.name}`);
+    setPrintDocuments([doc]);
+    setPrintModalOpen(true);
+  };
+
+  // Print all parties directory
+  const handlePrintAllParties = () => {
+    if (filteredParties.length === 0) {
+      alert('لا توجد بيانات للطباعة');
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const curr = db.settings.currency;
+
+    const doc: MovementPrintBlock = {
+      title: `كشف وأرصدة ${isCustomer ? 'العملاء والذمم المدينة' : 'الموردين والذمم الدائنة'}`,
+      serialNo: `#DIR-${isCustomer ? 'CUST' : 'SUP'}-${today}`,
+      date: today,
+      partyLabel: 'إجمالي القائمة:',
+      partyName: `${filteredParties.length} طرف مسجل`,
+      badge: isCustomer ? 'دليل عملاء' : 'دليل موردين',
+      tableHeaders: [
+        { label: 'الاسم', width: '30%', align: 'right' },
+        { label: 'الهاتف', width: '18%', align: 'center' },
+        { label: 'العنوان', width: '22%', align: 'right' },
+        { label: 'حد الائتمان', width: '15%', align: 'center' },
+        { label: 'الرصيد الحالي', width: '15%', align: 'center' }
+      ],
+      tableRows: filteredParties.map(p => {
+        const bal = isCustomer ? calculateCustomerBalance(db, p.id) : calculateSupplierBalance(db, p.id);
+        return {
+          cols: [
+            p.name,
+            p.phone || '—',
+            p.address || '—',
+            formatMoney(p.creditLimit || 0, curr),
+            formatMoney(bal, curr)
+          ],
+          highlight: bal > 0,
+          isBold: bal > 0
+        };
+      }),
+      summaryLines: [
+        { label: isCustomer ? 'إجمالي مديونيات العملاء' : 'إجمالي مستحقات الموردين', value: formatMoney(totalBalance, curr), isTotal: true, highlight: true }
+      ],
+      footerNotes: `تم استخراج هذا التقرير تلقائياً من نظام حساباتي بتاريخ ${today}`
+    };
+
+    setPrintDocTitle(`كشف ${isCustomer ? 'العملاء' : 'الموردين'}`);
+    setPrintDocuments([doc]);
+    setPrintModalOpen(true);
+  };
+
+  // Export to CSV
+  const handleExportCsv = () => {
+    if (filteredParties.length === 0) {
+      alert('لا توجد بيانات للتصدير');
+      return;
+    }
+    const headers = ['الاسم', 'الهاتف', 'العنوان', 'الرقم الضريبي', 'حد الائتمان', 'الرصيد'];
+    const rows = filteredParties.map(p => {
+      const bal = isCustomer ? calculateCustomerBalance(db, p.id) : calculateSupplierBalance(db, p.id);
+      return [
+        p.name,
+        p.phone || '',
+        p.address || '',
+        p.taxNumber || '',
+        (p.creditLimit || 0).toString(),
+        bal.toString()
+      ];
+    });
+    exportTableToCsv(
+      `${isCustomer ? 'customers' : 'suppliers'}_${new Date().toISOString().slice(0, 10)}.csv`,
+      headers,
+      rows
+    );
+  };
+
   return (
     <div className="space-y-6 pb-12">
       {/* Header */}
@@ -306,13 +439,35 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
           </p>
         </div>
 
-        <button
-          onClick={handleOpenNewModal}
-          className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
-        >
-          <Plus className="w-4 h-4" />
-          <span>إضافة {isCustomer ? 'عميل جديد' : 'مورد جديد'}</span>
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+            title="تصدير كشف إكسل"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+            <span>تصدير Excel</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handlePrintAllParties}
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+            title="طباعة ومعاينة الكشف الشامل"
+          >
+            <Printer className="w-4 h-4 text-slate-600" />
+            <span>طباعة الكشف</span>
+          </button>
+
+          <button
+            onClick={handleOpenNewModal}
+            className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
+          >
+            <Plus className="w-4 h-4" />
+            <span>إضافة {isCustomer ? 'عميل جديد' : 'مورد جديد'}</span>
+          </button>
+        </div>
       </div>
 
       {/* KPI Cards */}
@@ -500,9 +655,9 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
                 <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-1.5">
                   <div className="flex items-center gap-1">
                     <button
-                      onClick={() => setStatementParty(p)}
+                      onClick={() => handleOpenStatement(p)}
                       className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-md text-xs font-bold flex items-center gap-1 transition-colors"
-                      title="عرض كشف الحساب التفصيلي"
+                      title="عرض كشف الحساب التفصيلي والطباعة"
                     >
                       <FileSpreadsheet className="w-3.5 h-3.5 text-slate-600" />
                       <span>كشف حساب</span>
@@ -758,6 +913,14 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
           </div>
         </div>
       )}
+      {/* Universal Print Modal for Statement & Directory */}
+      <UniversalPrintModal
+        isOpen={printModalOpen}
+        onClose={() => setPrintModalOpen(false)}
+        documentTitle={printDocTitle}
+        documents={printDocuments}
+        settings={db.settings}
+      />
     </div>
   );
 };

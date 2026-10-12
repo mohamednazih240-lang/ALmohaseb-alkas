@@ -521,11 +521,18 @@ export const SalesView: React.FC<SalesViewProps> = ({
                   </div>
                 </div>
 
-                {/* Card Footer: Items count and Actions */}
+                {/* Card Footer: Items count, Creator User, and Actions */}
                 <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-slate-400 font-medium">
-                    {inv.items.length} صنف مسجل
-                  </span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[11px] text-slate-500 font-medium">
+                      {inv.items.length} أصناف
+                    </span>
+                    {inv.createdBy && (
+                      <span className="text-[10px] bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded font-bold border border-slate-200">
+                        بواسطة: {inv.createdBy}
+                      </span>
+                    )}
+                  </div>
 
                   <div className="flex items-center gap-1">
                     <button

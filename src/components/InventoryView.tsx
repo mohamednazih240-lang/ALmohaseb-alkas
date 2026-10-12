@@ -19,7 +19,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Layers,
-  CheckCircle2
+  CheckCircle2,
+  Printer,
+  Download,
+  History,
+  Eye
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -36,6 +40,12 @@ import {
   logAudit
 } from '../services/accountingStorage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import {
+  UniversalPrintModal,
+  MovementPrintBlock,
+  formatCleanNumber
+} from './UniversalPrintModal';
+import { exportTableToCsv } from '../services/exportService';
 
 interface InventoryViewProps {
   subPage: 'products' | 'warehouses' | 'stock' | 'inventory' | 'prices';
@@ -84,6 +94,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(36);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  // Universal Print Modal State
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
+  const [printDocTitle, setPrintDocTitle] = useState('طباعة المخزون');
 
   // Statistics
   const inStockCount = db.products.filter(p => p.currentQty > 0).length;
@@ -340,6 +355,264 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     onUpdateDb(updated);
   };
 
+  // Export Products to CSV / Excel
+  const handleExportProductsCsv = () => {
+    if (filteredProducts.length === 0) {
+      alert('لا توجد أصناف للتصدير');
+      return;
+    }
+    const headers = ['كود الصنف', 'اسم الصنف', 'الباركود', 'الوحدة', 'الرصيد الحالي', 'سعر التكلفة', 'سعر البيع', 'سعر الجملة', 'الحد الأدنى', 'القيمة الإجمالية'];
+    const rows = filteredProducts.map(p => [
+      p.code,
+      p.name,
+      p.barcode || '',
+      p.unit,
+      p.currentQty.toString(),
+      (p.avgCost || p.buyPrice).toString(),
+      p.sellPrice.toString(),
+      (p.wholesalePrice || p.sellPrice).toString(),
+      p.minStock.toString(),
+      (p.currentQty * (p.avgCost || p.buyPrice)).toString()
+    ]);
+    exportTableToCsv(`inventory_products_${getTodayDate()}.csv`, headers, rows);
+  };
+
+  // Print Products Catalog & Prices
+  const handlePrintCatalog = () => {
+    if (filteredProducts.length === 0) {
+      alert('لا توجد أصناف للطباعة');
+      return;
+    }
+    const today = getTodayDate();
+    const curr = db.settings.currency;
+    const doc: MovementPrintBlock = {
+      title: 'كتالوج وقائمة أسعار الأصناف المعتمدة',
+      serialNo: `#CAT-${today}`,
+      date: today,
+      partyLabel: 'عدد الأصناف:',
+      partyName: `${filteredProducts.length} صنف مسجل`,
+      badge: 'كتالوج أسعار',
+      tableHeaders: [
+        { label: 'الكود', width: '12%', align: 'center' },
+        { label: 'اسم الصنف والمواصفات', width: '38%', align: 'right' },
+        { label: 'الوحدة', width: '10%', align: 'center' },
+        { label: 'الرصيد', width: '10%', align: 'center' },
+        { label: 'سعر التجزئة', width: '15%', align: 'center' },
+        { label: 'سعر الجملة', width: '15%', align: 'center' }
+      ],
+      tableRows: filteredProducts.map(p => ({
+        cols: [
+          p.code,
+          p.name,
+          p.unit,
+          `${p.currentQty}`,
+          formatMoney(p.sellPrice, curr),
+          formatMoney(p.wholesalePrice || p.sellPrice, curr)
+        ]
+      })),
+      summaryLines: [
+        { label: 'إجمالي عدد الأصناف المعروضة', value: `${filteredProducts.length} صنف` },
+        { label: 'إجمالي قيمة المخزون التقديرية', value: formatMoney(totalStockValue, curr), isTotal: true, highlight: true }
+      ],
+      footerNotes: 'الأسعار شاملة الضريبة إن وجدت وقابلة للتعديل بحسب تحديثات الإدارة.'
+    };
+    setPrintDocTitle('كتالوج وقائمة الأسعار');
+    setPrintDocuments([doc]);
+    setPrintModalOpen(true);
+  };
+
+  // Print Stock Valuation & Physical Count
+  const handlePrintStockValuation = () => {
+    if (filteredProducts.length === 0) {
+      alert('لا توجد أصناف للطباعة');
+      return;
+    }
+    const today = getTodayDate();
+    const curr = db.settings.currency;
+    const totalSell = filteredProducts.reduce((s, p) => s + (p.currentQty * p.sellPrice), 0);
+    const totalCost = filteredProducts.reduce((s, p) => s + (p.currentQty * (p.avgCost || p.buyPrice)), 0);
+
+    const doc: MovementPrintBlock = {
+      title: 'تقرير جرد وتقييم المخزون المالي',
+      serialNo: `#VAL-${today}`,
+      date: today,
+      partyLabel: 'عدد الأصناف:',
+      partyName: `${filteredProducts.length} صنف`,
+      badge: 'تقييم مخزون',
+      tableHeaders: [
+        { label: 'الكود', width: '12%', align: 'center' },
+        { label: 'اسم الصنف', width: '30%', align: 'right' },
+        { label: 'الرصيد', width: '12%', align: 'center' },
+        { label: 'التكلفة', width: '14%', align: 'center' },
+        { label: 'إجمالي التكلفة', width: '16%', align: 'center' },
+        { label: 'قيمة البيع', width: '16%', align: 'center' }
+      ],
+      tableRows: filteredProducts.map(p => {
+        const cost = p.avgCost || p.buyPrice;
+        return {
+          cols: [
+            p.code,
+            p.name,
+            `${p.currentQty} ${p.unit}`,
+            formatMoney(cost, curr),
+            formatMoney(p.currentQty * cost, curr),
+            formatMoney(p.currentQty * p.sellPrice, curr)
+          ],
+          highlight: p.currentQty <= p.minStock
+        };
+      }),
+      summaryLines: [
+        { label: 'إجمالي قيمة المخزون بالتكلفة', value: formatMoney(totalCost, curr) },
+        { label: 'إجمالي قيمة المخزون بالبيع', value: formatMoney(totalSell, curr) },
+        { label: 'الأرباح المتوقعة للمخزون', value: formatMoney(totalSell - totalCost, curr), isTotal: true, highlight: true }
+      ],
+      footerNotes: 'تم احتساب التكلفة وفقاً لمتوسط التكلفة المرجح للواردات.'
+    };
+    setPrintDocTitle('تقرير تقييم المخزون والجرد');
+    setPrintDocuments([doc]);
+    setPrintModalOpen(true);
+  };
+
+  // Detailed Product Movement Card (كارت صنف)
+  const handlePrintItemCard = (product: Product) => {
+    const today = getTodayDate();
+    const curr = db.settings.currency;
+    const moves: { date: string; desc: string; type: string; inQty: number; outQty: number; balance: number; unitPrice: number }[] = [];
+
+    // 1. Stock Movements log if present
+    const smList = db.stockMovements.filter(sm => sm.productId === product.id);
+    if (smList.length > 0) {
+      smList.forEach(sm => {
+        moves.push({
+          date: sm.date,
+          desc: `${sm.refNumber ? `[${sm.refNumber}] ` : ''}${sm.warehouseName || 'المخزن'} - حركة ${sm.type}`,
+          type: sm.type,
+          inQty: sm.qtyChange > 0 ? sm.qtyChange : 0,
+          outQty: sm.qtyChange < 0 ? Math.abs(sm.qtyChange) : 0,
+          balance: sm.balanceAfter,
+          unitPrice: sm.unitCost
+        });
+      });
+    } else {
+      // Fallback: Invoices, Returns, Adjustments
+      db.invoices.filter(inv => inv.type === 'purchase').forEach(inv => {
+        inv.items.filter(item => item.productId === product.id).forEach(item => {
+          moves.push({
+            date: inv.date,
+            desc: `فاتورة شراء رقم ${inv.number} (${inv.partyName || 'مورد'})`,
+            type: 'purchase',
+            inQty: item.qty,
+            outQty: 0,
+            balance: 0,
+            unitPrice: item.unitPrice
+          });
+        });
+      });
+
+      db.invoices.filter(inv => inv.type === 'sale').forEach(inv => {
+        inv.items.filter(item => item.productId === product.id).forEach(item => {
+          moves.push({
+            date: inv.date,
+            desc: `فاتورة بيع رقم ${inv.number} (${inv.partyName || 'عميل'})`,
+            type: 'sale',
+            inQty: 0,
+            outQty: item.qty,
+            balance: 0,
+            unitPrice: item.unitPrice
+          });
+        });
+      });
+
+      db.returns.filter(ret => ret.productId === product.id).forEach(ret => {
+        if (ret.type === 'purchase') {
+          moves.push({
+            date: ret.date,
+            desc: `مرتجع مشتريات رقم ${ret.number}`,
+            type: 'purchase_return',
+            inQty: 0,
+            outQty: ret.qty,
+            balance: 0,
+            unitPrice: ret.price
+          });
+        } else {
+          moves.push({
+            date: ret.date,
+            desc: `مرتجع مبيعات رقم ${ret.number}`,
+            type: 'sale_return',
+            inQty: ret.qty,
+            outQty: 0,
+            balance: 0,
+            unitPrice: ret.price
+          });
+        }
+      });
+
+      db.adjustments.filter(adj => adj.productId === product.id).forEach(adj => {
+        moves.push({
+          date: adj.date,
+          desc: `تسوية جردية (${adj.reason})`,
+          type: 'adj',
+          inQty: adj.diffQty > 0 ? adj.diffQty : 0,
+          outQty: adj.diffQty < 0 ? Math.abs(adj.diffQty) : 0,
+          balance: adj.actualQty,
+          unitPrice: adj.unitCost
+        });
+      });
+    }
+
+    moves.sort((a, b) => (a.date > b.date ? 1 : -1));
+
+    let run = 0;
+    moves.forEach(m => {
+      run = run + m.inQty - m.outQty;
+      if (!m.balance) {
+        m.balance = run;
+      }
+    });
+
+    const totalIn = moves.reduce((s, m) => s + m.inQty, 0);
+    const totalOut = moves.reduce((s, m) => s + m.outQty, 0);
+
+    const doc: MovementPrintBlock = {
+      title: `كارت حركة صنف: ${product.name}`,
+      serialNo: `#CARD-${product.code}-${today}`,
+      date: today,
+      partyLabel: 'الصنف / الكود:',
+      partyName: `${product.name} (${product.code})`,
+      badge: 'سجل حركة صنف',
+      tableHeaders: [
+        { label: 'التاريخ', width: '14%', align: 'center' },
+        { label: 'البيان والمستند', width: '38%', align: 'right' },
+        { label: 'الوارد (+)', width: '12%', align: 'center' },
+        { label: 'المنصرف (-)', width: '12%', align: 'center' },
+        { label: 'السعر', width: '12%', align: 'center' },
+        { label: 'الرصيد', width: '12%', align: 'center' }
+      ],
+      tableRows: moves.map(m => ({
+        cols: [
+          m.date,
+          m.desc,
+          m.inQty > 0 ? `+${m.inQty}` : '—',
+          m.outQty > 0 ? `-${m.outQty}` : '—',
+          formatMoney(m.unitPrice, curr),
+          `${m.balance} ${product.unit}`
+        ],
+        highlight: m.balance <= product.minStock,
+        isBold: m.inQty > 0 || m.outQty > 0
+      })),
+      summaryLines: [
+        { label: 'إجمالي الكميات الواردة', value: `${totalIn} ${product.unit}` },
+        { label: 'إجمالي الكميات المنصرفة', value: `${totalOut} ${product.unit}` },
+        { label: 'الرصيد الحالي بالمخزن', value: `${product.currentQty} ${product.unit}`, isTotal: true, highlight: true }
+      ],
+      footerNotes: `باركود: ${product.barcode || '—'} | الحد الأدنى: ${product.minStock} | متوسط التكلفة: ${formatMoney(product.avgCost || product.buyPrice, curr)}`
+    };
+
+    setPrintDocTitle(`كارت صنف - ${product.name}`);
+    setPrintDocuments([doc]);
+    setPrintModalOpen(true);
+  };
+
   return (
     <div className="space-y-6 pb-12">
       {/* 1. PRODUCTS SUBPAGE */}
@@ -374,6 +647,36 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleExportProductsCsv}
+                className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+                title="تصدير كشف الأصناف إكسل"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                <span>تصدير Excel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePrintCatalog}
+                className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+                title="طباعة كتالوج وقائمة الأسعار"
+              >
+                <Printer className="w-4 h-4 text-slate-600" />
+                <span>طباعة الكتالوج</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePrintStockValuation}
+                className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+                title="طباعة تقييم وجرد المخزون"
+              >
+                <Calculator className="w-4 h-4 text-slate-600" />
+                <span>تقييم وجرد</span>
+              </button>
+
               <button
                 type="button"
                 onClick={handleMergeCatalogAction}
@@ -665,6 +968,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       </span>
 
                       <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handlePrintItemCard(p)}
+                          className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                          title="عرض وطباعة كارت حركة الصنف"
+                        >
+                          <History className="w-3.5 h-3.5 text-blue-600" />
+                          <span>كارت حركة</span>
+                        </button>
                         <button
                           onClick={() => onOpenProductModal(p)}
                           className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
@@ -1203,6 +1515,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Universal Print Modal for Inventory & Products */}
+      <UniversalPrintModal
+        isOpen={printModalOpen}
+        onClose={() => setPrintModalOpen(false)}
+        documentTitle={printDocTitle}
+        documents={printDocuments}
+        settings={db.settings}
+      />
     </div>
   );
 };

@@ -607,6 +607,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       remaining: finalRemaining,
       status,
       notes: jobSite ? `جهة العمل: ${jobSite}` : undefined,
+      createdBy: editingInvoice?.createdBy || db.currentUser?.name || 'مدير النظام',
       items: JSON.parse(JSON.stringify(invoiceItems))
     };
 
