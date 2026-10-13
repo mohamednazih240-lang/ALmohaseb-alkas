@@ -423,10 +423,18 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                   <span className="font-mono font-black text-sm text-slate-900 block">
                     {inv.number}
                   </span>
-                  <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-1">
+                  <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-1.5 flex-wrap">
                     <Calendar className="w-3 h-3 text-slate-400" />
                     <span>{inv.date}</span>
                     {inv.time && <span>• {inv.time}</span>}
+                    <span className="text-[10px] font-bold text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                      بواسطة: {inv.createdBy || 'المدير'}
+                    </span>
+                    {inv.branchName && (
+                      <span className="text-[10px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">
+                        الفرع: {inv.branchName}
+                      </span>
+                    )}
                   </div>
                 </div>
 

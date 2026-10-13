@@ -13,13 +13,21 @@ import {
   AlertTriangle,
   CheckCircle2,
   X,
-  Cloud
+  Cloud,
+  Edit,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Building2,
+  Store,
+  Check
 } from 'lucide-react';
 import {
   AccountingDB,
   User,
   FiscalPeriod,
-  AppSettings
+  AppSettings,
+  Branch
 } from '../types/accounting';
 import {
   generateId,
@@ -27,12 +35,13 @@ import {
   createSeedData,
   cleanAllDemoTransactions,
   defaultSettings,
-  logAudit
+  logAudit,
+  formatMoney
 } from '../services/accountingStorage';
 import { updateCompany, getActiveTenantId } from '../services/tenantService';
 
 interface SystemViewsProps {
-  subPage: 'users' | 'audit' | 'periods' | 'backup' | 'settings';
+  subPage: 'users' | 'branches' | 'audit' | 'periods' | 'backup' | 'settings';
   db: AccountingDB;
   onUpdateDb: (updated: AccountingDB) => void;
   onOpenGoogleDriveBackup?: () => void;
@@ -46,9 +55,31 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 }) => {
   // User form modal
   const [showUserModal, setShowUserModal] = useState(false);
+  const [editingUser, setEditingUser] = useState<User | null>(null);
   const [userName, setUserName] = useState('');
   const [userUsername, setUserUsername] = useState('');
-  const [userRole, setUserRole] = useState<'مدير' | 'محاسب' | 'مبيعات' | 'مخزن' | 'كاشير'>('محاسب');
+  const [userPassword, setUserPassword] = useState('');
+  const [showUserPassword, setShowUserPassword] = useState(false);
+  const [userRole, setUserRole] = useState<'مدير' | 'محاسب' | 'مبيعات' | 'مخزن' | 'كاشير'>('كاشير');
+  const [userBranchId, setUserBranchId] = useState('');
+  const [userPermissions, setUserPermissions] = useState({
+    canViewInvoices: true,
+    canCreateInvoices: true,
+    canViewReports: false,
+    canViewProfits: false,
+    canManageTreasury: false,
+    canManageStock: false,
+    canManageUsers: false
+  });
+
+  // Branch form modal
+  const [showBranchModal, setShowBranchModal] = useState(false);
+  const [editingBranch, setEditingBranch] = useState<Branch | null>(null);
+  const [branchName, setBranchName] = useState('');
+  const [branchCode, setBranchCode] = useState('');
+  const [branchAddress, setBranchAddress] = useState('');
+  const [branchPhone, setBranchPhone] = useState('');
+  const [branchIsMain, setBranchIsMain] = useState(false);
 
   // Period form modal
   const [showPeriodModal, setShowPeriodModal] = useState(false);
@@ -100,25 +131,188 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     setAuditErrors(errors);
   };
 
-  // Add User
+  // Open User Modals
+  const handleOpenAddUser = () => {
+    setEditingUser(null);
+    setUserName('');
+    setUserUsername('');
+    setUserPassword('');
+    setShowUserPassword(false);
+    setUserRole('كاشير');
+    setUserBranchId(db.branches?.[0]?.id || 'br_main');
+    setUserPermissions({
+      canViewInvoices: true,
+      canCreateInvoices: true,
+      canViewReports: false,
+      canViewProfits: false,
+      canManageTreasury: true,
+      canManageStock: false,
+      canManageUsers: false
+    });
+    setShowUserModal(true);
+  };
+
+  const handleOpenEditUser = (u: User) => {
+    setEditingUser(u);
+    setUserName(u.name);
+    setUserUsername(u.username);
+    setUserPassword(u.password || '');
+    setShowUserPassword(false);
+    setUserRole(u.role);
+    setUserBranchId(u.branchId || db.branches?.[0]?.id || 'br_main');
+    setUserPermissions({
+      canViewInvoices: u.permissions?.canViewInvoices !== false,
+      canCreateInvoices: u.permissions?.canCreateInvoices !== false,
+      canViewReports: u.permissions?.canViewReports === true || u.role === 'مدير' || u.role === 'محاسب',
+      canViewProfits: u.permissions?.canViewProfits === true || u.role === 'مدير',
+      canManageTreasury: u.permissions?.canManageTreasury === true || u.role === 'مدير' || u.role === 'كاشير',
+      canManageStock: u.permissions?.canManageStock === true || u.role === 'مدير' || u.role === 'مخزن',
+      canManageUsers: u.permissions?.canManageUsers === true || u.role === 'مدير'
+    });
+    setShowUserModal(true);
+  };
+
   const handleSaveUser = (e: React.FormEvent) => {
     e.preventDefault();
     if (!userName.trim() || !userUsername.trim()) return alert('أكمل بيانات المستخدم');
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const newUser: User = {
-      id: generateId('usr'),
-      name: userName.trim(),
-      username: userUsername.trim().toLowerCase(),
-      role: userRole,
-      active: true
-    };
-    updated.users.push(newUser);
-    logAudit(updated, 'إضافة مستخدم جديد', `${newUser.name} (${newUser.role})`);
+    const branch = (updated.branches || []).find(b => b.id === userBranchId);
+
+    const fullPermissions = userRole === 'مدير' ? {
+      canViewInvoices: true,
+      canCreateInvoices: true,
+      canViewReports: true,
+      canViewProfits: true,
+      canManageTreasury: true,
+      canManageStock: true,
+      canManageUsers: true
+    } : userPermissions;
+
+    if (editingUser) {
+      const idx = updated.users.findIndex(u => u.id === editingUser.id);
+      if (idx !== -1) {
+        updated.users[idx] = {
+          ...updated.users[idx],
+          name: userName.trim(),
+          username: userUsername.trim().toLowerCase(),
+          password: userPassword.trim(),
+          role: userRole,
+          branchId: userBranchId || undefined,
+          branchName: branch?.name || undefined,
+          permissions: fullPermissions
+        };
+        logAudit(updated, 'تعديل بيانات مستخدم', `${userName} (${userRole})`);
+      }
+    } else {
+      const newUser: User = {
+        id: generateId('usr'),
+        name: userName.trim(),
+        username: userUsername.trim().toLowerCase(),
+        password: userPassword.trim(),
+        role: userRole,
+        active: true,
+        branchId: userBranchId || undefined,
+        branchName: branch?.name || undefined,
+        permissions: fullPermissions
+      };
+      updated.users.push(newUser);
+      logAudit(updated, 'إضافة مستخدم جديد', `${newUser.name} (${newUser.role})`);
+    }
+
     onUpdateDb(updated);
     setShowUserModal(false);
-    setUserName('');
-    setUserUsername('');
+  };
+
+  const handleDeleteUser = (u: User) => {
+    if (u.role === 'مدير' && db.users.filter(x => x.role === 'مدير').length <= 1) {
+      alert('لا يمكن حذف المدير العام الوحيد للنظام.');
+      return;
+    }
+    if (!confirm(`هل أنت متأكد من حذف المستخدم "${u.name}"؟`)) return;
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    updated.users = updated.users.filter(x => x.id !== u.id);
+    logAudit(updated, 'حذف مستخدم', u.name);
+    onUpdateDb(updated);
+  };
+
+  // Branch Handlers
+  const handleOpenAddBranch = () => {
+    setEditingBranch(null);
+    setBranchName('');
+    setBranchCode(`BR-0${(db.branches?.length || 0) + 1}`);
+    setBranchAddress('');
+    setBranchPhone('');
+    setBranchIsMain(false);
+    setShowBranchModal(true);
+  };
+
+  const handleOpenEditBranch = (b: Branch) => {
+    setEditingBranch(b);
+    setBranchName(b.name);
+    setBranchCode(b.code);
+    setBranchAddress(b.address || '');
+    setBranchPhone(b.phone || '');
+    setBranchIsMain(!!b.isMain);
+    setShowBranchModal(true);
+  };
+
+  const handleSaveBranch = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!branchName.trim()) return alert('يرجى إدخال اسم الفرع');
+
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    if (!updated.branches) updated.branches = [];
+
+    if (branchIsMain) {
+      updated.branches.forEach(b => { b.isMain = false; });
+    }
+
+    if (editingBranch) {
+      const idx = updated.branches.findIndex(b => b.id === editingBranch.id);
+      if (idx !== -1) {
+        updated.branches[idx] = {
+          ...updated.branches[idx],
+          name: branchName.trim(),
+          code: branchCode.trim() || `BR-${Date.now().toString().slice(-3)}`,
+          address: branchAddress.trim(),
+          phone: branchPhone.trim(),
+          isMain: branchIsMain
+        };
+        logAudit(updated, 'تعديل فرع', branchName);
+      }
+    } else {
+      const newBranch: Branch = {
+        id: generateId('br'),
+        name: branchName.trim(),
+        code: branchCode.trim() || `BR-${(updated.branches.length + 1).toString().padStart(2, '0')}`,
+        address: branchAddress.trim(),
+        phone: branchPhone.trim(),
+        isMain: branchIsMain || updated.branches.length === 0
+      };
+      updated.branches.push(newBranch);
+      logAudit(updated, 'إضافة فرع جديد للمحل', newBranch.name);
+    }
+
+    onUpdateDb(updated);
+    setShowBranchModal(false);
+  };
+
+  const handleDeleteBranch = (b: Branch) => {
+    if (b.isMain) {
+      alert('لا يمكن حذف الفرع الرئيسي للمحل.');
+      return;
+    }
+    const hasInvoices = (db.invoices || []).some(inv => inv.branchId === b.id);
+    if (hasInvoices) {
+      alert('لا يمكن حذف هذا الفرع لوجود فواتير مسجلة مرتبطة به.');
+      return;
+    }
+    if (!confirm(`هل ترغب في حذف فرع "${b.name}"؟`)) return;
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    updated.branches = (updated.branches || []).filter(x => x.id !== b.id);
+    logAudit(updated, 'حذف فرع', b.name);
+    onUpdateDb(updated);
   };
 
   // Add Period
@@ -261,14 +455,156 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                     نشط
                   </span>
                 </div>
-                <div className="flex items-center justify-between text-xs pt-1">
-                  <span className="text-slate-500">الدور والصلاحية:</span>
-                  <span className="px-2.5 py-1 rounded-md text-xs font-bold bg-slate-100 border border-slate-200 text-slate-800">
-                    {u.role}
-                  </span>
+
+                <div className="space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">الدور والوظيفة:</span>
+                    <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-slate-100 border border-slate-200 text-slate-800">
+                      {u.role}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">فرع العمل:</span>
+                    <span className="font-bold text-slate-800 flex items-center gap-1 text-[11px]">
+                      <Building2 className="w-3 h-3 text-blue-600" />
+                      {u.branchName || db.branches?.find(b => b.id === u.branchId)?.name || 'الفرع الرئيسي'}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">حماية الدخول:</span>
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                      u.password ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-slate-50 text-slate-500'
+                    }`}>
+                      {u.password ? 'محمي بكلمة مرور' : 'دخول مباشر بدون باسورد'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenEditUser(u)}
+                    className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                  >
+                    <Edit className="w-3.5 h-3.5" />
+                    <span>تعديل</span>
+                  </button>
+                  {u.role !== 'مدير' && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteUser(u)}
+                      className="px-2 py-1 text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded-md text-xs font-bold transition-all cursor-pointer"
+                      title="حذف المستخدم"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
+          </div>
+        </>
+      )}
+
+      {/* 2. BRANCHES MANAGEMENT */}
+      {subPage === 'branches' && (
+        <>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
+            <div>
+              <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
+                <Building2 className="w-6 h-6 text-blue-600" />
+                <span>فروع ومنافذ المحل</span>
+              </h1>
+              <p className="text-xs text-slate-500 font-medium mt-0.5">
+                إدارة الفروع ومنافذ البيع التابعة للمحل ومتابعة فواتير ومبيعات كل فرع بصورة مستقلة
+              </p>
+            </div>
+            <button
+              onClick={handleOpenAddBranch}
+              className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>إضافة فرع جديد للمحل</span>
+            </button>
+          </div>
+
+          {/* Branches Cards Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3.5">
+            {(db.branches || [
+              { id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }
+            ]).map(b => {
+              const branchInvoices = (db.invoices || []).filter(inv => inv.branchId === b.id);
+              const branchSales = branchInvoices
+                .filter(inv => inv.type === 'sale')
+                .reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
+
+              return (
+                <div key={b.id} className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs hover:shadow-xs transition-all space-y-3">
+                  <div className="flex items-start justify-between border-b border-slate-100 pb-2">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <h3 className="font-bold text-sm text-slate-900">{b.name}</h3>
+                        {b.isMain && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800">
+                            الرئيسي
+                          </span>
+                        )}
+                      </div>
+                      <span className="font-mono text-xs text-slate-500">{b.code}</span>
+                    </div>
+                    <div className="p-2 bg-blue-50 text-blue-600 rounded-lg">
+                      <Store className="w-4 h-4" />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5 text-xs bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                    {b.address && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">العنوان:</span>
+                        <span className="font-bold text-slate-800 truncate max-w-[150px]">{b.address}</span>
+                      </div>
+                    )}
+                    {b.phone && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-500">الهاتف:</span>
+                        <span className="font-mono font-bold text-slate-800">{b.phone}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">عدد الفواتير:</span>
+                      <span className="font-bold text-slate-900">{branchInvoices.length} فاتورة</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">إجمالي المبيعات:</span>
+                      <span className="font-bold text-emerald-700 font-mono">{formatMoney(branchSales, db.settings.currency)}</span>
+                    </div>
+                  </div>
+
+                  <div className="pt-1 flex items-center justify-end gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEditBranch(b)}
+                      className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                    >
+                      <Edit className="w-3.5 h-3.5" />
+                      <span>تعديل</span>
+                    </button>
+                    {!b.isMain && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteBranch(b)}
+                        className="px-2 py-1 text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded-md text-xs font-bold transition-all cursor-pointer"
+                        title="حذف الفرع"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
@@ -670,47 +1006,280 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
       {/* User Modal */}
       {showUserModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-3">
-          <div className="bg-white rounded-2xl w-full max-w-sm p-4 space-y-3">
-            <h2 className="text-sm font-black text-slate-900">إضافة مستخدم جديد للنظام</h2>
-            <form onSubmit={handleSaveUser} className="space-y-3">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-3 overflow-y-auto">
+          <div className="bg-white rounded-2xl w-full max-w-md p-5 space-y-4 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 my-8">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+              <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                <UserCheck className="w-4 h-4 text-emerald-600" />
+                <span>{editingUser ? 'تعديل بيانات المستخدم' : 'إضافة مستخدم جديد للنظام'}</span>
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowUserModal(false)}
+                className="p-1 text-slate-400 hover:text-black rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveUser} className="space-y-3.5">
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">الاسم الكامل</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">الاسم الكامل</label>
                 <input
                   type="text"
                   required
                   value={userName}
                   onChange={e => setUserName(e.target.value)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                  placeholder="مثال: أحمد محمد"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none"
                 />
               </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">اسم الدخول (Username)</label>
-                <input
-                  type="text"
-                  required
-                  value={userUsername}
-                  onChange={e => setUserUsername(e.target.value)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono"
-                />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">اسم الدخول (Username)</label>
+                  <input
+                    type="text"
+                    required
+                    value={userUsername}
+                    onChange={e => setUserUsername(e.target.value)}
+                    placeholder="ahmed"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-black outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">فرع العمل المخصص</label>
+                  <select
+                    value={userBranchId}
+                    onChange={e => setUserBranchId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none cursor-pointer"
+                  >
+                    {(db.branches || [
+                      { id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }
+                    ]).map(b => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} {b.isMain ? '(الرئيسي)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
+
+              {/* Password Field with Eye Toggle */}
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">الدور والصلاحية</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-bold text-slate-700">كلمة المرور (اختياري)</label>
+                  <span className="text-[10px] text-slate-400">اتركها فارغة للسماح بالدخول المباشر</span>
+                </div>
+                <div className="relative">
+                  <input
+                    type={showUserPassword ? 'text' : 'password'}
+                    value={userPassword}
+                    onChange={e => setUserPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full px-3 py-2 pr-9 pl-9 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-black outline-none"
+                  />
+                  <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
+                  <button
+                    type="button"
+                    onClick={() => setShowUserPassword(!showUserPassword)}
+                    className="absolute left-3 top-2.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                  >
+                    {showUserPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Role Selection */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">الدور والوظيفة</label>
                 <select
                   value={userRole}
                   onChange={e => setUserRole(e.target.value as any)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold outline-none cursor-pointer"
                 >
-                  <option value="مدير">مدير نظام كامل الصلاحيات</option>
-                  <option value="محاسب">محاسب مالي</option>
-                  <option value="مبيعات">موظف مبيعات</option>
-                  <option value="كاشير">كاشير ونقاط بيع</option>
-                  <option value="مخزن">أمين مخزن</option>
+                  <option value="مدير">مدير النظام (صلاحيات كاملة مطلقة)</option>
+                  <option value="محاسب">محاسب مالي (فواتير، سندات، قيود، تقارير)</option>
+                  <option value="كاشير">كاشير ونقاط بيع (مبيعات، سندات قبض، إغلاق ورديات)</option>
+                  <option value="مبيعات">موظف مبيعات (فواتير بيع وعروض أسعار وعملاء)</option>
+                  <option value="مخزن">أمين مخزن (مستودعات، أصناف، جرد، باركود)</option>
                 </select>
               </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setShowUserModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">حفظ المستخدم</button>
+
+              {/* Fine-grained permissions if not manager */}
+              {userRole !== 'مدير' && (
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                  <div className="text-[11px] font-bold text-slate-800 mb-1">تخصيص الصلاحيات الممنوحة:</div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={userPermissions.canViewInvoices}
+                        onChange={e => setUserPermissions(p => ({ ...p, canViewInvoices: e.target.checked }))}
+                        className="rounded text-black"
+                      />
+                      <span>عرض الفواتير</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={userPermissions.canCreateInvoices}
+                        onChange={e => setUserPermissions(p => ({ ...p, canCreateInvoices: e.target.checked }))}
+                        className="rounded text-black"
+                      />
+                      <span>إنشاء فواتير</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={userPermissions.canViewReports}
+                        onChange={e => setUserPermissions(p => ({ ...p, canViewReports: e.target.checked }))}
+                        className="rounded text-black"
+                      />
+                      <span>التقارير المالية</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={userPermissions.canViewProfits}
+                        onChange={e => setUserPermissions(p => ({ ...p, canViewProfits: e.target.checked }))}
+                        className="rounded text-black"
+                      />
+                      <span>أرباح الفواتير</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={userPermissions.canManageTreasury}
+                        onChange={e => setUserPermissions(p => ({ ...p, canManageTreasury: e.target.checked }))}
+                        className="rounded text-black"
+                      />
+                      <span>الخزينة والسندات</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={userPermissions.canManageStock}
+                        onChange={e => setUserPermissions(p => ({ ...p, canManageStock: e.target.checked }))}
+                        className="rounded text-black"
+                      />
+                      <span>المخازن والأصناف</span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowUserModal(false)}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-slate-950 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer"
+                >
+                  {editingUser ? 'حفظ التعديلات' : 'إضافة المستخدم'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Branch Modal */}
+      {showBranchModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-3">
+          <div className="bg-white rounded-2xl w-full max-w-sm p-5 space-y-4 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+              <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-blue-600" />
+                <span>{editingBranch ? 'تعديل بيانات الفرع' : 'إضافة فرع جديد للمحل'}</span>
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowBranchModal(false)}
+                className="p-1 text-slate-400 hover:text-black rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveBranch} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">اسم الفرع</label>
+                <input
+                  type="text"
+                  required
+                  value={branchName}
+                  onChange={e => setBranchName(e.target.value)}
+                  placeholder="مثال: فرع وسط البلد"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">كود الفرع</label>
+                <input
+                  type="text"
+                  value={branchCode}
+                  onChange={e => setBranchCode(e.target.value)}
+                  placeholder="BR-02"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-black outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">رقم الهاتف (اختياري)</label>
+                <input
+                  type="text"
+                  value={branchPhone}
+                  onChange={e => setBranchPhone(e.target.value)}
+                  placeholder="01012345678"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-black outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">العنوان (اختياري)</label>
+                <input
+                  type="text"
+                  value={branchAddress}
+                  onChange={e => setBranchAddress(e.target.value)}
+                  placeholder="شارع التحرير، القاهرة"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none"
+                />
+              </div>
+
+              <div className="pt-1">
+                <label className="flex items-center gap-2 cursor-pointer text-xs font-bold text-slate-800">
+                  <input
+                    type="checkbox"
+                    checked={branchIsMain}
+                    onChange={e => setBranchIsMain(e.target.checked)}
+                    className="rounded text-blue-600 w-4 h-4"
+                  />
+                  <span>تعيين هذا الفرع كفرع رئيسي للمحل</span>
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowBranchModal(false)}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer"
+                >
+                  {editingBranch ? 'حفظ التعديل' : 'حفظ الفرع'}
+                </button>
               </div>
             </form>
           </div>

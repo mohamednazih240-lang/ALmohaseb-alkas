@@ -608,6 +608,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       status,
       notes: jobSite ? `جهة العمل: ${jobSite}` : undefined,
       createdBy: editingInvoice?.createdBy || db.currentUser?.name || 'مدير النظام',
+      createdById: editingInvoice?.createdById || db.currentUser?.id || 'usr_admin',
+      branchId: editingInvoice?.branchId || db.currentUser?.branchId || db.branches?.[0]?.id || 'br_main',
+      branchName: editingInvoice?.branchName || db.currentUser?.branchName || db.branches?.[0]?.name || 'الفرع الرئيسي',
       items: JSON.parse(JSON.stringify(invoiceItems))
     };
 

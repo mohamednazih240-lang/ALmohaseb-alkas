@@ -13,12 +13,16 @@ import {
   Cloud,
   LogOut
 } from 'lucide-react';
-import { AppSettings, User as UserType } from '../types/accounting';
+import { AppSettings, User as UserType, Branch } from '../types/accounting';
 import { PWAInstallButton } from './PWAInstallBanner';
 
 interface HeaderProps {
   settings: AppSettings;
   currentUser: UserType;
+  branches?: Branch[];
+  activeBranchId?: string;
+  onSelectBranch?: (branchId: string) => void;
+  onOpenCreateBranch?: () => void;
   lowStockCount: number;
   onOpenQuickSearch: () => void;
   onToggleSidebar: () => void;
@@ -27,11 +31,16 @@ interface HeaderProps {
   onOpenDriveBackup?: () => void;
   onOpenLogin?: () => void;
   onLogout?: () => void;
+  onManualSync?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   settings,
   currentUser,
+  branches = [],
+  activeBranchId = '',
+  onSelectBranch = () => {},
+  onOpenCreateBranch = () => {},
   lowStockCount,
   onOpenQuickSearch,
   onToggleSidebar,
@@ -39,7 +48,8 @@ export const Header: React.FC<HeaderProps> = ({
   activePageTitle,
   onOpenDriveBackup,
   onOpenLogin,
-  onLogout
+  onLogout,
+  onManualSync
 }) => {
   const [showQuickDropdown, setShowQuickDropdown] = useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
@@ -66,7 +76,7 @@ export const Header: React.FC<HeaderProps> = ({
 
           <div 
             onClick={onOpenLogin}
-            className="flex items-center gap-2.5 cursor-pointer hover:opacity-85 transition-opacity"
+            className="flex items-center gap-2 cursor-pointer hover:opacity-85 transition-opacity"
             title="انقر لتبديل المستخدم أو تسجيل الدخول"
           >
             <img
@@ -76,15 +86,36 @@ export const Header: React.FC<HeaderProps> = ({
             />
             <div>
               <div className="font-black text-slate-900 text-sm leading-tight flex items-center gap-1.5">
-                <span>{settings.company || 'حساباتي'}</span>
-                <span className="text-[10px] bg-emerald-50 text-emerald-800 font-bold px-1.5 py-0.5 rounded-sm border border-emerald-200">
-                  حساباتي الشخصي
-                </span>
+                <span>حساباتي</span>
               </div>
               <div className="text-[11px] text-slate-500 font-medium">
                 {activePageTitle}
               </div>
             </div>
+          </div>
+
+          {/* Branch Switcher for Stores / Outlets */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold shadow-2xs">
+            <Building2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+            <select
+              value={activeBranchId}
+              onChange={(e) => {
+                if (e.target.value === '__add_new__') {
+                  onOpenCreateBranch();
+                } else {
+                  onSelectBranch(e.target.value);
+                }
+              }}
+              className="bg-transparent text-slate-800 text-xs font-bold outline-none cursor-pointer max-w-[120px] sm:max-w-[150px] truncate"
+              title="اختيار فرع المحل للعمليات والفواتير"
+            >
+              {(branches || []).map(b => (
+                <option key={b.id} value={b.id}>
+                  {b.name} {b.isMain ? '(الرئيسي)' : ''}
+                </option>
+              ))}
+              <option value="__add_new__">+ إنشاء فرع جديد...</option>
+            </select>
           </div>
         </div>
 
@@ -117,6 +148,20 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* PWA Mobile Install Button */}
           <PWAInstallButton />
+
+          {/* Realtime Live Cloud Sync Button */}
+          <button
+            type="button"
+            onClick={onManualSync}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-bold transition-all shadow-2xs cursor-pointer"
+            title="مزامنة لحظية مباشرة بين كافة التليفونات - انقر للتحديث الفوري"
+          >
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            <span className="hidden sm:inline text-[11px]">مزامنة لحظية</span>
+          </button>
 
           {/* Backup & Data Protection Button */}
           {onOpenDriveBackup && (
@@ -261,8 +306,8 @@ export const Header: React.FC<HeaderProps> = ({
                     onClick={onOpenLogin}
                     className="w-full px-3 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:text-black flex items-center gap-2 text-right cursor-pointer"
                   >
-                    <Building2 className="w-4 h-4 text-slate-700" />
-                    <span>تبديل المنشأة / تأسيس شركة جديدة</span>
+                    <User className="w-4 h-4 text-blue-600" />
+                    <span>تبديل المستخدم (تسجيل دخول)</span>
                   </button>
                 )}
 

@@ -476,6 +476,18 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
                   }`}>
                     {inv.status}
                   </span>
+                  <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-bold">
+                    {inv.createdBy && (
+                      <span className="bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded border border-slate-200">
+                        أنشأها: {inv.createdBy}
+                      </span>
+                    )}
+                    {inv.branchName && (
+                      <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200">
+                        {inv.branchName}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
@@ -536,6 +548,18 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
                   }`}>
                     {inv.status}
                   </span>
+                  <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-bold">
+                    {inv.createdBy && (
+                      <span className="bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded border border-slate-200">
+                        أنشأها: {inv.createdBy}
+                      </span>
+                    )}
+                    {inv.branchName && (
+                      <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200">
+                        {inv.branchName}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}

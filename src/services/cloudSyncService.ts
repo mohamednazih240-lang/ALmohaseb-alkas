@@ -14,29 +14,75 @@ export const firestore = getFirestore(auth.app);
 
 const SYNC_DOC_PATH = 'hesabaty_app_data';
 const SYNC_DOC_ID = 'main_company_database';
-
 let unsubscribeListener: (() => void) | null = null;
 let lastLocalSavedTimestamp = 0;
+export interface CloudSyncState {
+  status: 'connected' | 'syncing' | 'offline' | 'error';
+  lastSyncedAt: number;
+  lastUpdatedBy: string;
+}
+
+let syncState: CloudSyncState = {
+  status: 'connected',
+  lastSyncedAt: Date.now(),
+  lastUpdatedBy: 'النظام'
+};
+
+const statusListeners = new Set<(state: CloudSyncState) => void>();
+
+export function getCloudSyncState(): CloudSyncState {
+  return syncState;
+}
+
+export function subscribeToSyncStatus(listener: (state: CloudSyncState) => void): () => void {
+  statusListeners.add(listener);
+  listener(syncState);
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+function updateSyncState(partial: Partial<CloudSyncState>) {
+  syncState = { ...syncState, ...partial };
+  statusListeners.forEach(fn => fn(syncState));
+}
+
+let syncDebounceTimer: any = null;
 
 /**
  * Upload current database state to Firestore so all connected phones see it immediately
  */
 export async function pushDatabaseToCloud(db: AccountingDB): Promise<boolean> {
-  try {
-    const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-    const payload = {
-      updatedAt: Date.now(),
-      updatedBy: db.currentUser?.name || 'مستخدم حساباتي',
-      updatedRole: db.currentUser?.role || 'مدير',
-      data: JSON.stringify(db)
-    };
-    lastLocalSavedTimestamp = payload.updatedAt;
-    await setDoc(docRef, payload, { merge: true });
-    return true;
-  } catch (err) {
-    console.warn('Firestore cloud sync push warning (safe fallback to IndexedDB):', err);
-    return false;
+  if (syncDebounceTimer) {
+    clearTimeout(syncDebounceTimer);
   }
+
+  return new Promise((resolve) => {
+    syncDebounceTimer = setTimeout(async () => {
+      try {
+        updateSyncState({ status: 'syncing' });
+        const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
+        const payload = {
+          updatedAt: Date.now(),
+          updatedBy: db.currentUser?.name || 'مستخدم حساباتي',
+          updatedRole: db.currentUser?.role || 'مدير',
+          data: JSON.stringify(db)
+        };
+        lastLocalSavedTimestamp = payload.updatedAt;
+        await setDoc(docRef, payload, { merge: true });
+        updateSyncState({
+          status: 'connected',
+          lastSyncedAt: payload.updatedAt,
+          lastUpdatedBy: payload.updatedBy
+        });
+        resolve(true);
+      } catch (err) {
+        console.warn('Firestore cloud sync push warning (safe fallback to IndexedDB):', err);
+        updateSyncState({ status: 'offline' });
+        resolve(false);
+      }
+    }, 400);
+  });
 }
 
 /**

@@ -144,6 +144,9 @@ export interface Invoice {
   currencyCode?: string;
   exchangeRate?: number;
   createdBy?: string;
+  createdById?: string;
+  branchId?: string;
+  branchName?: string;
   deliveryFee?: number;
 }
 

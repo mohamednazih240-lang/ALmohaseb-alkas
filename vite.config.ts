@@ -14,9 +14,9 @@ export default defineConfig(() => {
         includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
         manifest: {
           id: '/',
-          name: 'حساباتي المحاسبي المتكامل - Hesabaty ERP',
-          short_name: 'حساباتي ERP',
-          description: 'نظام محاسبي سحابي وإداري متكامل لإدارة الفواتير والمخازن والعملاء والخزائن والقيود اليومية والتقارير المالية.',
+          name: 'حساباتي',
+          short_name: 'حساباتي',
+          description: 'برنامج حساباتي لإدارة حسابات المحل والفروع والمبيعات والمشتريات والمخزون مع المزامنة اللحظية وصلاحيات المستخدمين.',
           theme_color: '#0f172a',
           background_color: '#ffffff',
           display: 'standalone',
@@ -46,6 +46,7 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
           cleanupOutdatedCaches: true,
           clientsClaim: true,
           skipWaiting: true,

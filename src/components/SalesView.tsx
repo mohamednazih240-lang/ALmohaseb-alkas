@@ -532,6 +532,11 @@ export const SalesView: React.FC<SalesViewProps> = ({
                         بواسطة: {inv.createdBy}
                       </span>
                     )}
+                    {inv.branchName && (
+                      <span className="text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-bold border border-blue-200">
+                        الفرع: {inv.branchName}
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1">

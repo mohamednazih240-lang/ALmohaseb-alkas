@@ -43,6 +43,13 @@ import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { getStoredAuthSession, logoutUser, AuthSession } from './services/firebaseAuth';
 import { getActiveTenantId } from './services/tenantService';
 import { mergeCatalogIntoDb } from './data/defaultCatalog1001';
+import {
+  subscribeToCloudDatabase,
+  pushDatabaseToCloud,
+  fetchDatabaseFromCloud,
+  subscribeToSyncStatus,
+  CloudSyncState
+} from './services/cloudSyncService';
 
 export default function App() {
   const [db, setDb] = useState<AccountingDB>(() => {
@@ -58,6 +65,18 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
   const pageHistoryRef = useRef<PageId[]>(['dashboard']);
+
+  // Branch Selection State
+  const [activeBranchId, setActiveBranchId] = useState<string>(() => {
+    return db.branches?.[0]?.id || 'br_main';
+  });
+
+  // Cloud Sync state
+  const [syncState, setSyncState] = useState<CloudSyncState>({
+    status: 'connected',
+    lastSyncedAt: Date.now(),
+    lastUpdatedBy: 'النظام'
+  });
 
   // Authentication & Google Drive states:
   // When opening the link for the first time or logged out, login is strictly required
@@ -84,6 +103,7 @@ export default function App() {
 
   // Hydrate database from IndexedDB on startup (handles large databases up to gigabytes)
   useEffect(() => {
+    // 1. Hydrate from IndexedDB on startup
     loadFromIndexedDB().then(idbData => {
       if (idbData && idbData.invoices && idbData.settings) {
         if (!idbData.products || idbData.products.length < 1000) {
@@ -95,12 +115,37 @@ export default function App() {
         }
       }
     });
+
+    // 2. Fetch fresh cloud database on startup
+    fetchDatabaseFromCloud().then(cloudDb => {
+      if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
+        setDb(cloudDb);
+        saveDatabase(cloudDb);
+      }
+    });
+
+    // 3. Subscribe to sync status
+    const unsubStatus = subscribeToSyncStatus(state => {
+      setSyncState(state);
+    });
+
+    // 4. Subscribe to live Firestore updates across all phones
+    const unsubCloud = subscribeToCloudDatabase((remoteDb, updatedBy) => {
+      setDb(remoteDb);
+      saveDatabase(remoteDb);
+    });
+
+    return () => {
+      unsubStatus();
+      unsubCloud();
+    };
   }, []);
 
-  // Save changes to IndexedDB and localStorage
+  // Save changes to IndexedDB, localStorage, and Firestore Cloud Realtime
   const handleUpdateDb = (updated: AccountingDB) => {
     setDb(updated);
     saveDatabase(updated);
+    pushDatabaseToCloud(updated); // Sync immediately to Firestore for all other phones!
   };
 
   const validPages: PageId[] = [
@@ -110,7 +155,7 @@ export default function App() {
     'bank_reconciliation', 'cost_centers', 'currencies', 'fixed_assets',
     'expenses', 'revenues', 'accounts', 'journals', 'ledger',
     'daily_closing', 'profits',
-    'reports', 'closing', 'users', 'audit', 'periods', 'backup', 'settings'
+    'reports', 'closing', 'branches', 'users', 'audit', 'periods', 'backup', 'settings'
   ];
 
   // Sync with window.location.hash and mobile browser back button (popstate/hashchange)
@@ -240,6 +285,7 @@ export default function App() {
       case 'profits': return 'تحليل أرباح الفواتير والأصناف';
       case 'reports': return 'التقارير المالية والأرباح';
       case 'closing': return 'إقفال الفترات والترحيل السنوي للأرصدة';
+      case 'branches': return 'فروع ومنافذ المحل';
       case 'users': return 'المستخدمون والصلاحيات';
       case 'audit': return 'سجل النشاط وفحص السلامة';
       case 'periods': return 'الفترات المحاسبية';
@@ -250,14 +296,26 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-white text-slate-900 flex flex-col font-sans" dir="rtl">
+    <div className="min-h-screen bg-white text-slate-900 flex flex-col font-sans relative" dir="rtl">
+      {/* Hesabaty Subtle Background Watermark */}
+      <div 
+        className="fixed inset-0 pointer-events-none z-0 flex items-center justify-center opacity-[0.035] select-none"
+        aria-hidden="true"
+      >
+        <img src="/icon.svg" alt="" className="w-[520px] h-[520px] object-contain" />
+      </div>
+
       {/* PWA Mobile App Installation & Instant Auto-Update Banner */}
       <PWAInstallBanner />
 
-      {/* Header */}
+      {/* Header with Hesabaty Logo, Realtime Sync & Branch Switcher */}
       <Header
         settings={db.settings}
         currentUser={authSession?.user || db.currentUser || db.users[0]}
+        branches={db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }]}
+        activeBranchId={activeBranchId}
+        onSelectBranch={(bId) => setActiveBranchId(bId)}
+        onOpenCreateBranch={() => navigateToPage('branches')}
         lowStockCount={summary.lowStockCount}
         onOpenQuickSearch={() => setShowQuickSearch(true)}
         onToggleSidebar={() => setSidebarOpen(prev => !prev)}
@@ -267,6 +325,17 @@ export default function App() {
           logoutUser();
           setAuthSession(null);
           setShowLoginView(true);
+        }}
+        onManualSync={async () => {
+          const cloudDb = await fetchDatabaseFromCloud();
+          if (cloudDb) {
+            setDb(cloudDb);
+            saveDatabase(cloudDb);
+            alert('تمت المزامنة اللحظية بنجاح وتحديث كافة البيانات مع السحابة!');
+          } else {
+            await pushDatabaseToCloud(db);
+            alert('تم إرسال ومزامنة أحدث بياناتك بنجاح لكافة الهواتف المتصلة!');
+          }
         }}
         onQuickAction={(action) => {
           if (action === 'new_sale') navigateToPage('sales');
@@ -280,14 +349,15 @@ export default function App() {
         activePageTitle={getPageTitle(currentPage)}
       />
 
-      <div className="flex flex-1">
-        {/* Responsive Sidebar */}
+      <div className="flex flex-1 relative z-10">
+        {/* Responsive Sidebar with User Role & Permissions */}
         <Sidebar
           currentPage={currentPage}
           onSelectPage={navigateToPage}
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
           companyName={db.settings.company}
+          currentUser={authSession?.user || db.currentUser || db.users[0]}
         />
 
         {/* Main Workspace Content Area */}
@@ -482,6 +552,7 @@ export default function App() {
           )}
 
           {(currentPage === 'users' ||
+            currentPage === 'branches' ||
             currentPage === 'audit' ||
             currentPage === 'periods' ||
             currentPage === 'backup' ||

@@ -37,6 +37,7 @@ import {
   Barcode,
   LockKeyhole
 } from 'lucide-react';
+import { User } from '../types/accounting';
 import { PWAInstallButton } from './PWAInstallBanner';
 
 export type PageId =
@@ -72,6 +73,7 @@ export type PageId =
   | 'profits'
   | 'closing'
   | 'users'
+  | 'branches'
   | 'audit'
   | 'periods'
   | 'backup'
@@ -83,6 +85,40 @@ interface SidebarProps {
   isOpen: boolean;
   onClose: () => void;
   companyName: string;
+  currentUser?: User;
+}
+
+export function canUserAccessPage(user?: User, pageId?: PageId): boolean {
+  if (!user || user.role === 'مدير') return true;
+  const p = user.permissions;
+  if (pageId === 'dashboard') return true;
+  if (pageId === 'sales' || pageId === 'quotes' || pageId === 'orders' || pageId === 'returns') {
+    return p?.canViewInvoices !== false;
+  }
+  if (pageId === 'purchases' || pageId === 'procurement') {
+    return user.role === 'محاسب' || p?.canViewInvoices !== false;
+  }
+  if (pageId === 'customers' || pageId === 'suppliers') return true;
+  if (pageId === 'receipts' || pageId === 'payments' || pageId === 'treasury') {
+    return p?.canManageTreasury !== false && (user.role === 'محاسب' || user.role === 'كاشير');
+  }
+  if (pageId === 'products' || pageId === 'barcodes' || pageId === 'warehouses' || pageId === 'stock' || pageId === 'inventory' || pageId === 'prices') {
+    return p?.canManageStock !== false;
+  }
+  if (pageId === 'reports') {
+    return p?.canViewReports !== false && (user.role === 'محاسب' || user.role === 'مدير');
+  }
+  if (pageId === 'profits') {
+    return p?.canViewProfits === true;
+  }
+  if (pageId === 'daily_closing') return true;
+  if (pageId === 'accounts' || pageId === 'journals' || pageId === 'ledger' || pageId === 'closing' || pageId === 'periods') {
+    return user.role === 'محاسب';
+  }
+  if (pageId === 'users' || pageId === 'branches' || pageId === 'audit' || pageId === 'backup' || pageId === 'settings') {
+    return p?.canManageUsers === true;
+  }
+  return true;
 }
 
 interface NavSection {
@@ -155,6 +191,7 @@ const navSections: NavSection[] = [
       { id: 'profits', label: 'تحليل أرباح الفواتير والأصناف', icon: TrendingUp },
       { id: 'reports', label: 'التقارير المالية والمحاسبية', icon: BarChart3 },
       { id: 'closing', label: 'إقفال الفترات والترحيل السنوي', icon: LockKeyhole },
+      { id: 'branches', label: 'فروع المحل والنشاط', icon: Building2 },
       { id: 'users', label: 'المستخدمون والصلاحيات', icon: UserCheck },
       { id: 'audit', label: 'سجل النشاط والتدقيق', icon: ShieldCheck },
       { id: 'periods', label: 'الفترات المحاسبية', icon: Lock },
@@ -169,7 +206,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectPage,
   isOpen,
   onClose,
-  companyName
+  companyName,
+  currentUser
 }) => {
   return (
     <>
@@ -187,7 +225,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           isOpen ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
-        {/* Company Quick Banner */}
+        {/* App Quick Banner */}
         <div className="p-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
           <div className="flex items-center gap-2.5">
             <img
@@ -197,61 +235,66 @@ export const Sidebar: React.FC<SidebarProps> = ({
             />
             <div>
               <div className="font-extrabold text-xs text-slate-900 leading-tight">
-                {companyName || 'حساباتي'}
+                حساباتي
               </div>
-              <div className="text-[10px] text-emerald-700 font-bold">
-                برنامج حساباتي المحاسبي
+              <div className="text-[10px] text-emerald-700 font-bold truncate max-w-[130px]">
+                {currentUser ? `${currentUser.name} (${currentUser.role})` : 'برنامج الحسابات والفروع'}
               </div>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="lg:hidden p-1.5 text-slate-500 hover:text-black rounded-md hover:bg-slate-200 transition-colors"
+            className="lg:hidden p-1.5 text-slate-500 hover:text-black rounded-md hover:bg-slate-200 transition-colors cursor-pointer"
             title="إغلاق القائمة"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Navigation list */}
+        {/* Navigation list filtered by role & permissions */}
         <nav className="flex-1 overflow-y-auto px-2 py-2 space-y-3">
-          {navSections.map((section, idx) => (
-            <div key={idx} className="space-y-0.5">
-              <div className="px-2 py-1 text-[10px] font-black text-slate-400 tracking-wider">
-                {section.title}
+          {navSections.map((section, idx) => {
+            const accessibleItems = section.items.filter(item => canUserAccessPage(currentUser, item.id));
+            if (accessibleItems.length === 0) return null;
+
+            return (
+              <div key={idx} className="space-y-0.5">
+                <div className="px-2 py-1 text-[10px] font-black text-slate-400 tracking-wider">
+                  {section.title}
+                </div>
+                <div className="space-y-0.5">
+                  {accessibleItems.map(item => {
+                    const Icon = item.icon;
+                    const isActive = currentPage === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          onSelectPage(item.id);
+                          if (window.innerWidth < 1024) onClose();
+                        }}
+                        className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-xs font-bold transition-all cursor-pointer ${
+                          isActive
+                            ? 'bg-slate-950 text-white shadow-xs'
+                            : 'text-slate-800 hover:text-black hover:bg-slate-100'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-white' : 'text-slate-600'}`} />
+                          <span>{item.label}</span>
+                        </div>
+                        {item.badge && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-800 font-mono">
+                            {item.badge}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-              <div className="space-y-0.5">
-                {section.items.map(item => {
-                  const Icon = item.icon;
-                  const isActive = currentPage === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => {
-                        onSelectPage(item.id);
-                        if (window.innerWidth < 1024) onClose();
-                      }}
-                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-xs font-bold transition-all ${
-                        isActive
-                          ? 'bg-slate-950 text-white shadow-xs'
-                          : 'text-slate-800 hover:text-black hover:bg-slate-100'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-white' : 'text-slate-600'}`} />
-                        <span>{item.label}</span>
-                      </div>
-                      {item.badge && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-800 font-mono">
-                          {item.badge}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </nav>
 
         {/* Footer info & Install */}

@@ -131,8 +131,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-slate-900/75 backdrop-blur-md flex items-center justify-center p-3 sm:p-6 text-right font-sans select-none">
-      <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl border border-slate-200 overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-200">
+    <div className="min-h-screen bg-slate-900/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-6 text-right font-sans select-none relative overflow-hidden">
+      {/* Background Hesabaty Watermark */}
+      <div 
+        className="fixed inset-0 pointer-events-none z-0 flex items-center justify-center opacity-[0.06] select-none"
+        aria-hidden="true"
+      >
+        <img src="/icon.svg" alt="" className="w-[600px] h-[600px] object-contain invert brightness-200" />
+      </div>
+
+      <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl border border-slate-200 overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-200 relative z-10">
         
         {/* Header with Hesabaty Logo and Branding */}
         <div className="bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 text-white p-6 text-center relative border-b border-slate-800">
@@ -207,9 +215,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
                         </span>
                         {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
                       </div>
-                      <span className="text-[10px] text-slate-500 font-bold">
-                        {u.role}
-                      </span>
+                      <div className="flex items-center justify-between text-[10px] text-slate-500 font-bold mt-0.5">
+                        <span>{u.role}</span>
+                        {u.branchName && (
+                          <span className="text-blue-600 text-[9px] truncate max-w-[80px]">
+                            {u.branchName}
+                          </span>
+                        )}
+                      </div>
                     </button>
                   );
                 })}
