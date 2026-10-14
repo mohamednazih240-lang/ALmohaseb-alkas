@@ -89,36 +89,80 @@ interface SidebarProps {
 }
 
 export function canUserAccessPage(user?: User, pageId?: PageId): boolean {
-  if (!user || user.role === 'مدير') return true;
+  if (!user) return true;
   const p = user.permissions;
-  if (pageId === 'dashboard') return true;
-  if (pageId === 'sales' || pageId === 'quotes' || pageId === 'orders' || pageId === 'returns') {
-    return p?.canViewInvoices !== false;
+  const isManager = user.role === 'مدير';
+
+  switch (pageId) {
+    case 'dashboard':
+      return true;
+    case 'sales':
+      return p ? (p.canViewSales !== false && p.canViewInvoices !== false) : true;
+    case 'purchases':
+      return p ? p.canViewPurchases !== false : true;
+    case 'procurement':
+      return p ? p.canManageProcurement !== false : true;
+    case 'quotes':
+    case 'orders':
+      return p ? p.canManageQuotesOrders !== false : true;
+    case 'returns':
+      return p ? (p.canManageSalesReturns !== false || p.canManagePurchaseReturns !== false) : true;
+    case 'customers':
+      return p ? (p.canViewCustomers !== false || p.canManageCustomers !== false) : true;
+    case 'suppliers':
+      return p ? (p.canViewSuppliers !== false || p.canManageSuppliers !== false) : true;
+    case 'receipts':
+      return p ? p.canCreateReceipts !== false : true;
+    case 'payments':
+      return p ? p.canCreatePayments !== false : true;
+    case 'products':
+    case 'prices':
+      return p ? p.canViewProducts !== false : true;
+    case 'barcodes':
+      return p ? p.canPrintBarcodes !== false : true;
+    case 'warehouses':
+      return p ? p.canManageWarehouses !== false : true;
+    case 'stock':
+    case 'inventory':
+      return p ? p.canManageStock !== false : true;
+    case 'treasury':
+      return p ? p.canManageTreasury !== false : true;
+    case 'expenses':
+      return p ? p.canManageExpenses !== false : true;
+    case 'revenues':
+      return p ? p.canManageRevenues !== false : true;
+    case 'bank_reconciliation':
+      return p ? p.canBankReconciliation === true : isManager;
+    case 'cost_centers':
+    case 'currencies':
+    case 'fixed_assets':
+      return p ? p.canManageCostCenters === true : isManager;
+    case 'accounts':
+    case 'journals':
+    case 'ledger':
+      return p ? p.canManageAccounting === true : isManager;
+    case 'daily_closing':
+      return p ? p.canDailyClosing !== false : true;
+    case 'profits':
+      return p ? p.canViewProfits === true : isManager;
+    case 'reports':
+      return p ? p.canViewReports !== false : true;
+    case 'closing':
+    case 'periods':
+      return p ? p.canClosePeriods === true : isManager;
+    case 'branches':
+      return p ? p.canManageBranches === true : isManager;
+    case 'users':
+      return p ? p.canManageUsers === true : isManager;
+    case 'audit':
+      return p ? p.canViewAudit === true : isManager;
+    case 'backup':
+      return p ? p.canManageBackup === true : isManager;
+    case 'settings':
+      return p ? p.canManageSettings === true : isManager;
+    default:
+      return true;
   }
-  if (pageId === 'purchases' || pageId === 'procurement') {
-    return user.role === 'محاسب' || p?.canViewInvoices !== false;
-  }
-  if (pageId === 'customers' || pageId === 'suppliers') return true;
-  if (pageId === 'receipts' || pageId === 'payments' || pageId === 'treasury') {
-    return p?.canManageTreasury !== false && (user.role === 'محاسب' || user.role === 'كاشير');
-  }
-  if (pageId === 'products' || pageId === 'barcodes' || pageId === 'warehouses' || pageId === 'stock' || pageId === 'inventory' || pageId === 'prices') {
-    return p?.canManageStock !== false;
-  }
-  if (pageId === 'reports') {
-    return p?.canViewReports !== false && (user.role === 'محاسب' || user.role === 'مدير');
-  }
-  if (pageId === 'profits') {
-    return p?.canViewProfits === true;
-  }
-  if (pageId === 'daily_closing') return true;
-  if (pageId === 'accounts' || pageId === 'journals' || pageId === 'ledger' || pageId === 'closing' || pageId === 'periods') {
-    return user.role === 'محاسب';
-  }
-  if (pageId === 'users' || pageId === 'branches' || pageId === 'audit' || pageId === 'backup' || pageId === 'settings') {
-    return p?.canManageUsers === true;
-  }
-  return true;
 }
 
 interface NavSection {

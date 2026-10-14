@@ -404,20 +404,76 @@ export interface User {
   name: string;
   username: string;
   password?: string;
-  role: 'مدير' | 'محاسب' | 'مبيعات' | 'مخزن' | 'كاشير';
+  role: 'مدير' | 'محاسب' | 'مبيعات' | 'مخزن' | 'كاشير' | 'مخصص';
   active: boolean;
   branchId?: string;
   branchName?: string;
-  permissions?: {
-    canViewInvoices?: boolean;
-    canCreateInvoices?: boolean;
-    canViewReports?: boolean;
-    canViewProfits?: boolean;
-    canManageTreasury?: boolean;
-    canManageStock?: boolean;
-    canManageUsers?: boolean;
-  };
+  permissions?: UserPermissions;
   lastLogin?: string;
+}
+
+export interface UserPermissions {
+  // 1. المبيعات
+  canViewSales?: boolean;
+  canCreateSales?: boolean;
+  canEditSales?: boolean;
+  canDeleteSales?: boolean;
+  canPrintSales?: boolean;
+  canApplyDiscounts?: boolean;
+  canManageQuotesOrders?: boolean;
+  canManageSalesReturns?: boolean;
+
+  // 2. المشتريات والتوريد
+  canViewPurchases?: boolean;
+  canCreatePurchases?: boolean;
+  canEditPurchases?: boolean;
+  canDeletePurchases?: boolean;
+  canManageProcurement?: boolean;
+  canManagePurchaseReturns?: boolean;
+
+  // 3. العملاء والموردين
+  canViewCustomers?: boolean;
+  canManageCustomers?: boolean;
+  canDeleteCustomers?: boolean;
+  canViewSuppliers?: boolean;
+  canManageSuppliers?: boolean;
+  canDeleteSuppliers?: boolean;
+
+  // 4. الخزينة والمالية
+  canCreateReceipts?: boolean;
+  canCreatePayments?: boolean;
+  canManageTreasury?: boolean;
+  canManageExpenses?: boolean;
+  canDeleteExpenses?: boolean;
+  canManageRevenues?: boolean;
+
+  // 5. المخزون والأصناف
+  canViewProducts?: boolean;
+  canManageProducts?: boolean;
+  canDeleteProducts?: boolean;
+  canPrintBarcodes?: boolean;
+  canManageStock?: boolean;
+  canManageWarehouses?: boolean;
+
+  // 6. الحسابات والتقارير
+  canDailyClosing?: boolean;
+  canViewProfits?: boolean;
+  canViewReports?: boolean;
+  canManageAccounting?: boolean;
+  canManageCostCenters?: boolean;
+  canBankReconciliation?: boolean;
+  canClosePeriods?: boolean;
+
+  // 7. إدارة النظام
+  canManageBranches?: boolean;
+  canManageUsers?: boolean;
+  canViewAudit?: boolean;
+  canManageBackup?: boolean;
+  canManageSettings?: boolean;
+
+  // للتوافق مع البيانات السابقة
+  canViewInvoices?: boolean;
+  canCreateInvoices?: boolean;
 }
 
 export interface AppSettings {

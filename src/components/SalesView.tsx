@@ -57,6 +57,14 @@ export const SalesView: React.FC<SalesViewProps> = ({
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'highest' | 'lowest'>('newest');
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
 
+  // Permissions checks
+  const userPerms = db.currentUser?.permissions;
+  const isManager = db.currentUser?.role === 'مدير';
+  const canCreateSales = userPerms ? userPerms.canCreateSales !== false : true;
+  const canEditSales = userPerms ? userPerms.canEditSales !== false : true;
+  const canDeleteSales = userPerms ? userPerms.canDeleteSales !== false : isManager;
+  const canPrintSales = userPerms ? userPerms.canPrintSales !== false : true;
+
   // Print modal state for batch & single invoice
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
@@ -186,6 +194,11 @@ export const SalesView: React.FC<SalesViewProps> = ({
   };
 
   const handleDeleteInvoice = (inv: Invoice) => {
+    if (!canDeleteSales) {
+      alert('عذراً، ليس لديك صلاحية لحذف فواتير المبيعات.');
+      return;
+    }
+
     if (!confirm(`هل أنت متأكد من حذف فاتورة البيع "${inv.number}"؟ سيتم عكس المخزون والقيود المحاسبية بالكامل.`)) {
       return;
     }
@@ -271,39 +284,45 @@ export const SalesView: React.FC<SalesViewProps> = ({
             <span>Excel</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handlePrintBatch}
-            className="px-3 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-            title="طباعة وتصدير جميع فواتير المبيعات المحددة PDF وورقياً"
-          >
-            <Printer className="w-4 h-4" />
-            <span>طباعة وتصدير PDF ({salesInvoices.length})</span>
-          </button>
+          {canPrintSales && (
+            <button
+              type="button"
+              onClick={handlePrintBatch}
+              className="px-3 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              title="طباعة وتصدير جميع فواتير المبيعات المحددة PDF وورقياً"
+            >
+              <Printer className="w-4 h-4" />
+              <span>طباعة وتصدير PDF ({salesInvoices.length})</span>
+            </button>
+          )}
 
-          <button
-            onClick={() => {
-              setEditingInvoice(null);
-              setSalesMode('wholesale');
-              setActiveTab('editor');
-            }}
-            className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
-          >
-            <Boxes className="w-4 h-4" />
-            <span>+ فاتورة جملة</span>
-          </button>
+          {canCreateSales && (
+            <>
+              <button
+                onClick={() => {
+                  setEditingInvoice(null);
+                  setSalesMode('wholesale');
+                  setActiveTab('editor');
+                }}
+                className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Boxes className="w-4 h-4" />
+                <span>+ فاتورة جملة</span>
+              </button>
 
-          <button
-            onClick={() => {
-              setEditingInvoice(null);
-              setSalesMode('sale');
-              setActiveTab('editor');
-            }}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>+ إنشاء فاتورة بيع جديدة</span>
-          </button>
+              <button
+                onClick={() => {
+                  setEditingInvoice(null);
+                  setSalesMode('sale');
+                  setActiveTab('editor');
+                }}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ إنشاء فاتورة بيع جديدة</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -542,32 +561,36 @@ export const SalesView: React.FC<SalesViewProps> = ({
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => onPreviewInvoice(inv)}
-                      className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1"
+                      className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
                       title="عرض وطباعة الفاتورة"
                     >
                       <Eye className="w-3.5 h-3.5" />
                       <span>معاينة</span>
                     </button>
 
-                    <button
-                      onClick={() => {
-                        setEditingInvoice(inv);
-                        setSalesMode(inv.invoiceKind === 'wholesale' ? 'wholesale' : 'sale');
-                        setActiveTab('editor');
-                      }}
-                      className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 rounded-md transition-colors"
-                      title="تعديل الفاتورة في المحرر"
-                    >
-                      <Edit className="w-3.5 h-3.5" />
-                    </button>
+                    {canEditSales && (
+                      <button
+                        onClick={() => {
+                          setEditingInvoice(inv);
+                          setSalesMode(inv.invoiceKind === 'wholesale' ? 'wholesale' : 'sale');
+                          setActiveTab('editor');
+                        }}
+                        className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+                        title="تعديل الفاتورة في المحرر"
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                      </button>
+                    )}
 
-                    <button
-                      onClick={() => handleDeleteInvoice(inv)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
-                      title="حذف الفاتورة وعكس القيود"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    {canDeleteSales && (
+                      <button
+                        onClick={() => handleDeleteInvoice(inv)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                        title="حذف الفاتورة وعكس القيود"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

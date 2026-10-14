@@ -50,6 +50,13 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'highest' | 'lowest'>('newest');
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
 
+  // Permissions checks
+  const userPerms = db.currentUser?.permissions;
+  const isManager = db.currentUser?.role === 'مدير';
+  const canCreatePurchases = userPerms ? userPerms.canCreatePurchases !== false : true;
+  const canEditPurchases = userPerms ? userPerms.canEditPurchases !== false : true;
+  const canDeletePurchases = userPerms ? userPerms.canDeletePurchases !== false : isManager;
+
   // Print modal state for batch and single invoice
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
@@ -178,6 +185,11 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   };
 
   const handleDeleteInvoice = (inv: Invoice) => {
+    if (!canDeletePurchases) {
+      alert('عذراً، ليس لديك صلاحية لحذف فواتير المشتريات.');
+      return;
+    }
+
     if (!confirm(`هل أنت متأكد من حذف فاتورة الشراء "${inv.number}"؟ سيتم عكس كميات المخزون والمصروفات والقيود المحاسبية.`)) {
       return;
     }
@@ -271,16 +283,18 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
             <span>طباعة وتصدير PDF ({purchaseInvoices.length})</span>
           </button>
 
-          <button
-            onClick={() => {
-              setEditingInvoice(null);
-              setActiveTab('editor');
-            }}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>+ إنشاء فاتورة شراء جديدة</span>
-          </button>
+          {canCreatePurchases && (
+            <button
+              onClick={() => {
+                setEditingInvoice(null);
+                setActiveTab('editor');
+              }}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>+ إنشاء فاتورة شراء جديدة</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -512,24 +526,28 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                     <span>معاينة</span>
                   </button>
 
-                  <button
-                    onClick={() => {
-                      setEditingInvoice(inv);
-                      setActiveTab('editor');
-                    }}
-                    className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 rounded-md transition-colors"
-                    title="تعديل الفاتورة في المحرر"
-                  >
-                    <Edit className="w-3.5 h-3.5" />
-                  </button>
+                  {canEditPurchases && (
+                    <button
+                      onClick={() => {
+                        setEditingInvoice(inv);
+                        setActiveTab('editor');
+                      }}
+                      className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+                      title="تعديل الفاتورة في المحرر"
+                    >
+                      <Edit className="w-3.5 h-3.5" />
+                    </button>
+                  )}
 
-                  <button
-                    onClick={() => handleDeleteInvoice(inv)}
-                    className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
-                    title="حذف الفاتورة وعكس القيود"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  {canDeletePurchases && (
+                    <button
+                      onClick={() => handleDeleteInvoice(inv)}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                      title="حذف الفاتورة وعكس القيود"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
