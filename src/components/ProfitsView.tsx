@@ -209,8 +209,18 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     return itemProfitsData.reduce((sum, row) => sum + row.profit, 0);
   }, [itemProfitsData]);
 
+  // Permission check for invoice deletion
+  const userPerms = db.currentUser?.permissions;
+  const isManager = db.currentUser?.role === 'مدير';
+  const canDeleteSales = userPerms ? userPerms.canDeleteSales !== false : isManager;
+
   // Delete invoice handler
   const handleDeleteInvoice = (inv: Invoice) => {
+    if (!canDeleteSales) {
+      alert('عذراً، ليس لديك صلاحية لحذف الفواتير. الحذف مقتصر على المدير أو من يمنحه المدير الصلاحية.');
+      return;
+    }
+
     if (!confirm(`هل أنت متأكد من حذف الفاتورة "${inv.number}"؟ سيتم عكس المخزون والحسابات بالكامل.`)) {
       return;
     }
@@ -667,14 +677,16 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                                   <Edit className="w-3.5 h-3.5" />
                                 </button>
                               )}
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteInvoice(row.invoice)}
-                                className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
-                                title="حذف الفاتورة"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              {canDeleteSales && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteInvoice(row.invoice)}
+                                  className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
+                                  title="حذف الفاتورة"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>

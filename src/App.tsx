@@ -12,7 +12,7 @@ import {
   Product
 } from './types/accounting';
 import { Header } from './components/Header';
-import { Sidebar, PageId } from './components/Sidebar';
+import { Sidebar, PageId, canUserAccessPage } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
 import { SalesView } from './components/SalesView';
 import { PurchasesView } from './components/PurchasesView';
@@ -117,10 +117,21 @@ export default function App() {
     });
 
     // 2. Fetch fresh cloud database on startup
+    // 2. Fetch fresh cloud database on startup
     fetchDatabaseFromCloud().then(cloudDb => {
       if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
-        setDb(cloudDb);
-        saveDatabase(cloudDb);
+        setDb(prevDb => {
+          const storedSession = getStoredAuthSession();
+          const currentLocalUser = storedSession?.user || prevDb.currentUser;
+          const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
+          const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
+          const merged: AccountingDB = {
+            ...cloudDb,
+            currentUser: effectiveUser || cloudDb.currentUser || cloudDb.users[0]
+          };
+          saveDatabase(merged);
+          return merged;
+        });
       }
     });
 
@@ -131,8 +142,18 @@ export default function App() {
 
     // 4. Subscribe to live Firestore updates across all phones
     const unsubCloud = subscribeToCloudDatabase((remoteDb, updatedBy) => {
-      setDb(remoteDb);
-      saveDatabase(remoteDb);
+      setDb(prevDb => {
+        const storedSession = getStoredAuthSession();
+        const currentLocalUser = storedSession?.user || prevDb.currentUser;
+        const matchedUser = currentLocalUser ? remoteDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
+        const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
+        const merged: AccountingDB = {
+          ...remoteDb,
+          currentUser: effectiveUser || remoteDb.currentUser || remoteDb.users[0]
+        };
+        saveDatabase(merged);
+        return merged;
+      });
     });
 
     return () => {
@@ -621,20 +642,16 @@ export default function App() {
               setAuthSession(session);
               setShowLoginView(false);
 
-              if (tenantDb) {
-                const targetDb = { ...tenantDb, currentUser: session.user };
-                setDb(targetDb);
-                saveDatabase(targetDb);
-              } else if (session.tenantId) {
-                const loaded = loadTenantDatabase(session.tenantId);
-                const targetDb = { ...loaded, currentUser: session.user };
-                setDb(targetDb);
-                saveDatabase(targetDb);
-              } else {
-                const loaded = loadDatabase();
-                const targetDb = { ...loaded, currentUser: session.user };
-                setDb(targetDb);
-                saveDatabase(targetDb);
+              const baseDb = tenantDb || (session.tenantId ? loadTenantDatabase(session.tenantId) : loadDatabase());
+              const targetDb = { ...baseDb, currentUser: session.user };
+              setDb(targetDb);
+              saveDatabase(targetDb);
+
+              if (session.user.branchId) {
+                setActiveBranchId(session.user.branchId);
+              }
+              if (!canUserAccessPage(session.user, currentPage)) {
+                setCurrentPage('dashboard');
               }
             }}
           />
