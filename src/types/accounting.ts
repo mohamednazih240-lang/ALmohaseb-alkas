@@ -145,9 +145,30 @@ export interface Invoice {
   exchangeRate?: number;
   createdBy?: string;
   createdById?: string;
+  createdAt?: string;
+  updatedBy?: string;
+  updatedById?: string;
+  updatedAt?: string;
+  auditLog?: InvoiceAuditEntry[];
   branchId?: string;
   branchName?: string;
   deliveryFee?: number;
+}
+
+export interface InvoiceAuditEntry {
+  id: string;
+  action: 'create' | 'edit' | 'status_change' | 'payment' | 'other';
+  actionTitle: string; // e.g. "إنشاء الفاتورة", "تعديل الفاتورة"
+  userName: string;
+  userId?: string;
+  userRole?: string;
+  timestamp: string; // ISO format
+  formattedDate?: string;
+  formattedTime?: string;
+  summary?: string; // Summary of changes
+  previousTotal?: number;
+  newTotal?: number;
+  itemsCount?: number;
 }
 
 export interface ReturnInvoice {

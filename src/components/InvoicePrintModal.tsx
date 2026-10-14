@@ -6,13 +6,24 @@ import {
   Loader2,
   Check,
   Eye,
-  Maximize2
+  Maximize2,
+  ShieldCheck,
+  History,
+  User,
+  Clock,
+  Calendar,
+  ArrowRight,
+  PlusCircle,
+  Edit,
+  CheckCircle2
 } from 'lucide-react';
 import {
   Invoice,
-  AppSettings
+  AppSettings,
+  InvoiceAuditEntry
 } from '../types/accounting';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
+import { formatAuditDateTime } from './InvoiceAuditLogModal';
 
 interface InvoicePrintModalProps {
   invoice: Invoice | null;
@@ -37,6 +48,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
   settings,
   onClose
 }) => {
+  const [activeTab, setActiveTab] = useState<'preview' | 'audit'>('preview');
   const [paperSize, setPaperSize] = useState<PaperSize>('A5');
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [exportedSuccess, setExportedSuccess] = useState(false);
@@ -103,6 +115,41 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
   const hasFees = !!invoice.deliveryFee && invoice.deliveryFee > 0;
   const feesAmount = invoice.deliveryFee || 0;
 
+  // Audit log data derivation
+  const auditLogs: InvoiceAuditEntry[] = (invoice.auditLog && invoice.auditLog.length > 0)
+    ? invoice.auditLog
+    : [
+        {
+          id: 'aud_initial',
+          action: 'create',
+          actionTitle: 'إنشاء الفاتورة',
+          userName: invoice.createdBy || 'مدير النظام',
+          userId: invoice.createdById || 'usr_admin',
+          userRole: 'مدير',
+          timestamp: invoice.createdAt || `${invoice.date}T12:00:00Z`,
+          formattedDate: invoice.date,
+          formattedTime: invoice.time || '12:00',
+          summary: `تم إنشاء الفاتورة لأول مرة بقيمة ${invoice.total.toLocaleString()} ${settings.currency || 'ر.س'} (${invoice.items.length} أصناف)`,
+          newTotal: invoice.total,
+          itemsCount: invoice.items.length
+        }
+      ];
+
+  const creationEntry = auditLogs.find(l => l.action === 'create') || auditLogs[auditLogs.length - 1];
+  const lastEditEntry = auditLogs.find(l => l.action === 'edit');
+  const creationTimeFormatted = formatAuditDateTime(
+    creationEntry?.timestamp || invoice.createdAt,
+    creationEntry?.formattedDate || invoice.date,
+    creationEntry?.formattedTime || invoice.time
+  );
+  const editTimeFormatted = lastEditEntry
+    ? formatAuditDateTime(
+        lastEditEntry.timestamp || invoice.updatedAt,
+        lastEditEntry.formattedDate,
+        lastEditEntry.formattedTime
+      )
+    : null;
+
   return (
     <div className="invoice-modal-overlay fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-1 sm:p-4 overflow-y-auto">
       <div className="invoice-modal-card bg-white rounded-2xl w-full max-w-4xl max-h-[96vh] flex flex-col shadow-2xl border border-slate-200">
@@ -110,89 +157,141 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
         <div className="no-print flex items-center justify-between p-3 sm:p-3.5 border-b border-slate-200 bg-slate-50 rounded-t-2xl">
           <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
             <h2 className="text-xs sm:text-sm font-black text-slate-900">
-              معاينة وطباعة ({invoice.number})
+              {activeTab === 'preview' ? `معاينة وطباعة (${invoice.number})` : `سجل الرقابة المالية والتدقيق (${invoice.number})`}
             </h2>
-            
-            {/* Paper Size Selector (A4, A5, Thermal) */}
+
+            {/* Tab Switcher: Preview vs Audit Log */}
             <div className="flex items-center bg-slate-200 rounded-lg p-0.5 text-xs font-bold">
               <button
                 type="button"
-                onClick={() => setPaperSize('A5')}
-                className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
-                  paperSize === 'A5' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
+                onClick={() => setActiveTab('preview')}
+                className={`px-2.5 sm:px-3 py-1 rounded-md transition-all flex items-center gap-1.5 cursor-pointer ${
+                  activeTab === 'preview'
+                    ? 'bg-white text-slate-950 shadow-2xs font-black'
+                    : 'text-slate-600 hover:text-black'
                 }`}
               >
-                مقاس A5
+                <Eye className="w-3.5 h-3.5" />
+                <span>معاينة الفاتورة</span>
               </button>
               <button
                 type="button"
-                onClick={() => setPaperSize('A4')}
-                className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
-                  paperSize === 'A4' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
+                onClick={() => setActiveTab('audit')}
+                className={`px-2.5 sm:px-3 py-1 rounded-md transition-all flex items-center gap-1.5 cursor-pointer ${
+                  activeTab === 'audit'
+                    ? 'bg-blue-600 text-white shadow-2xs font-black'
+                    : 'text-slate-700 hover:text-blue-700'
                 }`}
+                title="عرض سجل تاريخ إنشاء وتعديل الفاتورة مع التواريخ والأوقات"
               >
-                مقاس A4
-              </button>
-              <button
-                type="button"
-                onClick={() => setPaperSize('thermal')}
-                className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
-                  paperSize === 'thermal' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
-                }`}
-              >
-                حراري (80mm)
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
+                <span>سجل الرقابة والتدقيق</span>
+                <span className={`px-1.5 py-0.2 rounded-full text-[9px] font-mono ${
+                  activeTab === 'audit' ? 'bg-white/20 text-white' : 'bg-slate-300 text-slate-700'
+                }`}>
+                  {auditLogs.length}
+                </span>
               </button>
             </div>
+            
+            {/* Paper Size Selector (Only in preview tab) */}
+            {activeTab === 'preview' && (
+              <div className="flex items-center bg-slate-200 rounded-lg p-0.5 text-xs font-bold">
+                <button
+                  type="button"
+                  onClick={() => setPaperSize('A5')}
+                  className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
+                    paperSize === 'A5' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
+                  }`}
+                >
+                  مقاس A5
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaperSize('A4')}
+                  className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
+                    paperSize === 'A4' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
+                  }`}
+                >
+                  مقاس A4
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaperSize('thermal')}
+                  className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
+                    paperSize === 'thermal' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
+                  }`}
+                >
+                  حراري (80mm)
+                </button>
+              </div>
+            )}
 
             {/* Scale toggle for mobile */}
-            <button
-              type="button"
-              onClick={() => setFitScreen(!fitScreen)}
-              className={`hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold transition-all border cursor-pointer ${
-                fitScreen
-                  ? 'bg-slate-100 text-slate-800 border-slate-300'
-                  : 'bg-white text-slate-600 border-slate-200'
-              }`}
-              title="ملاءمة الشاشة / الحجم الكامل"
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-              <span>{fitScreen ? 'ملاءمة العرض' : '100%'}</span>
-            </button>
+            {activeTab === 'preview' && (
+              <button
+                type="button"
+                onClick={() => setFitScreen(!fitScreen)}
+                className={`hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold transition-all border cursor-pointer ${
+                  fitScreen
+                    ? 'bg-slate-100 text-slate-800 border-slate-300'
+                    : 'bg-white text-slate-600 border-slate-200'
+                }`}
+                title="ملاءمة الشاشة / الحجم الكامل"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>{fitScreen ? 'ملاءمة العرض' : '100%'}</span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2">
-            {/* Direct PDF Download */}
-            <button
-              type="button"
-              onClick={handleDownloadPdf}
-              disabled={isExportingPdf}
-              className={`px-3 py-1.5 sm:py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                exportedSuccess
-                  ? 'bg-emerald-600 text-white'
-                  : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300'
-              }`}
-              title="تصدير وتحميل PDF صفحة واحدة كاملة"
-            >
-              {isExportingPdf ? (
-                <Loader2 className="w-4 h-4 animate-spin text-slate-600" />
-              ) : exportedSuccess ? (
-                <Check className="w-4 h-4" />
-              ) : (
-                <Download className="w-4 h-4 text-slate-700" />
-              )}
-              <span className="hidden xs:inline">{exportedSuccess ? 'تم التحميل!' : 'تحميل PDF'}</span>
-            </button>
+            {activeTab === 'preview' ? (
+              <>
+                {/* Direct PDF Download */}
+                <button
+                  type="button"
+                  onClick={handleDownloadPdf}
+                  disabled={isExportingPdf}
+                  className={`px-3 py-1.5 sm:py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    exportedSuccess
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300'
+                  }`}
+                  title="تصدير وتحميل PDF صفحة واحدة كاملة"
+                >
+                  {isExportingPdf ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-slate-600" />
+                  ) : exportedSuccess ? (
+                    <Check className="w-4 h-4" />
+                  ) : (
+                    <Download className="w-4 h-4 text-slate-700" />
+                  )}
+                  <span className="hidden xs:inline">{exportedSuccess ? 'تم التحميل!' : 'تحميل PDF'}</span>
+                </button>
 
-            {/* Instant Print Button */}
-            <button
-              type="button"
-              onClick={handlePrint}
-              className="px-3 sm:px-4 py-1.5 sm:py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-              title="طباعة فورية بكامل الإطارات صفحة واحدة"
-            >
-              <Printer className="w-4 h-4" />
-              <span>طباعة فورية</span>
-            </button>
+                {/* Instant Print Button */}
+                <button
+                  type="button"
+                  onClick={handlePrint}
+                  className="px-3 sm:px-4 py-1.5 sm:py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  title="طباعة فورية بكامل الإطارات صفحة واحدة"
+                >
+                  <Printer className="w-4 h-4" />
+                  <span>طباعة فورية</span>
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="px-3 sm:px-4 py-1.5 sm:py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                title="طباعة تقرير سجل التدقيق"
+              >
+                <Printer className="w-4 h-4" />
+                <span>طباعة سجل التدقيق</span>
+              </button>
+            )}
 
             <button
               type="button"

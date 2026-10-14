@@ -19,17 +19,21 @@ import {
   Clock,
   ArrowRight,
   Maximize2,
-  Minimize2
+  Minimize2,
+  ShieldCheck,
+  History
 } from 'lucide-react';
 import {
   AccountingDB,
   Invoice,
   InvoiceItem,
   InvoicePaymentLine,
+  InvoiceAuditEntry,
   PaymentMethod,
   Product,
   Party
 } from '../types/accounting';
+import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import {
   formatMoney,
   PAYMENT_METHODS,
@@ -236,6 +240,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Live Time clock
   const [liveTime, setLiveTime] = useState<string>('00:00');
+  const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
 
   useEffect(() => {
     const updateTime = () => {
@@ -579,6 +584,92 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const isSale = mode === 'sale' || mode === 'wholesale';
     const isReturn = mode === 'sale_return' || mode === 'purchase_return';
 
+    // Audit Logging: Capture exact who, when, role and details
+    const nowIso = new Date().toISOString();
+    const currentUserName = db.currentUser?.name || 'مدير النظام';
+    const currentUserId = db.currentUser?.id || 'usr_admin';
+    const currentUserRole = db.currentUser?.role || 'مدير';
+    const formattedNowDate = new Date().toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' });
+    const formattedNowTime = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+
+    let invoiceAuditLog: InvoiceAuditEntry[] = [];
+
+    if (editingInvoice) {
+      const existingLogs: InvoiceAuditEntry[] = (editingInvoice.auditLog && editingInvoice.auditLog.length > 0)
+        ? [...editingInvoice.auditLog]
+        : [
+            {
+              id: generateId('aud'),
+              action: 'create',
+              actionTitle: 'إنشاء الفاتورة الأصلية',
+              userName: editingInvoice.createdBy || 'مدير النظام',
+              userId: editingInvoice.createdById || 'usr_admin',
+              userRole: 'مدير',
+              timestamp: editingInvoice.createdAt || `${editingInvoice.date}T12:00:00Z`,
+              formattedDate: editingInvoice.date,
+              formattedTime: editingInvoice.time || '12:00',
+              summary: `تم إنشاء الفاتورة لأول مرة بقيمة ${editingInvoice.total.toLocaleString()} ${db.settings.currency || 'ر.س'} (${editingInvoice.items.length} أصناف)`,
+              newTotal: editingInvoice.total,
+              itemsCount: editingInvoice.items.length
+            }
+          ];
+
+      const changeNotes: string[] = [];
+      if (Math.abs(editingInvoice.total - netTotal) > 0.01) {
+        changeNotes.push(`تعديل الإجمالي: من ${editingInvoice.total.toLocaleString()} إلى ${netTotal.toLocaleString()} ${db.settings.currency || 'ر.س'}`);
+      }
+      if (editingInvoice.items.length !== invoiceItems.length) {
+        changeNotes.push(`تعديل عدد الأصناف: من ${editingInvoice.items.length} إلى ${invoiceItems.length}`);
+      }
+      if (editingInvoice.partyName !== partyName) {
+        changeNotes.push(`تغيير الطرف: إلى "${partyName}"`);
+      }
+      if (Math.abs(editingInvoice.paid - finalPaid) > 0.01) {
+        changeNotes.push(`تعديل المدفوع: ${finalPaid.toLocaleString()} ${db.settings.currency || 'ر.س'} (المتبقي: ${finalRemaining.toLocaleString()})`);
+      }
+      if (editingInvoice.date !== invDate) {
+        changeNotes.push(`تعديل تاريخ الفاتورة: إلى ${invDate}`);
+      }
+      if (changeNotes.length === 0) {
+        changeNotes.push('تحديث وحفظ تفاصيل الفاتورة ومراجعة بنودها');
+      }
+
+      const newAuditItem: InvoiceAuditEntry = {
+        id: generateId('aud'),
+        action: 'edit',
+        actionTitle: 'تعديل الفاتورة',
+        userName: currentUserName,
+        userId: currentUserId,
+        userRole: currentUserRole,
+        timestamp: nowIso,
+        formattedDate: formattedNowDate,
+        formattedTime: formattedNowTime,
+        summary: changeNotes.join(' • '),
+        previousTotal: editingInvoice.total,
+        newTotal: netTotal,
+        itemsCount: invoiceItems.length
+      };
+
+      invoiceAuditLog = [newAuditItem, ...existingLogs];
+    } else {
+      invoiceAuditLog = [
+        {
+          id: generateId('aud'),
+          action: 'create',
+          actionTitle: 'إنشاء الفاتورة',
+          userName: currentUserName,
+          userId: currentUserId,
+          userRole: currentUserRole,
+          timestamp: nowIso,
+          formattedDate: formattedNowDate,
+          formattedTime: formattedNowTime,
+          summary: `تم إنشاء الفاتورة بواسطة ${currentUserName} (${currentUserRole}) بقيمة إجمالية ${netTotal.toLocaleString()} ${db.settings.currency || 'ر.س'} (${status})`,
+          newTotal: netTotal,
+          itemsCount: invoiceItems.length
+        }
+      ];
+    }
+
     const savedInvoice: Invoice = {
       id: invId,
       number: invNum,
@@ -607,8 +698,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       remaining: finalRemaining,
       status,
       notes: jobSite ? `جهة العمل: ${jobSite}` : undefined,
-      createdBy: editingInvoice?.createdBy || db.currentUser?.name || 'مدير النظام',
-      createdById: editingInvoice?.createdById || db.currentUser?.id || 'usr_admin',
+      createdBy: editingInvoice?.createdBy || currentUserName,
+      createdById: editingInvoice?.createdById || currentUserId,
+      createdAt: editingInvoice?.createdAt || (editingInvoice ? `${editingInvoice.date}T12:00:00Z` : nowIso),
+      updatedBy: editingInvoice ? currentUserName : undefined,
+      updatedById: editingInvoice ? currentUserId : undefined,
+      updatedAt: editingInvoice ? nowIso : undefined,
+      auditLog: invoiceAuditLog,
       branchId: editingInvoice?.branchId || db.currentUser?.branchId || db.branches?.[0]?.id || 'br_main',
       branchName: editingInvoice?.branchName || db.currentUser?.branchName || db.branches?.[0]?.name || 'الفرع الرئيسي',
       items: JSON.parse(JSON.stringify(invoiceItems))
@@ -738,8 +834,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     // 6. Audit
     logAudit(
       updated,
-      `حفظ ${theme.title}`,
-      `فاتورة رقم ${savedInvoice.number} بقيمة ${formatMoney(savedInvoice.total, updated.settings.currency)} للطرف ${partyName}`
+      editingInvoice ? `تعديل ${theme.title}` : `إنشاء ${theme.title}`,
+      `فاتورة رقم ${savedInvoice.number} بواسطة [${currentUserName}] (${currentUserRole}) - بقيمة ${formatMoney(savedInvoice.total, updated.settings.currency)} للطرف ${partyName}`
     );
 
     onUpdateDb(updated);
@@ -800,6 +896,19 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
 
           <div className="flex items-center gap-2 sm:gap-2.5">
+            {/* Audit Log Button */}
+            {editingInvoice && (
+              <button
+                type="button"
+                onClick={() => setShowAuditModal(true)}
+                className="flex items-center gap-1 text-[10px] bg-white/20 hover:bg-white/30 text-white px-2 py-0.5 rounded transition-colors cursor-pointer"
+                title="سجل الرقابة المالية والتدقيق (من أنشأ ومن عدل)"
+              >
+                <ShieldCheck className="w-3 h-3 text-emerald-300" />
+                <span>سجل التدقيق</span>
+              </button>
+            )}
+
             {/* Layout switch for tablet/desktop */}
             <button
               onClick={() => setLayoutWidth(prev => (prev === 'mobile' ? 'expanded' : 'mobile'))}
@@ -831,6 +940,45 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
         {/* Main Workspace Content */}
         <div className="p-1.5 sm:p-2 flex flex-col gap-1.5 flex-1">
+          {/* Financial Audit & Governance Bar */}
+          <div className="bg-slate-100 border border-slate-300 rounded p-1.5 flex flex-wrap items-center justify-between gap-1.5 text-[9px]">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <div className="flex items-center gap-1 font-bold text-slate-800">
+                <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
+                <span>الرقابة المالية:</span>
+              </div>
+              <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.2 rounded font-bold">
+                المنشئ: {editingInvoice?.createdBy || db.currentUser?.name || 'مدير النظام'}
+              </span>
+              {editingInvoice?.updatedBy ? (
+                <span className="bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.2 rounded font-bold">
+                  آخر تعديل: {editingInvoice.updatedBy}
+                </span>
+              ) : (
+                <span className="bg-slate-50 text-slate-600 border border-slate-200 px-1.5 py-0.2 rounded font-medium">
+                  {editingInvoice ? 'الحالة: أصلية (لم تُعدل)' : 'فاتورة جديدة قيد الإنشاء'}
+                </span>
+              )}
+            </div>
+
+            {editingInvoice && (
+              <button
+                type="button"
+                onClick={() => setShowAuditModal(true)}
+                className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 rounded font-bold flex items-center gap-1 cursor-pointer transition-colors shadow-2xs"
+                title="عرض سجل تاريخ وإنشاء وتعديل الفاتورة بالكامل مع التواريخ والأوقات"
+              >
+                <History className="w-3 h-3 text-blue-600" />
+                <span>سجل التدقيق (Audit Log)</span>
+                {editingInvoice.auditLog && editingInvoice.auditLog.length > 0 && (
+                  <span className="bg-blue-600 text-white rounded-full px-1 text-[8px] font-mono">
+                    {editingInvoice.auditLog.length}
+                  </span>
+                )}
+              </button>
+            )}
+          </div>
+
           {/* Invoice Card: 3 Columns Grid (matches user HTML code) */}
           <div className="bg-slate-50 border border-slate-300 rounded p-1.5 grid grid-cols-3 sm:grid-cols-6 gap-1 text-[9px]">
             <div className="flex flex-col gap-0.5">
@@ -1782,6 +1930,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Invoice Audit Log Modal */}
+      {showAuditModal && editingInvoice && (
+        <InvoiceAuditLogModal
+          invoice={editingInvoice}
+          isOpen={showAuditModal}
+          onClose={() => setShowAuditModal(false)}
+          currency={db.settings.currency}
+        />
       )}
     </div>
   );
