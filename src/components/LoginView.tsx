@@ -1,9 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Calculator,
-  Lock,
   User,
-  ShieldCheck,
   CheckCircle2,
   AlertCircle,
   Loader2,
@@ -15,19 +13,16 @@ import {
   EyeOff,
   Cloud,
   Building2,
-  Sparkles,
   Mail,
-  UserPlus,
   PlusCircle,
   X,
   Check,
-  LogOut,
   Users,
   Briefcase,
   Receipt,
   Boxes,
   TrendingUp,
-  Sliders
+  Trash2
 } from 'lucide-react';
 import { User as AppUser, AppSettings, AccountingDB } from '../types/accounting';
 import { AuthSession, auth, googleProvider } from '../services/firebaseAuth';
@@ -35,7 +30,7 @@ import { signInWithPopup } from 'firebase/auth';
 import { loadDatabase, saveDatabase } from '../services/accountingStorage';
 import { fetchDatabaseFromCloud, pushDatabaseToCloud } from '../services/cloudSyncService';
 import { getCompaniesList, registerCompany } from '../services/tenantService';
-import { countActivePermissions, TOTAL_SYSTEM_PERMISSIONS_COUNT } from './SystemViews';
+import { countActivePermissions } from './SystemViews';
 
 interface LoginViewProps {
   settings: AppSettings;
@@ -51,10 +46,10 @@ export interface CompanyAccountData {
   ownerEmail?: string;
 }
 
-export interface GoogleAccountItem {
+export interface SavedAccountItem {
   name: string;
   email: string;
-  avatar: string;
+  companyName?: string;
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({
@@ -70,15 +65,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
   // Flow Step: 'stepSelectAccount' | 'stepUserList' | 'stepRegisterOwner'
   const [currentStep, setCurrentStep] = useState<'stepSelectAccount' | 'stepUserList' | 'stepRegisterOwner'>('stepSelectAccount');
-  
-  // Google Picker Modal
-  const [showGooglePickerModal, setShowGooglePickerModal] = useState<boolean>(false);
-  const [manualCustomEmailInput, setManualCustomEmailInput] = useState<string>('');
-  const [showAddCustomEmailInput, setShowAddCustomEmailInput] = useState<boolean>(false);
 
-  // Selected Google account
+  // Input for entering Gmail directly
+  const [manualEmail, setManualEmail] = useState<string>('');
   const [selectedEmail, setSelectedEmail] = useState<string>('');
-  const [selectedEmailAvatar, setSelectedEmailAvatar] = useState<string>('G');
 
   // Currently loaded company for Step 2
   const [currentCompany, setCurrentCompany] = useState<CompanyAccountData | null>(null);
@@ -103,38 +93,53 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }, 4000);
   };
 
-  // Google Accounts available on phone / stored locally
-  const [googleAccounts, setGoogleAccounts] = useState<GoogleAccountItem[]>(() => {
+  // 1. Purge any previous fake/dummy accounts from localStorage
+  useEffect(() => {
     try {
-      const saved = localStorage.getItem('hesabaty_saved_google_accounts');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      const savedAccs = localStorage.getItem('hesabaty_saved_google_accounts');
+      if (savedAccs && (savedAccs.includes('owner.company@gmail.com') || savedAccs.includes('accountant.store@gmail.com'))) {
+        localStorage.removeItem('hesabaty_saved_google_accounts');
+      }
+      const savedComps = localStorage.getItem('hesabaty_companies');
+      if (savedComps && savedComps.includes('owner.company@gmail.com')) {
+        localStorage.removeItem('hesabaty_companies');
+      }
+    } catch (e) {
+      console.warn('Purge notice:', e);
+    }
+  }, []);
+
+  // 2. Real accounts saved on this device
+  const [savedAccounts, setSavedAccounts] = useState<SavedAccountItem[]>(() => {
+    try {
+      const raw = localStorage.getItem('hesabaty_real_accounts');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          // Filter out any mock addresses
+          return parsed.filter(a => a.email && !a.email.includes('owner.company@gmail.com') && !a.email.includes('accountant.store@gmail.com'));
+        }
       }
     } catch {}
 
-    // Default accounts detected from device / initial defaults
-    const previousSession = localStorage.getItem('hesabaty_active_user');
-    let emailFound = 'owner.company@gmail.com';
-    let nameFound = 'أحمد المالك (مالك المنشأة)';
-    if (previousSession) {
+    // Check if there is an active session with real email
+    const active = localStorage.getItem('hesabaty_active_user');
+    if (active) {
       try {
-        const p = JSON.parse(previousSession);
-        if (p.googleEmail) {
-          emailFound = p.googleEmail;
-          nameFound = p.user?.name || emailFound.split('@')[0];
+        const p = JSON.parse(active);
+        if (p.googleEmail && !p.googleEmail.includes('owner.company@gmail.com')) {
+          return [{
+            name: p.user?.name || p.googleEmail.split('@')[0],
+            email: p.googleEmail,
+            companyName: p.companyName || currentDb.settings.company
+          }];
         }
       } catch {}
     }
-
-    return [
-      { name: nameFound, email: emailFound, avatar: nameFound.charAt(0) || 'A' },
-      { name: 'محمود المحاسب', email: 'accountant.store@gmail.com', avatar: 'M' },
-      { name: 'مهند السعيد (كاشير الفرع)', email: 'cashier.branch@gmail.com', avatar: 'C' }
-    ];
+    return [];
   });
 
-  // Load Companies Map from LocalStorage or initialize with currentDb
+  // Load Companies Map from LocalStorage
   const getCompaniesMap = (): Record<string, CompanyAccountData> => {
     try {
       const raw = localStorage.getItem('hesabaty_companies');
@@ -145,28 +150,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
     } catch (e) {
       console.warn('Error reading hesabaty_companies:', e);
     }
-
-    // Default mapping linked to current DB
-    const activeCompName = currentDb.settings.company || settings.company || 'شركة الفرسان للتجارة والتوريدات';
-    const activeUsers: AppUser[] = (currentDb.users && currentDb.users.length > 0)
-      ? currentDb.users
-      : [
-          { id: 'usr_owner', name: 'المالك (المدير العام)', username: 'admin', role: 'مدير', active: true, password: '1234' },
-          { id: 'usr_acc', name: 'محمد المحاسب', username: 'accountant', role: 'محاسب', active: true, password: '1111' },
-          { id: 'usr_cashier', name: 'علي الكاشير', username: 'cashier', role: 'كاشير', active: true, password: '2222' },
-          { id: 'usr_sales', name: 'حسن مسؤول المبيعات', username: 'sales', role: 'مبيعات', active: true, password: '3333' }
-        ];
-
-    const initialMap: Record<string, CompanyAccountData> = {
-      'owner.company@gmail.com': {
-        companyName: activeCompName,
-        users: activeUsers,
-        ownerEmail: 'owner.company@gmail.com'
-      }
-    };
-
-    localStorage.setItem('hesabaty_companies', JSON.stringify(initialMap));
-    return initialMap;
+    return {};
   };
 
   // Sync with Firestore Cloud on mount to fetch the latest company and users
@@ -179,15 +163,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setIsLoadingCloud(false);
       if (remoteDb && Array.isArray(remoteDb.users) && remoteDb.users.length > 0) {
         setCloudDb(remoteDb);
-
-        // Update local companies map with latest cloud users
-        const map = getCompaniesMap();
-        const activeEmailKey = selectedEmail || Object.keys(map)[0] || 'owner.company@gmail.com';
-        if (map[activeEmailKey]) {
-          map[activeEmailKey].users = remoteDb.users;
-          map[activeEmailKey].companyName = remoteDb.settings.company || map[activeEmailKey].companyName;
-          localStorage.setItem('hesabaty_companies', JSON.stringify(map));
-        }
       }
     }).catch(err => {
       if (!isMounted) return;
@@ -198,19 +173,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, []);
-
-  // Set default initial email from previous session or default account
-  useEffect(() => {
-    if (!selectedEmail) {
-      const map = getCompaniesMap();
-      const firstEmail = Object.keys(map)[0] || (googleAccounts[0] ? googleAccounts[0].email : 'owner.company@gmail.com');
-      setSelectedEmail(firstEmail);
-      const acc = googleAccounts.find(a => a.email.toLowerCase() === firstEmail.toLowerCase());
-      if (acc) {
-        setSelectedEmailAvatar(acc.avatar);
-      }
-    }
   }, []);
 
   // User icon generator based on role
@@ -231,25 +193,62 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
   };
 
-  // Select account handler
-  const handleSelectGoogleAccount = (email: string, avatarLetter?: string) => {
-    setSelectedEmail(email);
-    setSelectedEmailAvatar(avatarLetter || email.charAt(0).toUpperCase());
-    setShowGooglePickerModal(false);
+  // Process Real Email Selection
+  const handleProcessEmail = (email: string, userName?: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      showToast('يرجى إدخال بريد إلكتروني صحيح', 'error');
+      return;
+    }
 
-    // Save this email into saved accounts if not present
-    setGoogleAccounts(prev => {
-      if (!prev.some(a => a.email.toLowerCase() === email.toLowerCase())) {
-        const updated = [{ name: email.split('@')[0], email, avatar: email.charAt(0).toUpperCase() }, ...prev];
-        localStorage.setItem('hesabaty_saved_google_accounts', JSON.stringify(updated));
-        return updated;
-      }
-      return prev;
+    setSelectedEmail(cleanEmail);
+
+    // Save this real account to saved accounts list on this device
+    setSavedAccounts(prev => {
+      const filtered = prev.filter(a => a.email.toLowerCase() !== cleanEmail);
+      const updated = [{
+        name: userName || cleanEmail.split('@')[0],
+        email: cleanEmail,
+        companyName: currentCompany?.companyName || currentDb.settings.company
+      }, ...filtered];
+      localStorage.setItem('hesabaty_real_accounts', JSON.stringify(updated));
+      return updated;
     });
 
-    // Check if this Google email has a registered company
+    // 1. Check if this Google email has a registered company in local map
     const map = getCompaniesMap();
-    const existingComp = map[email.toLowerCase()] || map[email];
+    let existingComp = map[cleanEmail];
+
+    // 2. Check if tenant registry has this company
+    if (!existingComp) {
+      const tenants = getCompaniesList();
+      const matchedTenant = tenants.find(t => t.googleEmail?.toLowerCase() === cleanEmail);
+      if (matchedTenant) {
+        existingComp = {
+          companyName: matchedTenant.name,
+          users: currentDb.users || [],
+          ownerEmail: cleanEmail
+        };
+        map[cleanEmail] = existingComp;
+        localStorage.setItem('hesabaty_companies', JSON.stringify(map));
+      }
+    }
+
+    // 3. Check if current database or cloud database belongs to this company
+    if (!existingComp && (cloudDb || currentDb.settings.company)) {
+      const targetDb = cloudDb || currentDb;
+      // If user is already registered in DB users with this email
+      const matchedUser = targetDb.users?.find(u => u.username?.toLowerCase() === cleanEmail || u.username?.toLowerCase() === cleanEmail.split('@')[0]);
+      if (matchedUser) {
+        existingComp = {
+          companyName: targetDb.settings.company || 'منشأتي',
+          users: targetDb.users || [],
+          ownerEmail: cleanEmail
+        };
+        map[cleanEmail] = existingComp;
+        localStorage.setItem('hesabaty_companies', JSON.stringify(map));
+      }
+    }
 
     if (existingComp) {
       setCurrentCompany(existingComp);
@@ -258,37 +257,29 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setCurrentStep('stepUserList');
       showToast(`تم التعرف على منشأة: «${existingComp.companyName}»`, 'success');
     } else {
-      // Check if tenant service has this company
-      const tenants = getCompaniesList();
-      const matchedTenant = tenants.find(t => t.googleEmail?.toLowerCase() === email.toLowerCase());
-      if (matchedTenant) {
-        const compData: CompanyAccountData = {
-          companyName: matchedTenant.name,
-          users: currentDb.users || [],
-          ownerEmail: email
-        };
-        map[email.toLowerCase()] = compData;
-        localStorage.setItem('hesabaty_companies', JSON.stringify(map));
-        setCurrentCompany(compData);
-        setSelectedUser(compData.users[0] || null);
-        setUserPassword('');
-        setCurrentStep('stepUserList');
-        showToast(`تم التعرف على منشأة: «${matchedTenant.name}»`, 'success');
-      } else {
-        // Not registered -> go to Step 3 (Register New Company)
-        showToast('هذا البريد غير مرتبط بمنشأة سابقة. يمكنك تسجيل المنشأة الآن فوراً.', 'error');
-        setRegCompanyName('');
-        setRegOwnerName(email.split('@')[0] || '');
-        setRegOwnerPassword('');
-        setCurrentStep('stepRegisterOwner');
-      }
+      // New account -> prompt to create/setup company
+      showToast('هذا البريد غير مربوط بمنشأة سابقة. يمكنك تأسيس منشأتك الآن فوراً.', 'error');
+      setRegCompanyName(currentDb.settings.company || '');
+      setRegOwnerName(userName || cleanEmail.split('@')[0]);
+      setRegOwnerPassword('');
+      setCurrentStep('stepRegisterOwner');
     }
   };
 
-  // Trigger Google Official Popup Sign-in
-  const handleOfficialGooglePopup = async () => {
+  // Remove a saved account from this device
+  const handleRemoveSavedAccount = (emailToRemove: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSavedAccounts(prev => {
+      const updated = prev.filter(a => a.email.toLowerCase() !== emailToRemove.toLowerCase());
+      localStorage.setItem('hesabaty_real_accounts', JSON.stringify(updated));
+      return updated;
+    });
+    showToast('تمت إزالة الحساب من قائمة هذا الهاتف', 'success');
+  };
+
+  // Primary Action: Real Google Sign-In with official Google dialog
+  const handleRealGoogleSignIn = async () => {
     setIsLoading(true);
-    setShowGooglePickerModal(false);
 
     try {
       const res = await signInWithPopup(auth, googleProvider);
@@ -296,14 +287,21 @@ export const LoginView: React.FC<LoginViewProps> = ({
       const displayName = res.user.displayName || email.split('@')[0] || 'المدير العام';
 
       setIsLoading(false);
-      handleSelectGoogleAccount(email, displayName.charAt(0).toUpperCase());
+      handleProcessEmail(email, displayName);
     } catch (err: any) {
       setIsLoading(false);
-      console.warn('Google popup error:', err);
-      showToast('تعذر فتح نافذة Google المنبثقة. يمكنك اختيار أو كتابة بريدك الـ Gmail مباشرة أدناه.', 'error');
-      setShowGooglePickerModal(true);
-      setShowAddCustomEmailInput(true);
+      console.warn('Google sign-in popup note:', err);
+      // If popup is blocked or unauthorized domain on mobile, focus the manual Gmail input
+      showToast('يرجى كتابة بريدك الـ Gmail في الحقل أدناه للدخول إلى منشأتك فوراً', 'error');
+      const inputEl = document.getElementById('manualGmailInput');
+      if (inputEl) inputEl.focus();
     }
+  };
+
+  // Manual Gmail Form Submission
+  const handleManualEmailSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    handleProcessEmail(manualEmail);
   };
 
   // Step 2: Handle user card click
@@ -367,7 +365,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
       localStorage.setItem('hesabaty_active_user', JSON.stringify(session));
       setIsLoading(false);
       onLoginSuccess(session, activeDb);
-    }, 600);
+    }, 500);
   };
 
   // Step 3: Save and Register New Company
@@ -396,7 +394,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
         googleEmail: selectedEmail
       });
 
-      // 2. Build default users for this new company
+      // 2. Build default users for this real company
       const ownerUser: AppUser = {
         id: 'usr_' + Date.now().toString(36),
         name: ownerNameTrimmed,
@@ -407,27 +405,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
         lastLogin: new Date().toISOString()
       };
 
-      const accountantUser: AppUser = {
-        id: 'usr_acc_' + Date.now().toString(36),
-        name: 'محاسب المنشأة',
-        username: 'accountant',
-        password: '123',
-        role: 'محاسب',
-        active: true
-      };
-
-      const cashierUser: AppUser = {
-        id: 'usr_cash_' + Date.now().toString(36),
-        name: 'كاشير المبيعات',
-        username: 'cashier',
-        password: '123',
-        role: 'كاشير',
-        active: true
-      };
-
       const companyData: CompanyAccountData = {
         companyName: companyTrimmed,
-        users: [ownerUser, accountantUser, cashierUser],
+        users: [ownerUser],
         ownerEmail: selectedEmail
       };
 
@@ -459,7 +439,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
         };
         localStorage.setItem('hesabaty_active_user', JSON.stringify(session));
         onLoginSuccess(session, activeDb);
-      }, 700);
+      }, 600);
     } catch (err) {
       console.error('Error saving company:', err);
       setIsLoading(false);
@@ -543,67 +523,103 @@ export const LoginView: React.FC<LoginViewProps> = ({
               STEP 1: Select Google Email / Mode (stepSelectAccount)
               ======================================================== */}
           {currentStep === 'stepSelectAccount' && (
-            <div className="space-y-5 animate-in fade-in duration-200">
+            <div className="space-y-4 animate-in fade-in duration-200">
               <div className="text-center">
                 <h2 className="text-xl font-bold text-slate-100 flex items-center justify-center gap-2">
                   <Building2 className="w-5 h-5 text-amber-400" />
                   <span>تسجيل الدخول للمنشأة</span>
                 </h2>
                 <p className="text-xs text-slate-400 mt-1">
-                  حدد بريد Google للتعرف على المنشأة والمستخدمين
+                  سجل بحساب Google للتعرف على منشأتك والمستخدمين
                 </p>
               </div>
 
-              {/* Google Sign-In Primary Button */}
+              {/* Real Google Sign-In Primary Button */}
               <button
                 type="button"
-                onClick={() => setShowGooglePickerModal(true)}
+                onClick={handleRealGoogleSignIn}
+                disabled={isLoading}
                 className="w-full py-3.5 px-4 bg-white hover:bg-slate-100 text-slate-900 rounded-xl font-bold text-sm flex items-center justify-center gap-3 transition-all shadow-lg active:scale-98 cursor-pointer border border-slate-200"
               >
-                <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
-                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
-                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-                </svg>
-                <span>اختيار بريد Google من الهاتف</span>
+                {isLoading ? (
+                  <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
+                ) : (
+                  <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                  </svg>
+                )}
+                <span>تسجيل الدخول الرسمي بحساب Google</span>
               </button>
 
-              {/* Currently Selected Email Indicator */}
-              {selectedEmail && (
-                <div className="p-3 bg-slate-800/90 rounded-xl border border-slate-700/80 flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2.5 overflow-hidden">
-                    <div className="w-8 h-8 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30 font-bold flex items-center justify-center shrink-0">
-                      <Mail className="w-4 h-4" />
-                    </div>
-                    <div className="truncate">
-                      <p className="text-slate-400 text-[10px]">الإيميل المختار:</p>
-                      <p className="font-bold text-slate-200 truncate dir-ltr text-right">{selectedEmail}</p>
-                    </div>
-                  </div>
+              {/* Direct Gmail Input Option (100% Reliable & No Fake Accounts) */}
+              <form onSubmit={handleManualEmailSubmit} className="space-y-2 pt-2">
+                <div className="flex items-center justify-between text-xs text-slate-300 font-bold">
+                  <span className="flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-amber-400" />
+                    <span>أو أدخل بريدك الإلكتروني لـ Gmail:</span>
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    id="manualGmailInput"
+                    type="email"
+                    required
+                    value={manualEmail}
+                    onChange={e => setManualEmail(e.target.value)}
+                    placeholder="name@gmail.com"
+                    className="flex-1 px-3.5 py-2.5 bg-slate-900/90 border border-slate-700 rounded-xl text-xs text-white dir-ltr text-right font-mono focus:border-amber-400 outline-none"
+                  />
                   <button
-                    type="button"
-                    onClick={() => setShowGooglePickerModal(true)}
-                    className="text-amber-400 hover:text-amber-300 hover:underline font-bold shrink-0 text-xs cursor-pointer px-2 py-1"
+                    type="submit"
+                    disabled={isLoading}
+                    className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black rounded-xl text-xs transition cursor-pointer shrink-0 shadow-md flex items-center gap-1"
                   >
-                    تغيير
+                    <span>دخول</span>
+                    <ArrowLeft className="w-3.5 h-3.5" />
                   </button>
+                </div>
+              </form>
+
+              {/* Only show real accounts previously used on this device (if any exist) */}
+              {savedAccounts.length > 0 && (
+                <div className="pt-2 border-t border-slate-700/60 space-y-2">
+                  <span className="text-[11px] text-slate-400 font-bold block">
+                    حساباتك المسجلة سابقاً على هذا الهاتف:
+                  </span>
+                  <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                    {savedAccounts.map(acc => (
+                      <div
+                        key={acc.email}
+                        onClick={() => handleProcessEmail(acc.email, acc.name)}
+                        className="p-2.5 bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700/60 rounded-xl flex items-center justify-between cursor-pointer transition select-none group"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-7 h-7 rounded-full bg-amber-500/20 text-amber-400 font-black flex items-center justify-center text-xs shrink-0 border border-amber-500/30">
+                            {acc.name ? acc.name.charAt(0).toUpperCase() : 'G'}
+                          </div>
+                          <div className="truncate">
+                            <p className="text-xs font-bold text-white group-hover:text-amber-300 transition truncate">{acc.name}</p>
+                            <p className="text-[10px] text-slate-400 dir-ltr text-right truncate">{acc.email}</p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => handleRemoveSavedAccount(acc.email, e)}
+                          className="p-1 text-slate-500 hover:text-rose-400 transition cursor-pointer"
+                          title="إزالة الحساب من هذا الهاتف"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
-              {/* Fast Direct Enter with current active company */}
-              {selectedEmail && (
-                <button
-                  type="button"
-                  onClick={() => handleSelectGoogleAccount(selectedEmail)}
-                  className="w-full py-2.5 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-500 hover:to-blue-600 text-white font-bold rounded-xl text-xs transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <span>عرض مستخدمي منشأة هذا الإيميل والدخول</span>
-                  <ArrowLeft className="w-4 h-4" />
-                </button>
-              )}
-
-              <div className="relative flex items-center justify-center my-3">
+              <div className="relative flex items-center justify-center my-2">
                 <div className="border-t border-slate-700/80 w-full"></div>
                 <span className="bg-slate-800 px-3 text-xs text-slate-400 font-bold absolute rounded-full">أو</span>
               </div>
@@ -613,8 +629,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 type="button"
                 onClick={() => {
                   setRegCompanyName('');
-                  setRegOwnerName(selectedEmail ? selectedEmail.split('@')[0] : '');
+                  setRegOwnerName(manualEmail ? manualEmail.split('@')[0] : '');
                   setRegOwnerPassword('');
+                  setSelectedEmail(manualEmail || '');
                   setCurrentStep('stepRegisterOwner');
                 }}
                 className="w-full py-3 px-4 bg-slate-800/90 hover:bg-slate-700/90 text-amber-400 border border-amber-500/40 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer shadow-xs"
@@ -660,7 +677,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 <div className="grid grid-cols-2 gap-2.5 max-h-52 overflow-y-auto pl-1">
                   {currentCompany.users.map(u => {
                     const isSelected = selectedUser?.id === u.id;
-                    const activePermsCount = countActivePermissions(u);
 
                     return (
                       <div
@@ -777,8 +793,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   <input
                     type="email"
                     value={selectedEmail}
-                    readOnly
-                    className="w-full px-3 py-2 rounded-lg bg-slate-900/60 border border-slate-700 text-slate-300 font-mono cursor-not-allowed text-xs dir-ltr text-right"
+                    onChange={e => setSelectedEmail(e.target.value)}
+                    required
+                    placeholder="yourname@gmail.com"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-900/60 border border-slate-700 text-slate-200 font-mono text-xs dir-ltr text-right focus:border-amber-400 outline-none"
                   />
                 </div>
 
@@ -791,7 +809,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     required
                     value={regCompanyName}
                     onChange={e => setRegCompanyName(e.target.value)}
-                    placeholder="مثال: شركة البركة للتجارة والتوريدات"
+                    placeholder="مثال: مؤسسة النور للتجارة"
                     className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-amber-400 outline-none text-xs"
                   />
                 </div>
@@ -805,7 +823,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     required
                     value={regOwnerName}
                     onChange={e => setRegOwnerName(e.target.value)}
-                    placeholder="مثال: أ/ أحمد محمود"
+                    placeholder="اسمك كمدير للمنشأة"
                     className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white focus:border-amber-400 outline-none text-xs"
                   />
                 </div>
@@ -847,124 +865,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
           جميع الحقوق محفوظة &copy; 2026 نظام حساباتي المحاسبي
         </p>
       </div>
-
-
-      {/* ========================================================
-          GOOGLE ACCOUNTS PICKER MODAL (From user prototype)
-          ======================================================== */}
-      {showGooglePickerModal && (
-        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-150">
-          <div 
-            className="bg-slate-900 border border-slate-700 w-full max-w-sm rounded-2xl p-5 space-y-4 shadow-2xl text-right animate-in zoom-in-95 duration-200"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
-                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
-                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-                </svg>
-                <h3 className="text-sm font-bold text-white">حسابات Google المتاحة بالهاتف</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowGooglePickerModal(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Official 1-Click Google Popup */}
-            <button
-              type="button"
-              onClick={handleOfficialGooglePopup}
-              className="w-full py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-xs cursor-pointer"
-            >
-              <Sparkles className="w-4 h-4 text-amber-300" />
-              <span>تسجيل الدخول بنافذة Google الرسمية (One-Tap)</span>
-            </button>
-
-            <p className="text-xs text-slate-400">أو اختر من البريد المسجل على هذا الجهاز:</p>
-
-            {/* List of Accounts */}
-            <div className="space-y-2 max-h-56 overflow-y-auto">
-              {googleAccounts.map(acc => (
-                <div
-                  key={acc.email}
-                  onClick={() => handleSelectGoogleAccount(acc.email, acc.avatar)}
-                  className="p-3 bg-slate-800 hover:bg-slate-700/80 rounded-xl cursor-pointer flex items-center gap-3 transition border border-slate-700/50 select-none group"
-                >
-                  <div className="w-9 h-9 rounded-full bg-amber-500 text-slate-950 font-black flex items-center justify-center text-sm shrink-0">
-                    {acc.avatar}
-                  </div>
-                  <div className="overflow-hidden min-w-0">
-                    <p className="text-xs font-bold text-white truncate group-hover:text-amber-300 transition">
-                      {acc.name}
-                    </p>
-                    <p className="text-[11px] text-slate-400 truncate dir-ltr text-right">
-                      {acc.email}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Custom Email Input Toggle */}
-            <div className="pt-1">
-              {!showAddCustomEmailInput ? (
-                <button
-                  type="button"
-                  onClick={() => setShowAddCustomEmailInput(true)}
-                  className="text-xs text-amber-400 hover:underline font-bold w-full text-center cursor-pointer py-1"
-                >
-                  + استخدام بريد إلكتروني آخر...
-                </button>
-              ) : (
-                <div className="space-y-2 bg-slate-800/80 p-2.5 rounded-xl border border-slate-700 animate-in fade-in">
-                  <label className="text-[11px] text-slate-300 font-bold block">
-                    اكتب أي حساب Gmail:
-                  </label>
-                  <div className="flex gap-1.5">
-                    <input
-                      type="email"
-                      value={manualCustomEmailInput}
-                      onChange={e => setManualCustomEmailInput(e.target.value)}
-                      placeholder="name@gmail.com"
-                      className="flex-1 px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono outline-none focus:border-amber-400 text-white dir-ltr text-right"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const em = manualCustomEmailInput.trim().toLowerCase();
-                        if (em && em.includes('@')) {
-                          handleSelectGoogleAccount(em, em.charAt(0).toUpperCase());
-                        } else {
-                          showToast('يرجى كتابة بريد إلكتروني صحيح', 'error');
-                        }
-                      }}
-                      className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg cursor-pointer"
-                    >
-                      تأكيد
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setShowGooglePickerModal(false)}
-              className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-xs font-bold rounded-lg transition cursor-pointer"
-            >
-              إلغاء
-            </button>
-          </div>
-        </div>
-      )}
-
     </div>
   );
 };
