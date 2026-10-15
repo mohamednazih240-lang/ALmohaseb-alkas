@@ -304,8 +304,9 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
           </div>
         </div>
 
-        {/* Invoice Printable Viewport */}
-        <div className="invoice-preview-viewport p-2 sm:p-5 overflow-y-auto overflow-x-auto flex-1 bg-slate-100 flex flex-col items-center">
+        {activeTab === 'preview' ? (
+          /* Invoice Printable Viewport */
+          <div className="invoice-preview-viewport p-2 sm:p-5 overflow-y-auto overflow-x-auto flex-1 bg-slate-100 flex flex-col items-center">
           <div
             id="invoice-printable-content"
             className={`transition-all ${
@@ -455,8 +456,19 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                 <div id="settingFooterNotes">
                   {settings.notes || 'شكراً لتعاملكم معنا'}
                 </div>
-                <div id="lblInvoiceCreatedBy">
-                  {invoice.createdBy ? `المسؤول: ${invoice.createdBy}` : ''}
+                <div id="lblInvoiceCreatedBy" className="space-y-0.5 text-[9px] text-slate-600">
+                  {invoice.createdBy && (
+                    <div>
+                      أنشئت بواسطة: <strong className="text-slate-900">{invoice.createdBy}</strong>
+                      {invoice.createdAt ? ` (${new Date(invoice.createdAt).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' })} ${new Date(invoice.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : ''}
+                    </div>
+                  )}
+                  {invoice.updatedBy && (
+                    <div className="text-amber-800 font-bold">
+                      آخر تعديل بواسطة: <strong className="text-amber-950">{invoice.updatedBy}</strong>
+                      {invoice.updatedAt ? ` (${new Date(invoice.updatedAt).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' })} ${new Date(invoice.updatedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : ''}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -467,6 +479,155 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             </div>
           </div>
         </div>
+      ) : (
+          /* Audit Log Tab View */
+          <div className="p-3.5 sm:p-6 overflow-y-auto flex-1 bg-slate-50 space-y-4 text-right">
+            <div className="max-w-2xl mx-auto space-y-4">
+              {/* Creator & Modifier Summary Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 flex flex-col justify-between">
+                  <div>
+                    <span className="text-[10px] font-bold text-emerald-800 uppercase block">من قام بإنشاء الفاتورة</span>
+                    <div className="flex items-center gap-2 mt-1">
+                      <User className="w-4 h-4 text-emerald-700" />
+                      <span className="font-black text-slate-900 text-sm">
+                        {creationEntry.userName || invoice.createdBy || 'مدير النظام'}
+                      </span>
+                      <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded font-bold">
+                        {creationEntry.userRole || 'مدير'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="mt-3 pt-2 border-t border-emerald-200/60 flex items-center justify-between text-[11px] text-emerald-950">
+                    <span className="flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-emerald-600" />
+                      <span>{creationTimeFormatted.date}</span>
+                    </span>
+                    <span className="font-mono font-bold flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-emerald-600" />
+                      <span>{creationTimeFormatted.time}</span>
+                    </span>
+                  </div>
+                </div>
+
+                <div className={`border rounded-xl p-3.5 flex flex-col justify-between ${
+                  lastEditEntry ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'
+                }`}>
+                  <div>
+                    <span className={`text-[10px] font-bold uppercase block ${
+                      lastEditEntry ? 'text-amber-800' : 'text-slate-500'
+                    }`}>
+                      آخر تعديل مسجل
+                    </span>
+                    {lastEditEntry ? (
+                      <div className="flex items-center gap-2 mt-1">
+                        <User className="w-4 h-4 text-amber-700" />
+                        <span className="font-black text-slate-900 text-sm">{lastEditEntry.userName || invoice.updatedBy}</span>
+                        {lastEditEntry.userRole && (
+                          <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded font-bold">
+                            {lastEditEntry.userRole}
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5 mt-1 text-slate-500 text-xs font-medium">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                        <span>لم يطرأ أي تعديل (الفاتورة بحالتها الأصلية)</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-3 pt-2 border-t border-slate-200/60 flex items-center justify-between text-[11px]">
+                    {lastEditEntry && editTimeFormatted ? (
+                      <>
+                        <span className="text-amber-950 flex items-center gap-1">
+                          <Calendar className="w-3 h-3 text-amber-600" />
+                          <span>{editTimeFormatted.date}</span>
+                        </span>
+                        <span className="font-mono font-bold text-amber-950 flex items-center gap-1">
+                          <Clock className="w-3 h-3 text-amber-600" />
+                          <span>{editTimeFormatted.time}</span>
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-[10px] text-slate-400">إجمالي التعديلات: 0</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Certified Financial Overview */}
+              <div className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between gap-3 text-xs flex-wrap">
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-500">القيمة:</span>
+                  <span className="font-mono font-black text-slate-900 text-sm">{invoice.total.toLocaleString()} {settings.currency || 'ر.س'}</span>
+                  <span className="bg-emerald-100 text-emerald-800 text-[10px] px-2 py-0.5 rounded-full font-bold">
+                    {invoice.status}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-slate-500 text-[11px]">
+                  <span>الأصناف: <strong className="text-slate-800">{invoice.items.length}</strong></span>
+                  <span>•</span>
+                  <span>الفرع: <strong className="text-slate-800">{invoice.branchName || 'الرئيسي'}</strong></span>
+                  <span>•</span>
+                  <span>العمليات: <strong className="text-blue-700 font-mono font-bold">{auditLogs.length}</strong></span>
+                </div>
+              </div>
+
+              {/* Timeline Tree */}
+              <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-2xs">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                    <History className="w-4 h-4 text-blue-600" />
+                    <span>التسلسل الزمني للرقابة المالية ({auditLogs.length})</span>
+                  </h3>
+                  <span className="text-[10px] text-slate-400">مرتب من الأحدث للأقدم</span>
+                </div>
+
+                <div className="relative pr-5 border-r-2 border-slate-200 space-y-3.5 my-2">
+                  {auditLogs.map((log, idx) => {
+                    const isCreation = log.action === 'create';
+                    const tData = formatAuditDateTime(log.timestamp, log.formattedDate, log.formattedTime);
+                    return (
+                      <div key={log.id || idx} className="relative">
+                        <div className={`absolute -right-[27px] top-1 w-4 h-4 rounded-full border-2 bg-white ${
+                          isCreation ? 'border-emerald-600' : 'border-blue-600'
+                        }`} />
+                        <div className="bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                          <div className="flex items-center justify-between flex-wrap gap-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                                isCreation ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
+                              }`}>
+                                {log.actionTitle || (isCreation ? 'إنشاء الفاتورة' : 'تعديل الفاتورة')}
+                              </span>
+                              <span className="text-xs font-bold text-slate-900">{log.userName}</span>
+                              {log.userRole && <span className="text-[10px] text-slate-500">({log.userRole})</span>}
+                            </div>
+                            <span className="text-[10px] font-mono text-slate-500">
+                              {tData.date} • {tData.time}
+                            </span>
+                          </div>
+                          {log.summary && (
+                            <p className="mt-1.5 text-xs text-slate-700 leading-relaxed font-sans">{log.summary}</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Anti-fraud Notice */}
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-[11px] text-blue-900 flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-blue-700 shrink-0" />
+                <span>
+                  نظام الرقابة المالية يسجل بصمة الوقت والاسم تلقائياً لكل عملية حفظ أو تعديل لضمان الشفافية ومكافحة التلاعب المالي.
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

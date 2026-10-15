@@ -20,7 +20,9 @@ import {
   List,
   ArrowUpDown,
   Download,
-  FileSpreadsheet
+  FileSpreadsheet,
+  ShieldCheck,
+  History
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -28,6 +30,7 @@ import {
 } from '../types/accounting';
 import { formatMoney, logAudit } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
+import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
   UniversalPrintModal,
@@ -69,6 +72,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('فواتير المبيعات');
+  const [selectedAuditInvoice, setSelectedAuditInvoice] = useState<Invoice | null>(null);
 
   // Mobile back button: If inside invoice editor, phone back button exits editor to list
   useModalBackHandler(
@@ -547,8 +551,13 @@ export const SalesView: React.FC<SalesViewProps> = ({
                       {inv.items.length} أصناف
                     </span>
                     {inv.createdBy && (
-                      <span className="text-[10px] bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded font-bold border border-slate-200">
-                        بواسطة: {inv.createdBy}
+                      <span className="text-[10px] bg-emerald-50 text-emerald-800 px-1.5 py-0.5 rounded font-bold border border-emerald-200" title="منشئ الفاتورة">
+                        المنشئ: {inv.createdBy}
+                      </span>
+                    )}
+                    {inv.updatedBy && (
+                      <span className="text-[10px] bg-amber-50 text-amber-800 px-1.5 py-0.5 rounded font-bold border border-amber-200" title="آخر من قام بتعديل الفاتورة">
+                        عُدلت: {inv.updatedBy}
                       </span>
                     )}
                     {inv.branchName && (
@@ -559,6 +568,15 @@ export const SalesView: React.FC<SalesViewProps> = ({
                   </div>
 
                   <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setSelectedAuditInvoice(inv)}
+                      className="px-2 py-1 text-blue-700 hover:text-blue-900 hover:bg-blue-50 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                      title="عرض سجل الرقابة والتدقيق وتاريخ التعديلات"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
+                      <span className="hidden xs:inline">التدقيق</span>
+                    </button>
+
                     <button
                       onClick={() => onPreviewInvoice(inv)}
                       className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
@@ -607,6 +625,16 @@ export const SalesView: React.FC<SalesViewProps> = ({
         documents={printDocuments}
         settings={db.settings}
       />
+
+      {/* Invoice Audit Log Modal */}
+      {selectedAuditInvoice && (
+        <InvoiceAuditLogModal
+          invoice={selectedAuditInvoice}
+          isOpen={!!selectedAuditInvoice}
+          onClose={() => setSelectedAuditInvoice(null)}
+          currency={db.settings.currency}
+        />
+      )}
     </div>
   );
 };
