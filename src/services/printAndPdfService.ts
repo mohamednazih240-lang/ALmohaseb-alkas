@@ -101,72 +101,40 @@ export async function downloadElementAsPdf(
       return true;
     }
 
-    if (format === 'a5') {
+    if (format === 'a5' || format === 'a4') {
+      const isA5 = format === 'a5';
       const pdf = new jsPDF({
         orientation,
         unit: 'mm',
-        format: 'a5'
+        format: isA5 ? 'a5' : 'a4'
       });
-      const pageWidth = orientation === 'landscape' ? 210 : 148;
-      const pageHeight = orientation === 'landscape' ? 148 : 210;
-      const contentWidth = pageWidth - margin * 2;
-      const contentHeight = (canvas.height * contentWidth) / canvas.width;
+      const pageWidth = orientation === 'landscape' ? (isA5 ? 210 : 297) : (isA5 ? 148 : 210);
+      const pageHeight = orientation === 'landscape' ? (isA5 ? 148 : 210) : (isA5 ? 210 : 297);
+      const safeMargin = isA5 ? 3.5 : 5;
+      const maxAvailableWidth = pageWidth - safeMargin * 2;
+      const maxAvailableHeight = pageHeight - safeMargin * 2;
 
-      if (contentHeight <= (pageHeight - margin * 2) * 1.1) {
-        const fitHeight = Math.min(contentHeight, pageHeight - margin * 2);
-        pdf.addImage(imgData, 'JPEG', margin, margin, contentWidth, fitHeight);
-      } else {
-        let heightLeft = contentHeight;
-        let position = margin;
-        const effectivePageHeight = pageHeight - margin * 2;
-        pdf.addImage(imgData, 'JPEG', margin, position, contentWidth, contentHeight);
-        heightLeft -= effectivePageHeight;
-        while (heightLeft > 0) {
-          position -= effectivePageHeight;
-          pdf.addPage();
-          pdf.addImage(imgData, 'JPEG', margin, position, contentWidth, contentHeight);
-          heightLeft -= effectivePageHeight;
-        }
+      // Aspect ratio calculation to guarantee 100% single page fit
+      const aspectRatio = canvas.width / canvas.height;
+      let renderWidth = maxAvailableWidth;
+      let renderHeight = renderWidth / aspectRatio;
+
+      // If calculated height exceeds printable height, scale down by height to avoid breaking
+      if (renderHeight > maxAvailableHeight) {
+        renderHeight = maxAvailableHeight;
+        renderWidth = renderHeight * aspectRatio;
       }
+
+      // Center horizontally on page
+      const posX = safeMargin + (maxAvailableWidth - renderWidth) / 2;
+      const posY = safeMargin;
+
+      pdf.addImage(imgData, 'JPEG', posX, posY, renderWidth, renderHeight);
       pdf.save(filename);
       return true;
     }
 
-    // Standard A4 Layout
-    const pdf = new jsPDF({
-      orientation,
-      unit: 'mm',
-      format: 'a4'
-    });
-
-    const pageWidth = orientation === 'landscape' ? 297 : 210;
-    const pageHeight = orientation === 'landscape' ? 210 : 297;
-    const contentWidth = pageWidth - margin * 2;
-    const contentHeight = (canvas.height * contentWidth) / canvas.width;
-
-    if (contentHeight <= (pageHeight - margin * 2) * 1.1) {
-      // Single Page Fit
-      const fitHeight = Math.min(contentHeight, pageHeight - margin * 2);
-      pdf.addImage(imgData, 'JPEG', margin, margin, contentWidth, fitHeight);
-    } else {
-      // Multi-Page Slicing
-      let heightLeft = contentHeight;
-      let position = margin;
-      const effectivePageHeight = pageHeight - margin * 2;
-
-      pdf.addImage(imgData, 'JPEG', margin, position, contentWidth, contentHeight);
-      heightLeft -= effectivePageHeight;
-
-      while (heightLeft > 0) {
-        position -= effectivePageHeight;
-        pdf.addPage();
-        pdf.addImage(imgData, 'JPEG', margin, position, contentWidth, contentHeight);
-        heightLeft -= effectivePageHeight;
-      }
-    }
-
-    pdf.save(filename);
-    return true;
+    return false;
   } catch (error) {
     console.error('Failed to generate PDF:', error);
     // Fallback: window.print()

@@ -69,13 +69,59 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     const prevStyle = document.getElementById('dynamic-paper-print-style');
     if (prevStyle) prevStyle.remove();
 
-    // 2. Inject exact dynamic @page rule with safe margins calibrated for each paper size
+    // 2. Inject exact dynamic @page rule and container rules calibrated to fit strictly on ONE PAGE
     const styleEl = document.createElement('style');
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
-      styleEl.innerHTML = `@page { size: A4 portrait; margin: 4mm; }`;
+      styleEl.innerHTML = `
+        @page { size: A4 portrait; margin: 4mm 5mm; }
+        @media print {
+          html, body {
+            width: 210mm !important;
+            height: 297mm !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+          }
+          #invoice-printable-content, .invoice-container {
+            width: 100% !important;
+            max-width: 198mm !important;
+            max-height: 285mm !important;
+            height: auto !important;
+            margin: 0 auto !important;
+            page-break-inside: avoid !important;
+            page-break-after: avoid !important;
+            break-inside: avoid !important;
+            break-after: avoid !important;
+            overflow: hidden !important;
+          }
+        }
+      `;
     } else if (paperSize === 'A5') {
-      styleEl.innerHTML = `@page { size: A5 portrait; margin: 3.5mm; }`;
+      styleEl.innerHTML = `
+        @page { size: A5 portrait; margin: 3mm 4mm; }
+        @media print {
+          html, body {
+            width: 148mm !important;
+            height: 210mm !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+          }
+          #invoice-printable-content, .invoice-container {
+            width: 100% !important;
+            max-width: 139mm !important;
+            max-height: 202mm !important;
+            height: auto !important;
+            margin: 0 auto !important;
+            page-break-inside: avoid !important;
+            page-break-after: avoid !important;
+            break-inside: avoid !important;
+            break-after: avoid !important;
+            overflow: hidden !important;
+          }
+        }
+      `;
     } else {
       styleEl.innerHTML = `@page { size: 80mm auto; margin: 0; }`;
     }
@@ -471,11 +517,17 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   )}
                 </div>
               </div>
+
+              {/* حقوق الملكية الفكرية للمطور - معتمدة ومطلوبة على المطبوعات */}
+              <div className="invoice-developer-copyright">
+                <div className="dev-name">حقوق الملكيه الفكرية محفوظة ل مطور Mohamed Nazih</div>
+                <div className="dev-phone" dir="ltr">01029190615</div>
+              </div>
             </div>
 
-            {/* حقوق النظام الخارجية */}
+            {/* حقوق الملكية الفكرية في شاشة المعاينة */}
             <div className="copyright-outside">
-              Powered by Hesabaty System
+              حقوق الملكيه الفكرية محفوظة ل مطور Mohamed Nazih • 01029190615
             </div>
           </div>
         </div>

@@ -28,6 +28,23 @@
   }
 }
 
+/* Glass panel & User Cards for Login Screen */
+.glass-panel {
+  background: rgba(30, 41, 59, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.user-card {
+  transition: all 0.2s ease;
+}
+
+.user-card:hover {
+  transform: translateY(-3px);
+  border-color: #f59e0b;
+}
+
 /* ----------------------------------------------------
    1. تنسيقات الفاتورة الأساسية وإعدادات الورق (A4 / A5 / الحراري)
 ---------------------------------------------------- */
@@ -52,10 +69,11 @@
 }
 body[data-paper-size="A4"] .invoice-container,
 [data-paper-size="A4"] .invoice-container {
-  width: 210mm;
-  max-width: 100%;
-  min-height: 297mm;
-  padding: 8mm 10mm;
+  width: 100%;
+  max-width: 200mm;
+  min-height: auto;
+  padding: 6mm 8mm;
+  box-sizing: border-box;
 }
 
 /* --- مقاس A5 في المعاينة على الشاشة --- */
@@ -68,14 +86,15 @@ body[data-paper-size="A4"] .invoice-container,
 }
 body[data-paper-size="A5"] .invoice-container,
 [data-paper-size="A5"] .invoice-container {
-  width: 148mm;
-  max-width: 100%;
-  min-height: 210mm;
-  padding: 5mm 6mm;
+  width: 100%;
+  max-width: 142mm;
+  min-height: auto;
+  padding: 3.5mm 5mm;
+  box-sizing: border-box;
 }
 body[data-paper-size="A5"],
 [data-paper-size="A5"] {
-  font-size: 0.82rem;
+  font-size: 0.76rem;
 }
 
 /* --- المقاس الحراري في المعاينة على الشاشة --- */
@@ -171,6 +190,31 @@ table.items-table th,
   width: 100%;
 }
 
+.invoice-developer-copyright {
+  width: 100%;
+  text-align: center;
+  margin-top: 5px;
+  padding-top: 3px;
+  border-top: 1px dashed #777;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.35;
+}
+.invoice-developer-copyright .dev-name {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #111;
+}
+.invoice-developer-copyright .dev-phone {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.5px;
+  color: #222;
+  font-weight: 700;
+}
+
 .copyright-outside {
   width: 100%;
   text-align: center;
@@ -178,7 +222,7 @@ table.items-table th,
   font-weight: bold;
   color: #444;
   padding: 5px 0;
-  direction: ltr;
+  direction: rtl;
 }
 
 .hide-row { display: none !important; }
@@ -284,7 +328,7 @@ table.items-table th,
   .invoice-container { 
     box-sizing: border-box !important;
     box-shadow: none !important;
-    border: 2px solid #000 !important;
+    border: 1.5px solid #000 !important;
     margin: 0 auto !important;
     page-break-after: avoid !important;
     page-break-inside: avoid !important;
@@ -292,28 +336,86 @@ table.items-table th,
     break-inside: avoid !important;
   }
 
-  /* طباعة A4 */
+  /* طباعة A4: صفحة واحدة نقية ومضبوطة بدون أي كسر نهائياً */
   body[data-paper-size="A4"] .invoice-container {
-    width: 210mm !important;
-    min-height: 297mm !important;
-    padding: 8mm 10mm !important;
+    width: 100% !important;
+    max-width: 198mm !important;
+    min-height: auto !important;
+    max-height: 284mm !important;
+    height: auto !important;
+    padding: 5mm 7mm !important;
     margin: 0 auto !important;
     border: 1.5px solid #000 !important;
     box-shadow: none !important;
     page-break-after: avoid !important;
     page-break-inside: avoid !important;
+    break-after: avoid !important;
+    break-inside: avoid !important;
+    overflow: hidden !important;
+  }
+  body[data-paper-size="A4"] .invoice-table th,
+  body[data-paper-size="A4"] .invoice-table td {
+    padding: 3.5px 5px !important;
+    font-size: 0.8rem !important;
+  }
+  body[data-paper-size="A4"] .info-box {
+    padding: 4px 8px !important;
+    margin-bottom: 5px !important;
+    font-size: 0.8rem !important;
+  }
+  body[data-paper-size="A4"] .summary-vertical-list {
+    width: 220px !important;
+    font-size: 0.82rem !important;
   }
 
-  /* طباعة A5 */
+  /* طباعة A5: صفحة واحدة نقية ومضبوطة بدون أي كسر نهائياً */
   body[data-paper-size="A5"] .invoice-container {
-    width: 148mm !important;
-    min-height: 210mm !important;
-    padding: 5mm 6mm !important;
+    width: 100% !important;
+    max-width: 139mm !important;
+    min-height: auto !important;
+    max-height: 200mm !important;
+    height: auto !important;
+    padding: 3mm 4.5mm !important;
     margin: 0 auto !important;
-    border: 1.5px solid #000 !important;
+    border: 1.2px solid #000 !important;
     box-shadow: none !important;
     page-break-after: avoid !important;
     page-break-inside: avoid !important;
+    break-after: avoid !important;
+    break-inside: avoid !important;
+    overflow: hidden !important;
+  }
+  body[data-paper-size="A5"] .invoice-table th,
+  body[data-paper-size="A5"] .invoice-table td {
+    padding: 2.5px 3.5px !important;
+    font-size: 0.72rem !important;
+    line-height: 1.25 !important;
+  }
+  body[data-paper-size="A5"] .header {
+    padding-bottom: 2px !important;
+    margin-bottom: 4px !important;
+  }
+  body[data-paper-size="A5"] .logo-img {
+    max-height: 34px !important;
+    max-width: 60px !important;
+  }
+  body[data-paper-size="A5"] .info-box {
+    padding: 2.5px 6px !important;
+    margin-bottom: 4px !important;
+    font-size: 0.72rem !important;
+  }
+  body[data-paper-size="A5"] .bottom-section {
+    margin-top: 3px !important;
+    margin-bottom: 4px !important;
+  }
+  body[data-paper-size="A5"] .summary-vertical-list {
+    width: 180px !important;
+    font-size: 0.72rem !important;
+    gap: 1px !important;
+  }
+  body[data-paper-size="A5"] .invoice-footer-note {
+    padding-top: 3px !important;
+    font-size: 0.68rem !important;
   }
 
   /* الطباعة الحرارية */
@@ -326,6 +428,34 @@ table.items-table th,
   }
   
   .copyright-outside { display: none !important; }
+
+  /* حقوق الملكية الفكرية المعتمدة للمطور عند الطباعة */
+  .invoice-developer-copyright {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    text-align: center !important;
+    margin-top: 2mm !important;
+    padding-top: 1.5mm !important;
+    border-top: 1px dashed #333 !important;
+    color: #000 !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+  .invoice-developer-copyright .dev-name {
+    font-size: 7.5pt !important;
+    font-weight: bold !important;
+    color: #000 !important;
+  }
+  .invoice-developer-copyright .dev-phone {
+    font-size: 7.5pt !important;
+    font-family: monospace !important;
+    font-weight: bold !important;
+    color: #000 !important;
+    letter-spacing: 0.5px !important;
+  }
 
   tr, .print-card {
     page-break-inside: avoid !important;
