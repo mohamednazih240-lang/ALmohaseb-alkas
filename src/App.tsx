@@ -323,7 +323,7 @@ export default function App() {
         className="fixed inset-0 pointer-events-none z-0 flex items-center justify-center opacity-[0.035] select-none"
         aria-hidden="true"
       >
-        <img src="/icon.svg" alt="" className="w-[520px] h-[520px] object-contain" />
+        <img src="/logo.png" alt="" className="w-[520px] h-[520px] object-contain" />
       </div>
 
       {/* PWA Mobile App Installation & Instant Auto-Update Banner */}

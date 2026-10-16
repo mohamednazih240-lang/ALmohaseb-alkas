@@ -42,7 +42,9 @@ import {
   calculateCustomerBalance,
   calculateSupplierBalance,
   createInvoiceJournal,
-  logAudit
+  logAudit,
+  getProductForBranch,
+  updateProductBranchData
 } from '../services/accountingStorage';
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
@@ -55,6 +57,7 @@ interface UnifiedInvoicePageProps {
   editingInvoice?: Invoice | null;
   onCloseEdit?: () => void;
   onClose?: () => void;
+  activeBranchId?: string;
 }
 
 export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
@@ -64,8 +67,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   onPreviewInvoice,
   editingInvoice,
   onCloseEdit,
-  onClose
+  onClose,
+  activeBranchId
 }) => {
+  const invoiceBranchId = editingInvoice?.branchId || activeBranchId || db.currentUser?.branchId || db.branches?.[0]?.id || 'br_main';
+  const invoiceBranch = (db.branches || []).find(b => b.id === invoiceBranchId) || { id: 'br_main', name: 'الفرع الرئيسي' };
   // Theme configuration based on mode
   const getTheme = () => {
     switch (mode) {
@@ -399,12 +405,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Quick add from lookup card
   const quickAddItem = (prod: Product) => {
-    let activePrice = prod.sellPrice;
-    if (priceType === 'wholesale') activePrice = prod.wholesalePrice;
-    else if (priceType === 'buy') activePrice = prod.buyPrice;
+    const branchProd = getProductForBranch(prod, invoiceBranchId);
+    let activePrice = branchProd.sellPrice;
+    if (priceType === 'wholesale') activePrice = branchProd.wholesalePrice;
+    else if (priceType === 'buy') activePrice = branchProd.buyPrice;
 
-    if (mode === 'sale' && prod.currentQty <= 0) {
-      const confirmNeg = confirm(`⚠️ تنبيه: رصيد الصنف "${prod.name}" منتهٍ أو صفر. هل ترغب في إتمام البيع بالسالب؟`);
+    if (mode === 'sale' && branchProd.currentQty <= 0) {
+      const confirmNeg = confirm(`⚠️ تنبيه: رصيد الصنف "${prod.name}" بفرع (${invoiceBranch.name}) هو (${branchProd.currentQty}). هل ترغب في إتمام البيع بالسالب؟`);
       if (!confirmNeg) return;
     }
 
@@ -428,7 +435,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           spec: '',
           qty: 1,
           unitPrice: activePrice,
-          costPrice: prod.avgCost || prod.buyPrice,
+          costPrice: branchProd.avgCost || branchProd.buyPrice,
           discount: 0,
           taxRate: 0,
           total: activePrice * 1
@@ -505,16 +512,26 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       barcode: '',
       category: newCategory || 'عامة',
       unit: 'قطعة',
-      buyPrice: buy,
-      sellPrice: cash,
-      wholesalePrice: wholesale,
+      buyPrice: invoiceBranchId === 'br_main' ? buy : 0,
+      sellPrice: invoiceBranchId === 'br_main' ? cash : 0,
+      wholesalePrice: invoiceBranchId === 'br_main' ? wholesale : 0,
       minStock: 5,
-      currentQty: stock,
-      avgCost: buy > 0 ? buy : cash * 0.8
+      currentQty: invoiceBranchId === 'br_main' ? stock : 0,
+      avgCost: buy > 0 ? buy : cash * 0.8,
+      branchesData: {
+        [invoiceBranchId]: {
+          currentQty: stock,
+          buyPrice: buy,
+          sellPrice: cash,
+          wholesalePrice: wholesale,
+          minStock: 5,
+          avgCost: buy > 0 ? buy : cash * 0.8
+        }
+      }
     };
 
     updated.products.push(newProd);
-    logAudit(updated, 'إضافة صنف من شاشة الفاتورة', newProd.name);
+    logAudit(updated, `إضافة صنف من شاشة الفاتورة بفرع (${invoiceBranch.name})`, newProd.name);
     onUpdateDb(updated);
 
     setShowEditItemModal(false);
@@ -566,12 +583,18 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     // Reverse previous effects if editing
     if (editingInvoice) {
-      // Revert stock
+      // Revert stock specifically for the branch of that invoice
+      const prevBranchId = editingInvoice.branchId || 'br_main';
       editingInvoice.items.forEach(oldItem => {
         const prod = updated.products.find(p => p.id === oldItem.productId);
         if (prod) {
-          if (editingInvoice.type === 'sale') prod.currentQty += oldItem.qty;
-          else prod.currentQty = Math.max(0, prod.currentQty - oldItem.qty);
+          const bp = getProductForBranch(prod, prevBranchId);
+          let revertedQty = bp.currentQty;
+          if (editingInvoice.type === 'sale') revertedQty += oldItem.qty;
+          else revertedQty = Math.max(0, revertedQty - oldItem.qty);
+          const updatedProd = updateProductBranchData(prod, prevBranchId, { currentQty: revertedQty });
+          const pIdx = updated.products.findIndex(p => p.id === prod.id);
+          if (pIdx > -1) updated.products[pIdx] = updatedProd;
         }
       });
       updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== editingInvoice.id);
@@ -705,40 +728,52 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       updatedById: editingInvoice ? currentUserId : undefined,
       updatedAt: editingInvoice ? nowIso : undefined,
       auditLog: invoiceAuditLog,
-      branchId: editingInvoice?.branchId || db.currentUser?.branchId || db.branches?.[0]?.id || 'br_main',
-      branchName: editingInvoice?.branchName || db.currentUser?.branchName || db.branches?.[0]?.name || 'الفرع الرئيسي',
+      branchId: invoiceBranchId,
+      branchName: invoiceBranch.name,
       items: JSON.parse(JSON.stringify(invoiceItems))
     };
 
-    // 1. Stock movements & inventory balance update
+    // 1. Stock movements & inventory balance update specifically for this branch
     const whId = updated.warehouses[0]?.id || 'wh_main';
     const wh = updated.warehouses.find(w => w.id === whId);
 
     savedInvoice.items.forEach(item => {
       const prod = updated.products.find(p => p.id === item.productId || p.code === item.productCode);
       if (prod) {
+        const bp = getProductForBranch(prod, invoiceBranchId);
         let qtyChange = 0;
+        let newQty = bp.currentQty;
+        let newAvgCost = bp.avgCost || bp.buyPrice;
+        let newBuyPrice = bp.buyPrice;
+
         if (mode === 'sale' || mode === 'wholesale') {
           qtyChange = -item.qty;
-          prod.currentQty -= item.qty;
+          newQty -= item.qty;
         } else if (mode === 'purchase') {
           qtyChange = item.qty;
-          // Weighted average costing
-          const oldQty = Math.max(0, prod.currentQty);
-          const oldCost = prod.avgCost || prod.buyPrice;
-          const newQty = item.qty;
+          const oldQty = Math.max(0, bp.currentQty);
+          const oldCost = bp.avgCost || bp.buyPrice;
+          const newQ = item.qty;
           const newCost = item.unitPrice;
-          const totalQty = oldQty + newQty;
-          prod.avgCost = totalQty > 0 ? ((oldQty * oldCost) + (newQty * newCost)) / totalQty : newCost;
-          prod.buyPrice = newCost;
-          prod.currentQty += item.qty;
+          const totalQ = oldQty + newQ;
+          newAvgCost = totalQ > 0 ? ((oldQty * oldCost) + (newQ * newCost)) / totalQ : newCost;
+          newBuyPrice = newCost;
+          newQty += item.qty;
         } else if (mode === 'sale_return') {
           qtyChange = item.qty;
-          prod.currentQty += item.qty;
+          newQty += item.qty;
         } else if (mode === 'purchase_return') {
           qtyChange = -item.qty;
-          prod.currentQty = Math.max(0, prod.currentQty - item.qty);
+          newQty = Math.max(0, newQty - item.qty);
         }
+
+        const updatedProd = updateProductBranchData(prod, invoiceBranchId, {
+          currentQty: newQty,
+          avgCost: newAvgCost,
+          buyPrice: newBuyPrice
+        });
+        const pIdx = updated.products.findIndex(p => p.id === prod.id);
+        if (pIdx > -1) updated.products[pIdx] = updatedProd;
 
         updated.stockMovements.unshift({
           id: generateId('sm'),
@@ -748,18 +783,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           warehouseId: whId,
           warehouseName: wh ? wh.name : 'المخزن الرئيسي',
           qtyChange,
-          balanceAfter: prod.currentQty,
+          balanceAfter: newQty,
           unitCost: item.costPrice,
           type: mode === 'sale' || mode === 'wholesale' ? 'sale' :
                 mode === 'purchase' ? 'purchase' :
                 mode === 'sale_return' ? 'sale_return' : 'purchase_return',
           refNumber: savedInvoice.number,
-          sourceId: invId
+          sourceId: invId,
+          branchId: invoiceBranchId,
+          branchName: invoiceBranch.name
         });
       }
     });
 
-    // 2. Treasury entries for each payment
+    // 2. Treasury entries for each payment belonging to this branch
     if (finalPaid > 0) {
       if (savedInvoice.payments && savedInvoice.payments.length > 0) {
         savedInvoice.payments.forEach(pLine => {
@@ -770,9 +807,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               direction: (mode === 'sale' || mode === 'wholesale' || mode === 'purchase_return') ? 'in' : 'out',
               amount: pLine.amount,
               method: pLine.method,
-              description: `تحصيل فاتورة ${savedInvoice.number} - ${partyName}`,
+              description: `تحصيل فاتورة ${savedInvoice.number} (${invoiceBranch.name}) - ${partyName}`,
               sourceType: mode,
-              sourceId: invId
+              sourceId: invId,
+              branchId: invoiceBranchId,
+              branchName: invoiceBranch.name
             });
           }
         });
@@ -783,9 +822,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           direction: (mode === 'sale' || mode === 'wholesale' || mode === 'purchase_return') ? 'in' : 'out',
           amount: finalPaid,
           method: mainPaymentMethod,
-          description: `تحصيل فاتورة ${savedInvoice.number} - ${partyName}`,
+          description: `تحصيل فاتورة ${savedInvoice.number} (${invoiceBranch.name}) - ${partyName}`,
           sourceType: mode,
-          sourceId: invId
+          sourceId: invId,
+          branchId: invoiceBranchId,
+          branchName: invoiceBranch.name
         });
       }
     }
@@ -945,8 +986,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             <div className="flex items-center gap-1.5 flex-wrap">
               <div className="flex items-center gap-1 font-bold text-slate-800">
                 <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                <span>الرقابة المالية:</span>
+                <span>الرقابة والفرع:</span>
               </div>
+              <span className="bg-blue-100/80 text-blue-900 border border-blue-300 px-2 py-0.5 rounded font-black flex items-center gap-1">
+                <Building2 className="w-3 h-3 text-blue-700" />
+                فرع الفاتورة: {invoiceBranch.name}
+              </span>
               <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.2 rounded font-bold">
                 المنشئ: {editingInvoice?.createdBy || db.currentUser?.name || 'مدير النظام'}
               </span>
@@ -1197,33 +1242,38 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     );
                   }
 
-                  return matches.map(p => (
-                    <div
-                      key={p.id}
-                      onClick={() => {
-                        quickAddItem(p);
-                        setInlineProductSearch('');
-                        setShowInlineDropdown(false);
-                      }}
-                      className="p-2 hover:bg-blue-50 cursor-pointer flex items-center justify-between text-[9px] transition-colors"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="font-bold text-slate-900 truncate">
-                          {p.name}
+                  return matches.map(p => {
+                    const bp = getProductForBranch(p, invoiceBranchId);
+                    return (
+                      <div
+                        key={p.id}
+                        onClick={() => {
+                          quickAddItem(p);
+                          setInlineProductSearch('');
+                          setShowInlineDropdown(false);
+                        }}
+                        className="p-2 hover:bg-blue-50 cursor-pointer flex items-center justify-between text-[9px] transition-colors"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-bold text-slate-900 truncate">
+                            {p.name}
+                          </div>
+                          <div className="text-[8px] text-slate-500 flex items-center gap-2 mt-0.5 font-mono">
+                            <span>كود: {p.code}</span>
+                            <span className={bp.currentQty <= 0 ? 'text-rose-600 font-bold' : 'text-blue-600'}>
+                              متاح بالفرع: {bp.currentQty}
+                            </span>
+                          </div>
                         </div>
-                        <div className="text-[8px] text-slate-500 flex items-center gap-2 mt-0.5 font-mono">
-                          <span>كود: {p.code}</span>
-                          <span>المتاح: {p.currentQty}</span>
+                        <div className="text-left shrink-0 mr-2">
+                          <span className="font-bold text-emerald-700 font-mono text-[10px]">
+                            {mode === 'purchase' ? bp.buyPrice.toFixed(2) : (mode === 'wholesale' ? bp.wholesalePrice.toFixed(2) : bp.sellPrice.toFixed(2))}
+                          </span>
+                          <span className="block text-[7.5px] text-blue-600 font-bold">+ إضافة</span>
                         </div>
                       </div>
-                      <div className="text-left shrink-0 mr-2">
-                        <span className="font-bold text-emerald-700 font-mono text-[10px]">
-                          {mode === 'purchase' ? p.buyPrice.toFixed(2) : (mode === 'wholesale' ? p.wholesalePrice.toFixed(2) : p.sellPrice.toFixed(2))}
-                        </span>
-                        <span className="block text-[7.5px] text-blue-600 font-bold">+ إضافة</span>
-                      </div>
-                    </div>
-                  ));
+                    );
+                  });
                 })()}
               </div>
             )}
@@ -1666,12 +1716,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           )}
                         </div>
 
-                        {visible.map(item => {
+                        {visible.map(rawItem => {
+                          const item = getProductForBranch(rawItem, invoiceBranchId);
                           const isLow = item.currentQty <= item.minStock;
                           return (
                             <div
                               key={item.id}
-                              onClick={() => quickAddItem(item)}
+                              onClick={() => quickAddItem(rawItem)}
                               className={`bg-white border rounded p-1.5 flex flex-col gap-0.5 cursor-pointer shadow-2xs hover:border-blue-500 hover:bg-blue-50/40 transition-colors ${
                                 isLow ? 'border-rose-400 bg-rose-50/30' : 'border-slate-300'
                               }`}
@@ -1685,7 +1736,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                               <div className="grid grid-cols-4 gap-1 text-[8px] text-center pt-0.5">
                                 <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
-                                  <span className="block text-[6.5px] text-slate-500">المتاح</span>
+                                  <span className="block text-[6.5px] text-slate-500">متاح بالفرع</span>
                                   <strong className={`font-mono text-[9px] ${item.currentQty <= 0 ? 'text-rose-600' : 'text-blue-600'}`}>
                                     {item.currentQty}
                                   </strong>

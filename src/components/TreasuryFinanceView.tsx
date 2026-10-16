@@ -45,13 +45,19 @@ interface TreasuryFinanceViewProps {
   subPage: 'treasury' | 'expenses' | 'revenues' | 'accounts' | 'journals' | 'ledger';
   db: AccountingDB;
   onUpdateDb: (updated: AccountingDB) => void;
+  activeBranchId?: string;
 }
 
 export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   subPage,
   db,
-  onUpdateDb
+  onUpdateDb,
+  activeBranchId
 }) => {
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
+  const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
+  const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
   // Modals
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -117,10 +123,12 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       method: moveMethod,
       description: moveDesc || (moveDir === 'in' ? 'إيداع نقدي مباشر' : 'سحب نقدي مباشر'),
       sourceType: 'manual',
-      sourceId: entryId
+      sourceId: entryId,
+      branchId: targetBranchId,
+      branchName: currentBranch.name
     });
 
-    logAudit(updated, 'حركة خزينة يدوية', `${moveDir === 'in' ? 'إيداع' : 'سحب'} ${formatMoney(moveAmount, updated.settings.currency)} (${moveMethod})`);
+    logAudit(updated, `حركة خزينة يدوية (${currentBranch.name})`, `${moveDir === 'in' ? 'إيداع' : 'سحب'} ${formatMoney(moveAmount, updated.settings.currency)} (${moveMethod})`);
     onUpdateDb(updated);
     setMoveAmount(0);
     setMoveDesc('');
@@ -134,9 +142,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
     if (transferAmount <= 0) return alert('المبلغ غير صالح');
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const fromBal = calculateTreasuryBalance(updated, fromMethod);
+    const fromBal = calculateTreasuryBalance(updated, fromMethod, targetBranchId);
     if (fromBal < transferAmount) {
-      alert(`رصيد ${fromMethod} الحالي (${formatMoney(fromBal, updated.settings.currency)}) لا يكفي لإتمام التحويل.`);
+      alert(`رصيد ${fromMethod} الحالي بفرع (${currentBranch.name}) هو (${formatMoney(fromBal, updated.settings.currency)}) ولا يكفي لإتمام التحويل.`);
       return;
     }
 
@@ -150,7 +158,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       method: fromMethod,
       description: `تحويل صادر إلى ${toMethod}: ${transferNote}`,
       sourceType: 'transfer',
-      sourceId: tId
+      sourceId: tId,
+      branchId: targetBranchId,
+      branchName: currentBranch.name
     });
 
     // 2. In to destination method
@@ -162,7 +172,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       method: toMethod,
       description: `تحويل وارد من ${fromMethod}: ${transferNote}`,
       sourceType: 'transfer',
-      sourceId: tId
+      sourceId: tId,
+      branchId: targetBranchId,
+      branchName: currentBranch.name
     });
 
     // 3. Double-entry journal between asset accounts
@@ -205,7 +217,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       category: simpleCategory || (isExpense ? 'مصروفات عامة' : 'إيرادات تشغيلية'),
       amount: simpleAmount,
       method: simpleMethod,
-      description: simpleDesc
+      description: simpleDesc,
+      branchId: targetBranchId,
+      branchName: currentBranch.name
     };
 
     if (isExpense) {
@@ -217,9 +231,11 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         direction: 'out',
         amount: simpleAmount,
         method: simpleMethod,
-        description: `مصروف: ${record.category} (${simpleDesc})`,
+        description: `مصروف (${currentBranch.name}): ${record.category} (${simpleDesc})`,
         sourceType: 'expense',
-        sourceId: recId
+        sourceId: recId,
+        branchId: targetBranchId,
+        branchName: currentBranch.name
       });
       // Journal: Debit Expenses (5201), Credit Cash/Bank
       const expAcc = updated.accounts.find(a => a.id === 'acc_exp')!;
@@ -230,11 +246,11 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         id: generateId('j'),
         number: `J-${Date.now().toString().slice(-6)}`,
         date: simpleDate,
-        description: `إثبات مصروف: ${record.category} - ${simpleDesc}`,
+        description: `إثبات مصروف (${currentBranch.name}): ${record.category} - ${simpleDesc}`,
         sourceType: 'expense',
         sourceId: recId,
         lines: [
-          { accountId: expAcc.id, accountCode: expAcc.code, accountName: expAcc.name, debit: simpleAmount, credit: 0, notes: record.category },
+          { accountId: expAcc.id, accountCode: expAcc.code, accountName: expAcc.name, debit: simpleAmount, credit: 0, notes: `${record.category} (${currentBranch.name})` },
           { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: 0, credit: simpleAmount, notes: `سداد بطريقة ${simpleMethod}` }
         ],
         createdAt: new Date().toISOString()
@@ -248,9 +264,11 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         direction: 'in',
         amount: simpleAmount,
         method: simpleMethod,
-        description: `إيراد: ${record.category} (${simpleDesc})`,
+        description: `إيراد (${currentBranch.name}): ${record.category} (${simpleDesc})`,
         sourceType: 'revenue',
-        sourceId: recId
+        sourceId: recId,
+        branchId: targetBranchId,
+        branchName: currentBranch.name
       });
       // Journal: Debit Cash/Bank, Credit Other Revenues (4201)
       const revAcc = updated.accounts.find(a => a.id === 'acc_other_rev')!;

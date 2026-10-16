@@ -37,8 +37,14 @@ import {
   formatMoney,
   generateId,
   getTodayDate,
-  logAudit
+  logAudit,
+  getProductForBranch,
+  updateProductBranchData
 } from '../services/accountingStorage';
+import {
+  Building2,
+  Info
+} from 'lucide-react';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
   UniversalPrintModal,
@@ -52,14 +58,24 @@ interface InventoryViewProps {
   db: AccountingDB;
   onUpdateDb: (updated: AccountingDB) => void;
   onOpenProductModal: (p?: Product) => void;
+  activeBranchId?: string;
 }
 
 export const InventoryView: React.FC<InventoryViewProps> = ({
   subPage,
   db,
   onUpdateDb,
-  onOpenProductModal
+  onOpenProductModal,
+  activeBranchId
 }) => {
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const [selectedBranchId, setSelectedBranchId] = useState<string>(activeBranchId || branches[0]?.id || 'br_main');
+  const currentBranch = branches.find(b => b.id === selectedBranchId) || branches[0];
+
+  React.useEffect(() => {
+    if (activeBranchId) setSelectedBranchId(activeBranchId);
+  }, [activeBranchId]);
+
   const [searchTerm, setSearchTerm] = useState('');
 
   // Modals
@@ -100,14 +116,18 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('طباعة المخزون');
 
-  // Statistics
-  const inStockCount = db.products.filter(p => p.currentQty > 0).length;
-  const zeroStockCount = db.products.filter(p => p.currentQty === 0).length;
-  const lowStockCount = db.products.filter(p => p.currentQty <= p.minStock && p.currentQty > 0).length;
-  const totalStockValue = db.products.reduce((acc, p) => acc + (p.currentQty * (p.avgCost || p.buyPrice)), 0);
+  // Resolve products for this specific branch
+  // "والاصناف تكون ايضاف موجوده في كل الفروع لكن بدون اعداد و اسعار ويتم ادخالهم حسب الفرع ولا يؤثرو علي اي فروع اخره، يبقي كل فرع لحاله"
+  const branchProducts = db.products.map(p => getProductForBranch(p, selectedBranchId));
+
+  // Statistics for this branch
+  const inStockCount = branchProducts.filter(p => p.currentQty > 0).length;
+  const zeroStockCount = branchProducts.filter(p => p.currentQty === 0).length;
+  const lowStockCount = branchProducts.filter(p => p.currentQty <= p.minStock && p.currentQty > 0).length;
+  const totalStockValue = branchProducts.reduce((acc, p) => acc + (p.currentQty * (p.avgCost || p.buyPrice)), 0);
 
   // Filtered and sorted products
-  const filteredProducts = db.products.filter(p => {
+  const filteredProducts = branchProducts.filter(p => {
     const s = searchTerm.trim().toLowerCase();
     const matchSearch = !s ||
       p.name.toLowerCase().includes(s) ||
@@ -242,12 +262,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     const prod = updated.products.find(p => p.id === adjustProductId);
     if (!prod) return;
 
-    const systemQty = prod.currentQty;
+    const bp = getProductForBranch(prod, selectedBranchId);
+    const systemQty = bp.currentQty;
     const diff = actualQty - systemQty;
-    if (diff === 0) return alert('الرصيد الفعلي مطابق للرصيد الدفتري، لا يوجد فرق تسوية');
+    if (diff === 0) return alert(`الرصيد الفعلي مطابق للرصيد الدفتري بفرع (${currentBranch.name})، لا يوجد فرق تسوية`);
 
     const adjId = generateId('adj');
-    const unitCost = prod.avgCost || prod.buyPrice;
+    const unitCost = bp.avgCost || bp.buyPrice;
     const diffValue = Math.abs(diff) * unitCost;
 
     const adjustmentRecord: StockAdjustment = {
@@ -259,11 +280,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       actualQty,
       diffQty: diff,
       unitCost,
-      reason: adjustReason
+      reason: adjustReason,
+      branchId: selectedBranchId,
+      branchName: currentBranch.name
     };
 
-    // Update physical product qty
-    prod.currentQty = actualQty;
+    // Update physical product qty specifically for this branch
+    const updatedProd = updateProductBranchData(prod, selectedBranchId, { currentQty: actualQty });
+    const pIdx = updated.products.findIndex(p => p.id === prod.id);
+    if (pIdx > -1) updated.products[pIdx] = updatedProd;
+
     updated.adjustments.unshift(adjustmentRecord);
 
     // Stock Movement
@@ -275,11 +301,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       warehouseId: updated.warehouses[0]?.id || 'wh_main',
       warehouseName: 'المخزن الرئيسي',
       qtyChange: diff,
-      balanceAfter: prod.currentQty,
+      balanceAfter: actualQty,
       unitCost,
       type: 'adjustment',
       refNumber: `ADJ-${adjId.slice(-4)}`,
-      sourceId: adjId
+      sourceId: adjId,
+      branchId: selectedBranchId,
+      branchName: currentBranch.name
     });
 
     // Accounting Journal Entry:
@@ -695,6 +723,33 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 <Plus className="w-4 h-4" />
                 <span>إضافة صنف يدوي</span>
               </button>
+            </div>
+          </div>
+
+          {/* Branch Isolation Selector Bar */}
+          <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-black text-blue-950 flex items-center gap-1.5">
+                <Building2 className="w-4 h-4 text-blue-600" />
+                <span>مخزون وتسعير الفرع:</span>
+              </span>
+              <select
+                value={selectedBranchId}
+                onChange={e => setSelectedBranchId(e.target.value)}
+                className="bg-white border border-blue-300 text-blue-900 font-bold text-xs rounded-lg px-3 py-1.5 outline-none shadow-2xs cursor-pointer"
+              >
+                {branches.map(b => (
+                  <option key={b.id} value={b.id}>
+                    {b.name} {b.isMain ? '(الرئيسي)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="text-[11px] text-blue-800 font-medium flex items-center gap-1.5">
+              <Info className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+              <span>
+                الأصناف موحدة في كل الفروع، لكن <strong>الأعداد والأسعار خاصة بفرع "{currentBranch.name}" حصرياً</strong> ولا تؤثر على أي فرع آخر.
+              </span>
             </div>
           </div>
 

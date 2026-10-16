@@ -478,15 +478,15 @@ export const LoginView: React.FC<LoginViewProps> = ({
         )}
 
         {/* Logo & Branding Header */}
-        <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-700 via-blue-600 to-amber-500 text-white text-3xl shadow-xl shadow-amber-500/15 mb-3 border border-amber-400/20">
-            <Calculator className="w-8 h-8 text-white drop-shadow-sm" />
+        <div className="text-center mb-5">
+          <div className="inline-block p-1.5 bg-white rounded-3xl shadow-2xl shadow-blue-500/20 border border-white/20 mb-2.5">
+            <img
+              src="/logo.png"
+              alt="شعار حساباتي"
+              className="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl object-contain drop-shadow-sm"
+            />
           </div>
-          <h1 className="text-3xl font-extrabold tracking-tight text-white flex items-center justify-center gap-2">
-            <span>حساباتي</span>
-            <span className="text-amber-400 text-lg font-bold bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-400/20">ERP</span>
-          </h1>
-          <p className="text-slate-400 text-xs sm:text-sm mt-1 font-medium">
+          <p className="text-slate-300 text-xs sm:text-sm font-bold">
             المنظومة المحاسبية الذكية للمنشآت والشركات
           </p>
 

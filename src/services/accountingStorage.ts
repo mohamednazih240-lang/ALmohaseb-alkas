@@ -572,11 +572,12 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string): 
 }
 
 /**
- * Calculate total treasury balance for a specific payment method or all methods
+ * Calculate total treasury balance for a specific payment method or all methods, optionally filtered by branch
  */
-export function calculateTreasuryBalance(db: AccountingDB, method?: PaymentMethod): number {
+export function calculateTreasuryBalance(db: AccountingDB, method?: PaymentMethod, branchId?: string): number {
   return db.treasury
     .filter(entry => !method || entry.method === method)
+    .filter(entry => !branchId || (entry.branchId === branchId || (!entry.branchId && branchId === 'br_main')))
     .reduce((sum, entry) => {
       const amt = Number(entry.amount) || 0;
       return sum + (entry.direction === 'in' ? amt : -amt);
@@ -991,5 +992,173 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
     sourceId: voucher.id,
     lines,
     createdAt: new Date().toISOString()
+  };
+}
+
+/**
+ * Retrieves the product data specialized for a specific branch.
+ * Requirement:
+ * "الاصناف تكون ايضا موجودة في كل الفروع لكن بدون اعداد واسعار ويتم ادخالهم حسب الفرع ولا يؤثرو علي اي فروع اخره، يبقي كل فرع لحاله"
+ */
+export function getProductForBranch(product: Product, branchId?: string): Product & { branchQty: number } {
+  if (!product) return product;
+  const targetBranch = branchId || 'br_main';
+
+  // Check if branch-specific data is already defined
+  if (product.branchesData && product.branchesData[targetBranch]) {
+    const bData = product.branchesData[targetBranch];
+    return {
+      ...product,
+      currentQty: bData.currentQty ?? 0,
+      buyPrice: bData.buyPrice ?? 0,
+      sellPrice: bData.sellPrice ?? 0,
+      wholesalePrice: bData.wholesalePrice ?? 0,
+      minStock: bData.minStock ?? 5,
+      avgCost: bData.avgCost ?? (bData.buyPrice || 0),
+      branchQty: bData.currentQty ?? 0,
+    };
+  }
+
+  // If this is the main branch and product hasn't migrated to branchesData yet:
+  if (targetBranch === 'br_main' && (!product.branchesData || Object.keys(product.branchesData).length === 0)) {
+    return {
+      ...product,
+      branchQty: product.currentQty ?? 0,
+    };
+  }
+
+  // For any other branch without entered data:
+  // "لكن بدون اعداد و اسعار ويتم ادخالهم حسب الفرع ولا يؤثرو علي اي فروع اخره"
+  return {
+    ...product,
+    currentQty: 0,
+    buyPrice: 0,
+    sellPrice: 0,
+    wholesalePrice: 0,
+    minStock: 5,
+    avgCost: 0,
+    branchQty: 0,
+  };
+}
+
+/**
+ * Updates a product's price and stock for a specific branch without affecting any other branch.
+ */
+export function updateProductBranchData(
+  product: Product,
+  branchId: string,
+  updates: Partial<BranchProductData>
+): Product {
+  const targetBranch = branchId || 'br_main';
+  const existingBranchesData = { ...(product.branchesData || {}) };
+
+  // Current branch numbers (or initial 0 for other branches)
+  const currentBranchData: BranchProductData = existingBranchesData[targetBranch] || {
+    currentQty: targetBranch === 'br_main' ? (product.currentQty || 0) : 0,
+    buyPrice: targetBranch === 'br_main' ? (product.buyPrice || 0) : 0,
+    sellPrice: targetBranch === 'br_main' ? (product.sellPrice || 0) : 0,
+    wholesalePrice: targetBranch === 'br_main' ? (product.wholesalePrice || 0) : 0,
+    minStock: targetBranch === 'br_main' ? (product.minStock || 5) : 5,
+    avgCost: targetBranch === 'br_main' ? (product.avgCost || product.buyPrice || 0) : 0,
+  };
+
+  const updatedBranchData: BranchProductData = {
+    ...currentBranchData,
+    ...updates,
+  };
+
+  existingBranchesData[targetBranch] = updatedBranchData;
+
+  const updatedProduct: Product = {
+    ...product,
+    branchesData: existingBranchesData,
+  };
+
+  // If updating the main branch, keep top-level fields mirrored for backwards compatibility
+  if (targetBranch === 'br_main') {
+    if (updatedBranchData.currentQty !== undefined) updatedProduct.currentQty = updatedBranchData.currentQty;
+    if (updatedBranchData.buyPrice !== undefined) updatedProduct.buyPrice = updatedBranchData.buyPrice;
+    if (updatedBranchData.sellPrice !== undefined) updatedProduct.sellPrice = updatedBranchData.sellPrice;
+    if (updatedBranchData.wholesalePrice !== undefined) updatedProduct.wholesalePrice = updatedBranchData.wholesalePrice;
+    if (updatedBranchData.minStock !== undefined) updatedProduct.minStock = updatedBranchData.minStock;
+    if (updatedBranchData.avgCost !== undefined) updatedProduct.avgCost = updatedBranchData.avgCost;
+  }
+
+  return updatedProduct;
+}
+
+/**
+ * Compute independent financial and inventory statistics for a specific branch.
+ */
+export function getBranchFinancialSummary(db: AccountingDB, branchId: string) {
+  const targetBranch = branchId || 'br_main';
+
+  // 1. Sales for this branch
+  const branchSales = db.invoices.filter(inv => inv.type === 'sale' && (inv.branchId === targetBranch || (!inv.branchId && targetBranch === 'br_main')));
+  const totalSales = branchSales.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
+  const paidSales = branchSales.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
+  const unpaidSales = branchSales.reduce((sum, inv) => sum + (Number(inv.remaining) || 0), 0);
+
+  // 2. Purchases for this branch
+  const branchPurchases = db.invoices.filter(inv => inv.type === 'purchase' && (inv.branchId === targetBranch || (!inv.branchId && targetBranch === 'br_main')));
+  const totalPurchases = branchPurchases.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
+  const paidPurchases = branchPurchases.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
+
+  // 3. Vouchers for this branch
+  const branchVouchers = db.vouchers.filter(v => v.branchId === targetBranch || (!v.branchId && targetBranch === 'br_main'));
+  const receiptsTotal = branchVouchers.filter(v => v.type === 'receipt').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
+  const paymentsTotal = branchVouchers.filter(v => v.type === 'payment').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
+
+  // 4. Expenses & Revenues for this branch
+  const branchExpenses = db.expenses.filter(e => e.branchId === targetBranch || (!e.branchId && targetBranch === 'br_main'));
+  const totalExpenses = branchExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
+  const branchRevenues = db.revenues.filter(r => r.branchId === targetBranch || (!r.branchId && targetBranch === 'br_main'));
+  const totalRevenues = branchRevenues.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+  // 5. Cash balance in this branch:
+  // (Paid cash sales + receipts + revenues) - (Paid cash purchases + payments + expenses)
+  const cashSalesPaid = branchSales.filter(inv => inv.paymentMethod === 'نقدي').reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
+  const cashPurchasesPaid = branchPurchases.filter(inv => inv.paymentMethod === 'نقدي').reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
+  const cashReceipts = branchVouchers.filter(v => v.type === 'receipt' && v.paymentMethod === 'نقدي').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
+  const cashPayments = branchVouchers.filter(v => v.type === 'payment' && v.paymentMethod === 'نقدي').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
+  const cashExpenses = branchExpenses.filter(e => e.method === 'نقدي').reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const cashRevenues = branchRevenues.filter(r => r.method === 'نقدي').reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+  const cashBalance = (cashSalesPaid + cashReceipts + cashRevenues) - (cashPurchasesPaid + cashPayments + cashExpenses);
+
+  // 6. Branch Inventory
+  let inStockCount = 0;
+  let zeroStockCount = 0;
+  let lowStockCount = 0;
+  let totalStockValue = 0;
+
+  db.products.forEach(p => {
+    const bp = getProductForBranch(p, targetBranch);
+    if (bp.currentQty > 0) {
+      inStockCount++;
+      if (bp.currentQty <= bp.minStock) lowStockCount++;
+      totalStockValue += bp.currentQty * (bp.avgCost || bp.buyPrice || 0);
+    } else {
+      zeroStockCount++;
+    }
+  });
+
+  return {
+    totalSales,
+    paidSales,
+    unpaidSales,
+    totalPurchases,
+    paidPurchases,
+    receiptsTotal,
+    paymentsTotal,
+    totalExpenses,
+    totalRevenues,
+    cashBalance,
+    inStockCount,
+    zeroStockCount,
+    lowStockCount,
+    totalStockValue,
+    invoicesCount: branchSales.length + branchPurchases.length,
   };
 }

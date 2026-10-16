@@ -105,7 +105,7 @@ export const Header: React.FC<HeaderProps> = ({
             title="انقر لتبديل المستخدم أو تسجيل الدخول"
           >
             <img
-              src="/icon.svg"
+              src="/logo.png"
               alt="شعار حساباتي"
               className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl object-contain shadow-2xs border border-slate-200 bg-white p-0.5 shrink-0"
             />

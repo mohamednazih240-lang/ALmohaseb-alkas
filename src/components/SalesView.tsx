@@ -44,14 +44,21 @@ interface SalesViewProps {
   onUpdateDb: (updated: AccountingDB) => void;
   onPreviewInvoice: (invoice: Invoice) => void;
   onOpenPartyModal: (type: 'customer' | 'supplier') => void;
+  activeBranchId?: string;
 }
 
 export const SalesView: React.FC<SalesViewProps> = ({
   db,
   onUpdateDb,
   onPreviewInvoice,
-  onOpenPartyModal
+  onOpenPartyModal,
+  activeBranchId
 }) => {
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
+  const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
+  const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
+
   const [activeTab, setActiveTab] = useState<'editor' | 'list'>('list');
   const [salesMode, setSalesMode] = useState<'sale' | 'wholesale'>('sale');
   const [searchTerm, setSearchTerm] = useState('');
@@ -84,13 +91,16 @@ export const SalesView: React.FC<SalesViewProps> = ({
     'sales_editor'
   );
 
-  // Filter sales invoices
+  // Filter sales invoices for active branch
   const todayStr = new Date().toISOString().slice(0, 10);
   const currentMonthStr = todayStr.slice(0, 7);
 
   const salesInvoices = db.invoices
     .filter(inv => inv.type === 'sale')
     .filter(inv => {
+      const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
+      if (!matchBranch) return false;
+
       const s = searchTerm.trim().toLowerCase();
       const matchSearch = !s ||
         inv.number.toLowerCase().includes(s) ||
@@ -114,15 +124,13 @@ export const SalesView: React.FC<SalesViewProps> = ({
       return 0;
     });
 
-  // Statistics
-  const totalSales = db.invoices
+  // Statistics for this branch
+  const branchSales = db.invoices
     .filter(i => i.type === 'sale')
-    .reduce((s, i) => s + i.total, 0);
+    .filter(i => branchFilter === 'all' || (i.branchId === targetBranchId || (!i.branchId && targetBranchId === 'br_main')));
 
-  const totalCollected = db.invoices
-    .filter(i => i.type === 'sale')
-    .reduce((s, i) => s + i.paid, 0);
-
+  const totalSales = branchSales.reduce((s, i) => s + i.total, 0);
+  const totalCollected = branchSales.reduce((s, i) => s + i.paid, 0);
   const totalPending = totalSales - totalCollected;
 
   // Print all filtered sales invoices in approved design
@@ -244,6 +252,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
           onUpdateDb={onUpdateDb}
           onPreviewInvoice={onPreviewInvoice}
           editingInvoice={editingInvoice}
+          activeBranchId={targetBranchId}
           onClose={() => {
             setEditingInvoice(null);
             setActiveTab('list');
@@ -327,6 +336,40 @@ export const SalesView: React.FC<SalesViewProps> = ({
               </button>
             </>
           )}
+        </div>
+      </div>
+
+      {/* Branch Isolation Filter Bar */}
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-slate-700">عرض فواتير المبيعات:</span>
+          <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 shadow-2xs">
+            <button
+              type="button"
+              onClick={() => setBranchFilter('current')}
+              className={`px-3 py-1 rounded-md font-bold text-xs transition-all ${
+                branchFilter === 'current'
+                  ? 'bg-emerald-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              فرع: {currentBranch.name} (المستقل)
+            </button>
+            <button
+              type="button"
+              onClick={() => setBranchFilter('all')}
+              className={`px-3 py-1 rounded-md font-bold text-xs transition-all ${
+                branchFilter === 'all'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              كافة الفروع ({branches.length})
+            </button>
+          </div>
+        </div>
+        <div className="text-[11px] text-slate-500 font-medium">
+          {branchFilter === 'current' ? `كل حركة وأموال ومخزون لفرع "${currentBranch.name}" معزولة بذاتها` : 'عرض مجمع لجميع فروع المنشأة'}
         </div>
       </div>
 

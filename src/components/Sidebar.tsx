@@ -273,7 +273,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="p-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
           <div className="flex items-center gap-2.5">
             <img
-              src="/icon.svg"
+              src="/logo.png"
               alt="شعار حساباتي"
               className="w-8 h-8 rounded-lg object-contain shadow-2xs border border-slate-200 bg-white p-0.5"
             />

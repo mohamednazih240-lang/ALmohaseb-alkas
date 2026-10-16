@@ -37,6 +37,15 @@ export interface JournalEntry {
   createdAt: string;
 }
 
+export interface BranchProductData {
+  currentQty: number; // رصيد الصنف في هذا الفرع
+  buyPrice: number;   // سعر الشراء في هذا الفرع
+  sellPrice: number;  // سعر البيع النقدي في هذا الفرع
+  wholesalePrice: number; // سعر الجملة في هذا الفرع
+  minStock?: number;  // حد الطلب الأدنى في هذا الفرع
+  avgCost?: number;   // متوسط التكلفة في هذا الفرع
+}
+
 export interface Product {
   id: string;
   code: string;
@@ -51,7 +60,10 @@ export interface Product {
   currentQty: number;
   avgCost: number;
   notes?: string;
-  priceHistory?: { date: string; price: number; qty: number; invoiceId?: string }[];
+  priceHistory?: { date: string; price: number; qty: number; invoiceId?: string; branchId?: string }[];
+  // بيانات المخزون والتسعير المستقلة لكل فرع
+  // الأصناف موحدة في كل الفروع لكن الكميات والأسعار تدخل حسب الفرع ولا تؤثر على أي فرع آخر
+  branchesData?: Record<string, BranchProductData>;
 }
 
 export interface Warehouse {
@@ -74,6 +86,8 @@ export interface StockMovement {
   type: 'purchase' | 'sale' | 'sale_return' | 'purchase_return' | 'transfer_in' | 'transfer_out' | 'adjustment' | 'opening';
   refNumber: string;
   sourceId?: string;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface Party {
@@ -201,6 +215,8 @@ export interface Quote {
   total: number;
   status: 'جديد' | 'مقبول' | 'مرفوض' | 'تم التحويل';
   notes?: string;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface Order {
@@ -214,6 +230,8 @@ export interface Order {
   total: number;
   status: 'جديد' | 'قيد التنفيذ' | 'مكتمل' | 'ملغي';
   notes?: string;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface Voucher {
@@ -231,6 +249,8 @@ export interface Voucher {
   costCenterName?: string;
   currencyCode?: string;
   exchangeRate?: number;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface TreasuryEntry {
@@ -244,6 +264,8 @@ export interface TreasuryEntry {
   sourceId?: string;
   costCenterId?: string;
   costCenterName?: string;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface SimpleRecord {
@@ -258,6 +280,8 @@ export interface SimpleRecord {
   costCenterName?: string;
   currencyCode?: string;
   exchangeRate?: number;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface StockAdjustment {
@@ -270,6 +294,8 @@ export interface StockAdjustment {
   diffQty: number;
   unitCost: number;
   reason: string;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface StockTransfer {
@@ -281,6 +307,10 @@ export interface StockTransfer {
   toWarehouseId: string;
   qty: number;
   notes?: string;
+  fromBranchId?: string;
+  fromBranchName?: string;
+  toBranchId?: string;
+  toBranchName?: string;
 }
 
 export interface FiscalPeriod {
@@ -317,6 +347,8 @@ export interface DailyClosing {
   status: 'مفتوح' | 'مغلق';
   notes?: string;
   createdAt: string;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface CostCenter {
