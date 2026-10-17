@@ -19,7 +19,7 @@ import {
   ReturnInvoice,
   Invoice
 } from '../types/accounting';
-import { formatMoney, logAudit } from '../services/accountingStorage';
+import { formatMoney, logAudit, getProductForBranch, updateProductBranchData } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
@@ -33,13 +33,20 @@ interface ReturnsViewProps {
   db: AccountingDB;
   onUpdateDb: (updated: AccountingDB) => void;
   onPreviewInvoice?: (invoice: Invoice) => void;
+  activeBranchId?: string;
 }
 
 export const ReturnsView: React.FC<ReturnsViewProps> = ({
   db,
   onUpdateDb,
-  onPreviewInvoice
+  onPreviewInvoice,
+  activeBranchId
 }) => {
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
+  const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
+  const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
+
   const [activeTab, setActiveTab] = useState<'editor' | 'list'>('list');
   const [returnSubMode, setReturnSubMode] = useState<'sale_return' | 'purchase_return'>('sale_return');
   const [searchTerm, setSearchTerm] = useState('');
@@ -53,6 +60,11 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   // Mobile back button: exit returns editor to list
   useModalBackHandler(activeTab === 'editor', () => setActiveTab('list'), 'returns_editor');
 
+  const isTargetBranch = (bId?: string) => {
+    if (branchFilter === 'all') return true;
+    return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
+  };
+
   // Filter returns
   const filteredReturns = (db.returns || []).filter(r => {
     const s = searchTerm.trim().toLowerCase();
@@ -61,7 +73,8 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
       r.partyName.toLowerCase().includes(s) ||
       r.productName.toLowerCase().includes(s);
     const matchType = typeFilter === 'all' || r.type === typeFilter;
-    return matchSearch && matchType;
+    const matchBranch = isTargetBranch(r.branchId);
+    return matchSearch && matchType && matchBranch;
   });
 
   // Single return print handler
@@ -192,7 +205,12 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     const prod = updated.products.find(p => p.id === ret.productId);
     if (prod) {
-      prod.currentQty += ret.type === 'sale' ? -ret.qty : ret.qty;
+      const bId = ret.branchId || 'br_main';
+      const bp = getProductForBranch(prod, bId);
+      const newQty = bp.currentQty + (ret.type === 'sale' ? -ret.qty : ret.qty);
+      const prodUpdated = updateProductBranchData(prod, bId, { currentQty: newQty });
+      const pIdx = updated.products.findIndex(p => p.id === ret.productId);
+      if (pIdx > -1) updated.products[pIdx] = prodUpdated;
     }
 
     updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== ret.id);
@@ -211,6 +229,7 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
         <UnifiedInvoicePage
           mode={returnSubMode}
           db={db}
+          activeBranchId={targetBranchId}
           onUpdateDb={onUpdateDb}
           onPreviewInvoice={inv => onPreviewInvoice && onPreviewInvoice(inv)}
           onClose={() => setActiveTab('list')}

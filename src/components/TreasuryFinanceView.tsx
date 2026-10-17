@@ -107,6 +107,49 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   const [creditAccId, setCreditAccId] = useState(db.accounts[1]?.id || '');
   const [journalAmount, setJournalAmount] = useState<number>(0);
 
+  // Branch-isolated visible data
+  const visibleTreasury = db.treasury.filter(t => branchFilter === 'all' || (t.branchId === targetBranchId || (!t.branchId && targetBranchId === 'br_main')));
+  const visibleExpenses = db.expenses.filter(e => branchFilter === 'all' || (e.branchId === targetBranchId || (!e.branchId && targetBranchId === 'br_main')));
+  const visibleRevenues = db.revenues.filter(r => branchFilter === 'all' || (r.branchId === targetBranchId || (!r.branchId && targetBranchId === 'br_main')));
+  const visibleSimpleList = subPage === 'expenses' ? visibleExpenses : visibleRevenues;
+
+  const renderBranchFilterBar = (title: string) => (
+    <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+      <div className="flex items-center gap-2">
+        <span className="font-bold text-slate-700">{title}:</span>
+        <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 shadow-2xs">
+          <button
+            type="button"
+            onClick={() => setBranchFilter('current')}
+            className={`px-3 py-1 rounded-md font-bold text-xs transition-all ${
+              branchFilter === 'current'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            فرع: {currentBranch.name} (المستقل)
+          </button>
+          <button
+            type="button"
+            onClick={() => setBranchFilter('all')}
+            className={`px-3 py-1 rounded-md font-bold text-xs transition-all ${
+              branchFilter === 'all'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            كافة الفروع ({branches.length})
+          </button>
+        </div>
+      </div>
+      <div className="text-[11px] text-slate-500 font-medium">
+        {branchFilter === 'current'
+          ? `الحركات والسيولة خاصة بفرع "${currentBranch.name}" ومعزولة عن باقي الفروع`
+          : 'عرض مجمع لكافة فروع المنشأة'}
+      </div>
+    </div>
+  );
+
   // Save manual treasury in/out
   const handleSaveMove = (e: React.FormEvent) => {
     e.preventDefault();
@@ -688,10 +731,13 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
             </div>
           </div>
 
+          {/* Branch Isolation Filter Bar */}
+          {renderBranchFilterBar('حركات وخزينة الفرع')}
+
           {/* Cards for each method */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             {PAYMENT_METHODS.filter(m => m !== 'آجل').map(m => {
-              const bal = calculateTreasuryBalance(db, m);
+              const bal = calculateTreasuryBalance(db, m, branchFilter === 'current' ? targetBranchId : undefined);
               return (
                 <div key={m} className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
                   <span className="text-xs font-bold text-slate-600 block mb-1">{m}</span>
@@ -706,16 +752,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           {/* Treasury Log (Responsive Card System) */}
           <div className="space-y-3">
             <h3 className="text-xs font-bold text-slate-800">
-              سجل حركات الخزينة والنقدية التفصيلي
+              سجل حركات الخزينة والنقدية التفصيلي ({visibleTreasury.length} حركة)
             </h3>
 
-            {db.treasury.length === 0 ? (
+            {visibleTreasury.length === 0 ? (
               <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs text-slate-400 text-xs">
-                لا توجد حركات نقدية مسجلة حتى الآن
+                لا توجد حركات نقدية مسجلة لهذا الفرع حتى الآن
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
-                {db.treasury.map(tr => {
+                {visibleTreasury.map(tr => {
                   const isIncoming = tr.direction === 'in';
                   return (
                     <div
@@ -830,13 +876,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
             </div>
           </div>
 
-          {(subPage === 'expenses' ? db.expenses : db.revenues).length === 0 ? (
+          {/* Branch Isolation Filter Bar */}
+          {renderBranchFilterBar(subPage === 'expenses' ? 'مصروفات الفرع' : 'إيرادات الفرع')}
+
+          {visibleSimpleList.length === 0 ? (
             <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs text-slate-400 text-xs">
-              {subPage === 'expenses' ? 'لا توجد مصروفات مسجلة حالياً' : 'لا توجد إيرادات مسجلة حالياً'}
+              {subPage === 'expenses' ? 'لا توجد مصروفات مسجلة لهذا الفرع حالياً' : 'لا توجد إيرادات مسجلة لهذا الفرع حالياً'}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
-              {(subPage === 'expenses' ? db.expenses : db.revenues).map(item => (
+              {visibleSimpleList.map(item => (
                 <div
                   key={item.id}
                   className="bg-white p-3.5 rounded-xl border border-slate-200 hover:border-slate-300 shadow-2xs space-y-2"

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   BarChart3,
   TrendingUp,
@@ -10,6 +10,7 @@ import {
   Package,
   Users,
   Building,
+  Building2,
   CheckCircle2,
   Loader2
 } from 'lucide-react';
@@ -21,7 +22,8 @@ import {
   calculateFinancialSummary,
   calculateCustomerBalance,
   calculateSupplierBalance,
-  calculateTreasuryBalance
+  calculateTreasuryBalance,
+  getProductForBranch
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -32,9 +34,19 @@ import { exportTableToCsv } from '../services/exportService';
 
 interface ReportsViewProps {
   db: AccountingDB;
+  activeBranchId?: string;
 }
 
-export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
+export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId }) => {
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const [selectedBranchId, setSelectedBranchId] = useState<string>(activeBranchId || 'all');
+
+  useEffect(() => {
+    if (activeBranchId) {
+      setSelectedBranchId(activeBranchId);
+    }
+  }, [activeBranchId]);
+
   const [activeReportTab, setActiveReportTab] = useState<
     'income' | 'sales' | 'purchases' | 'inventory' | 'receivables' | 'payables'
   >('income');
@@ -44,7 +56,23 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('تقرير مالي');
 
-  const summary = calculateFinancialSummary(db);
+  const currentBranch = branches.find(b => b.id === selectedBranchId);
+  const branchLabel = selectedBranchId === 'all' ? 'كافة الفروع (مجمّع)' : (currentBranch ? currentBranch.name : 'الفرع المحدد');
+
+  const isTargetBranch = (bId?: string) => {
+    if (selectedBranchId === 'all') return true;
+    return bId === selectedBranchId || (!bId && selectedBranchId === 'br_main');
+  };
+
+  const branchParam = selectedBranchId === 'all' ? undefined : selectedBranchId;
+  const summary = calculateFinancialSummary(db, branchParam);
+
+  // Filtered sales and purchases
+  const filteredSales = db.invoices.filter(i => i.type === 'sale' && isTargetBranch(i.branchId));
+  const filteredPurchases = db.invoices.filter(i => i.type === 'purchase' && isTargetBranch(i.branchId));
+
+  // Resolved branch products
+  const branchProducts = db.products.map(p => selectedBranchId === 'all' ? p : getProductForBranch(p, selectedBranchId));
 
   // Generate structured report blocks for UniversalPrintModal
   const generateReportBlocks = (): { title: string; docs: MovementPrintBlock[] } => {
@@ -53,11 +81,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
 
     if (activeReportTab === 'income') {
       const doc: MovementPrintBlock = {
-        title: 'قائمة الدخل الشاملة (الأرباح والخسائر)',
+        title: `قائمة الدخل الشاملة - ${branchLabel}`,
         serialNo: `#INC-${today}`,
         date: today,
-        partyLabel: 'المنشأة:',
-        partyName: db.settings.company,
+        partyLabel: 'المنشأة والفرع:',
+        partyName: `${db.settings.company} - ${branchLabel}`,
         badge: summary.netProfit >= 0 ? 'صافي ربح' : 'صافي خسارة',
         tableHeaders: [
           { label: 'البند المالي', width: '60%', align: 'right' },
@@ -76,22 +104,21 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
           { label: 'إجمالي المصروفات', value: formatMoney(summary.totalExpenses, curr) },
           { label: 'صافي الربح / الخسارة', value: formatMoney(summary.netProfit, curr), isTotal: true, highlight: true }
         ],
-        footerNotes: 'تم استخراج قائمة الدخل تلقائياً من واقع قيود اليومية وحركات البيع والشراء والمصروفات'
+        footerNotes: `تم استخراج قائمة الدخل الخاصة بـ (${branchLabel}) من واقع القيود والمبيعات والمصروفات المستقلة.`
       };
-      return { title: 'قائمة الدخل والأرباح', docs: [doc] };
+      return { title: `قائمة الدخل - ${branchLabel}`, docs: [doc] };
     }
 
     if (activeReportTab === 'sales') {
-      const sales = db.invoices.filter(i => i.type === 'sale');
-      const totalPaid = sales.reduce((s, i) => s + i.paid, 0);
-      const totalRem = sales.reduce((s, i) => s + i.remaining, 0);
+      const totalPaid = filteredSales.reduce((s, i) => s + i.paid, 0);
+      const totalRem = filteredSales.reduce((s, i) => s + i.remaining, 0);
 
       const doc: MovementPrintBlock = {
-        title: 'تقرير المبيعات والتحصيلات الشامل',
+        title: `تقرير المبيعات والتحصيلات - ${branchLabel}`,
         serialNo: `#SAL-${today}`,
         date: today,
         partyLabel: 'إجمالي الفواتير:',
-        partyName: `${sales.length} فاتورة مسجلة`,
+        partyName: `${filteredSales.length} فاتورة مسجلة (${branchLabel})`,
         badge: 'مبيعات',
         tableHeaders: [
           { label: 'رقم الفاتورة', width: '18%', align: 'center' },
@@ -101,7 +128,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
           { label: 'المحصل', width: '14%', align: 'center' },
           { label: 'المتبقي', width: '14%', align: 'center' }
         ],
-        tableRows: sales.map(s => ({
+        tableRows: filteredSales.map(s => ({
           cols: [
             s.number,
             s.date,
@@ -117,22 +144,21 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
           { label: 'إجمالي المحصل نقداً', value: formatMoney(totalPaid, curr) },
           { label: 'إجمالي المتبقي آجل', value: formatMoney(totalRem, curr), isTotal: true, highlight: true }
         ],
-        footerNotes: 'تقرير شامل بكافة فواتير المبيعات الصادرة والتحصيلات والمستحقات الآجلة'
+        footerNotes: `تقرير مبيعات فرع (${branchLabel})`
       };
-      return { title: 'تقرير المبيعات والتحصيلات', docs: [doc] };
+      return { title: `تقرير مبيعات - ${branchLabel}`, docs: [doc] };
     }
 
     if (activeReportTab === 'purchases') {
-      const purchases = db.invoices.filter(i => i.type === 'purchase');
-      const totalPaid = purchases.reduce((s, i) => s + i.paid, 0);
-      const totalRem = purchases.reduce((s, i) => s + i.remaining, 0);
+      const totalPaid = filteredPurchases.reduce((s, i) => s + i.paid, 0);
+      const totalRem = filteredPurchases.reduce((s, i) => s + i.remaining, 0);
 
       const doc: MovementPrintBlock = {
-        title: 'تقرير المشتريات وتوريد البضائع',
+        title: `تقرير المشتريات والتوريدات - ${branchLabel}`,
         serialNo: `#PUR-${today}`,
         date: today,
         partyLabel: 'إجمالي الفواتير:',
-        partyName: `${purchases.length} فاتورة شراء`,
+        partyName: `${filteredPurchases.length} فاتورة شراء (${branchLabel})`,
         badge: 'مشتريات',
         tableHeaders: [
           { label: 'رقم الفاتورة', width: '18%', align: 'center' },
@@ -142,7 +168,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
           { label: 'المدفوع', width: '14%', align: 'center' },
           { label: 'المستحق', width: '14%', align: 'center' }
         ],
-        tableRows: purchases.map(p => ({
+        tableRows: filteredPurchases.map(p => ({
           cols: [
             p.number,
             p.date,
@@ -158,30 +184,30 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
           { label: 'إجمالي المدفوع للموردين', value: formatMoney(totalPaid, curr) },
           { label: 'إجمالي المستحق للموردين', value: formatMoney(totalRem, curr), isTotal: true, highlight: true }
         ],
-        footerNotes: 'تقرير شامل بكافة فواتير المشتريات وتوريدات البضاعة والمستحقات'
+        footerNotes: `تقرير مشتريات فرع (${branchLabel})`
       };
-      return { title: 'تقرير المشتريات والتوريدات', docs: [doc] };
+      return { title: `تقرير مشتريات - ${branchLabel}`, docs: [doc] };
     }
 
     if (activeReportTab === 'inventory') {
-      const totalSell = db.products.reduce((s, p) => s + (p.currentQty * p.sellPrice), 0);
+      const totalSell = branchProducts.reduce((s, p) => s + (p.currentQty * p.sellPrice), 0);
 
       const doc: MovementPrintBlock = {
-        title: 'تقرير جرد وتقييم المخزون',
+        title: `تقرير جرد وتقييم المخزون - ${branchLabel}`,
         serialNo: `#INV-VAL-${today}`,
         date: today,
         partyLabel: 'عدد الأصناف:',
-        partyName: `${db.products.length} صنف مسجل`,
+        partyName: `${branchProducts.length} صنف مسجل (${branchLabel})`,
         badge: 'تقييم مخزون',
         tableHeaders: [
           { label: 'الكود', width: '14%', align: 'center' },
           { label: 'اسم الصنف', width: '32%', align: 'right' },
-          { label: 'الرصيد', width: '14%', align: 'center' },
+          { label: 'الرصيد بالفرع', width: '14%', align: 'center' },
           { label: 'التكلفة', width: '14%', align: 'center' },
           { label: 'إجمالي التكلفة', width: '14%', align: 'center' },
           { label: 'قيمة البيع', width: '12%', align: 'center' }
         ],
-        tableRows: db.products.map(p => {
+        tableRows: branchProducts.map(p => {
           const cost = p.avgCost || p.buyPrice;
           return {
             cols: [
@@ -199,14 +225,14 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
           { label: 'إجمالي القيمة التقديرية بسعر البيع', value: formatMoney(totalSell, curr) },
           { label: 'الربح المتوقع للمخزون الحالي', value: formatMoney(totalSell - summary.totalStockValue, curr), isTotal: true, highlight: true }
         ],
-        footerNotes: 'تقرير تقييم أصول المخزون وفقاً لمتوسط التكلفة المرجح وأسعار البيع المعتمدة'
+        footerNotes: `تقييم مخزون خاص بـ (${branchLabel}) طبقاً للأرصدة والأسعار المسجلة بهذا الفرع.`
       };
-      return { title: 'تقرير تقييم المخزون', docs: [doc] };
+      return { title: `تقرير مخزون - ${branchLabel}`, docs: [doc] };
     }
 
     if (activeReportTab === 'receivables') {
       const doc: MovementPrintBlock = {
-        title: 'تقرير أعمار ديون العملاء (ذمم مدينة)',
+        title: `تقرير ديون العملاء (ذمم مدينة) - ${branchLabel}`,
         serialNo: `#REC-${today}`,
         date: today,
         partyLabel: 'عدد العملاء:',
@@ -220,7 +246,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
           { label: 'المديونية المستحقة', width: '15%', align: 'center' }
         ],
         tableRows: db.customers.map(c => {
-          const bal = calculateCustomerBalance(db, c.id);
+          const bal = calculateCustomerBalance(db, c.id, branchParam);
           return {
             cols: [
               c.code || '—',
@@ -236,14 +262,14 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
         summaryLines: [
           { label: 'إجمالي مديونيات العملاء المستحقة', value: formatMoney(summary.totalCustomerReceivables, curr), isTotal: true, highlight: true }
         ],
-        footerNotes: 'تقرير أرصدة ومطالبات العملاء المستحقة للتحصيل الفوري'
+        footerNotes: `تقرير أرصدة ومطالبات العملاء بـ (${branchLabel})`
       };
-      return { title: 'ديون العملاء (ذمم مدينة)', docs: [doc] };
+      return { title: `تقرير عملاء - ${branchLabel}`, docs: [doc] };
     }
 
-    // Payables
+    // Default payables
     const doc: MovementPrintBlock = {
-      title: 'تقرير مستحقات الموردين (ذمم دائنة)',
+      title: `تقرير مستحقات الموردين (ذمم دائنة) - ${branchLabel}`,
       serialNo: `#PAY-${today}`,
       date: today,
       partyLabel: 'عدد الموردين:',
@@ -253,10 +279,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
         { label: 'الكود', width: '15%', align: 'center' },
         { label: 'اسم المورد', width: '35%', align: 'right' },
         { label: 'الهاتف', width: '25%', align: 'center' },
-        { label: 'المستحق دفعه للمورد', width: '25%', align: 'center' }
+        { label: 'المستحق للمورد', width: '25%', align: 'center' }
       ],
       tableRows: db.suppliers.map(s => {
-        const bal = calculateSupplierBalance(db, s.id);
+        const bal = calculateSupplierBalance(db, s.id, branchParam);
         return {
           cols: [
             s.code || '—',
@@ -269,11 +295,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
         };
       }),
       summaryLines: [
-        { label: 'إجمالي مستحقات الموردين الواجبة السداد', value: formatMoney(summary.totalSupplierPayables, curr), isTotal: true, highlight: true }
+        { label: 'إجمالي مستحقات الموردين', value: formatMoney(summary.totalSupplierPayables, curr), isTotal: true, highlight: true }
       ],
-      footerNotes: 'تقرير التزامات المنشأة للموردين الواجبة السداد'
+      footerNotes: `تقرير التزامات الموردين بـ (${branchLabel})`
     };
-    return { title: 'مستحقات الموردين (ذمم دائنة)', docs: [doc] };
+    return { title: `تقرير موردين - ${branchLabel}`, docs: [doc] };
   };
 
   const handleOpenPrintModal = () => {
@@ -284,17 +310,17 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
   };
 
   const handleExportExcel = () => {
-    const { title, docs } = generateReportBlocks();
+    const { docs } = generateReportBlocks();
     if (docs.length === 0) return;
     const doc = docs[0];
-    const headers = doc.tableHeaders.map(th => th.label);
-    const rows = doc.tableRows.map(tr => tr.cols);
-    exportTableToCsv(`${activeReportTab}_report_${Date.now()}.csv`, headers, rows);
+    const headers = doc.tableHeaders.map(h => h.label);
+    const rows = doc.tableRows.map(r => r.cols);
+    exportTableToCsv(`تقرير_${activeReportTab}_${branchLabel}_${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
   };
 
   return (
-    <div className="space-y-6 pb-12">
-      {/* Header */}
+    <div className="space-y-4 pb-12">
+      {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
         <div>
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
@@ -302,7 +328,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
             <span>التقارير المالية والتحليل المحاسبي</span>
           </h1>
           <p className="text-xs text-slate-500 font-medium mt-0.5">
-            قوائم الدخل، الأرباح والخسائر، حركة المبيعات والمشتريات، وتقييم أصول المخزون
+            قوائم الدخل، الأرباح والخسائر، حركة المبيعات والمشتريات، وتقييم أصول المخزون المستقلة
           </p>
         </div>
 
@@ -326,6 +352,30 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
             <Printer className="w-4 h-4" />
             <span>معاينة وطباعة التقرير (A4 / A5 / حراري / PDF)</span>
           </button>
+        </div>
+      </div>
+
+      {/* Branch Isolation Filter Banner */}
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+        <div className="flex items-center gap-2">
+          <Building2 className="w-4 h-4 text-blue-600" />
+          <span className="text-xs font-bold text-slate-800">فرع إصدار التقرير:</span>
+          <select
+            value={selectedBranchId}
+            onChange={(e) => setSelectedBranchId(e.target.value)}
+            className="bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-900 shadow-2xs focus:ring-2 focus:ring-black cursor-pointer"
+          >
+            <option value="all">🌐 كافة الفروع مجتمعة (تقرير مركزي شامل)</option>
+            {branches.map(b => (
+              <option key={b.id} value={b.id}>
+                📍 {b.name} {b.isMain ? '(الرئيسي)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="text-[11px] text-slate-500 font-bold bg-white px-2.5 py-1 rounded-lg border border-slate-200">
+          التقرير يغطي: <span className="text-blue-700">{branchLabel}</span>
         </div>
       </div>
 
@@ -365,7 +415,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs max-w-3xl space-y-4">
           <div className="text-center border-b border-slate-200 pb-3">
             <h2 className="text-base font-black text-slate-900">{db.settings.company}</h2>
-            <div className="text-xs font-bold text-slate-600 mt-0.5">قائمة الدخل الشاملة (الأرباح والخسائر)</div>
+            <div className="text-xs font-bold text-slate-600 mt-0.5">
+              قائمة الدخل الشاملة (الأرباح والخسائر) - {branchLabel}
+            </div>
             <div className="text-[11px] text-slate-400 font-mono mt-0.5">
               الفترة حتى: {new Date().toLocaleDateString('ar-EG')}
             </div>
@@ -428,24 +480,24 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
         <div className="space-y-4">
           <div className="grid grid-cols-3 gap-3">
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
-              <span className="text-xs font-bold text-slate-600 block mb-1">إجمالي المبيعات</span>
+              <span className="text-xs font-bold text-slate-600 block mb-1">إجمالي المبيعات ({branchLabel})</span>
               <span className="text-lg font-black font-mono text-slate-950">{formatMoney(summary.totalSalesAll, db.settings.currency)}</span>
             </div>
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
               <span className="text-xs font-bold text-slate-600 block mb-1">المحصل نقدياً وإلكترونياً</span>
               <span className="text-lg font-black font-mono text-emerald-700">
-                {formatMoney(db.invoices.filter(i => i.type === 'sale').reduce((s, i) => s + i.paid, 0), db.settings.currency)}
+                {formatMoney(filteredSales.reduce((s, i) => s + i.paid, 0), db.settings.currency)}
               </span>
             </div>
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
               <span className="text-xs font-bold text-slate-600 block mb-1">المتبقي آجل</span>
-              <span className="text-lg font-black font-mono text-rose-700">{formatMoney(summary.totalCustomerReceivables, db.settings.currency)}</span>
+              <span className="text-lg font-black font-mono text-rose-700">{formatMoney(filteredSales.reduce((s, i) => s + i.remaining, 0), db.settings.currency)}</span>
             </div>
           </div>
 
           {/* Sales Report Responsive Cards System (No Horizontal Scroll) */}
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {db.invoices.filter(i => i.type === 'sale').map(inv => (
+            {filteredSales.map(inv => (
               <div key={inv.id} className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs hover:shadow-xs transition-all space-y-2">
                 <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                   <span className="font-mono font-bold text-xs text-slate-900">{inv.number}</span>
@@ -500,24 +552,24 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
         <div className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
-              <span className="text-xs font-bold text-slate-600 block mb-1">إجمالي المشتريات</span>
+              <span className="text-xs font-bold text-slate-600 block mb-1">إجمالي المشتريات ({branchLabel})</span>
               <span className="text-lg font-black font-mono text-slate-950">{formatMoney(summary.totalPurchasesAll, db.settings.currency)}</span>
             </div>
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
               <span className="text-xs font-bold text-slate-600 block mb-1">المسدد للموردين</span>
               <span className="text-lg font-black font-mono text-emerald-700">
-                {formatMoney(db.invoices.filter(i => i.type === 'purchase').reduce((s, i) => s + i.paid, 0), db.settings.currency)}
+                {formatMoney(filteredPurchases.reduce((s, i) => s + i.paid, 0), db.settings.currency)}
               </span>
             </div>
             <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
               <span className="text-xs font-bold text-slate-600 block mb-1">المتبقي دين للموردين</span>
-              <span className="text-lg font-black font-mono text-rose-700">{formatMoney(summary.totalSupplierPayables, db.settings.currency)}</span>
+              <span className="text-lg font-black font-mono text-rose-700">{formatMoney(filteredPurchases.reduce((s, i) => s + i.remaining, 0), db.settings.currency)}</span>
             </div>
           </div>
 
           {/* Purchases Report Responsive Cards System */}
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            {db.invoices.filter(i => i.type === 'purchase').map(inv => (
+            {filteredPurchases.map(inv => (
               <div key={inv.id} className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs hover:shadow-xs transition-all space-y-2">
                 <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                   <span className="font-mono font-bold text-xs text-slate-900">{inv.number}</span>
@@ -572,7 +624,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
         <div className="space-y-4">
           <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex items-center justify-between flex-wrap gap-3">
             <div>
-              <span className="text-xs font-bold text-slate-600">إجمالي قيمة المخزون بسعر التكلفة:</span>
+              <span className="text-xs font-bold text-slate-600">إجمالي قيمة المخزون بسعر التكلفة ({branchLabel}):</span>
               <div className="text-xl font-black font-mono text-slate-950 mt-1">
                 {formatMoney(summary.totalStockValue, db.settings.currency)}
               </div>
@@ -580,14 +632,14 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
             <div>
               <span className="text-xs font-bold text-slate-600">إجمالي القيمة التقديرية بسعر البيع:</span>
               <div className="text-xl font-black font-mono text-emerald-700 mt-1">
-                {formatMoney(db.products.reduce((s, p) => s + (p.currentQty * p.sellPrice), 0), db.settings.currency)}
+                {formatMoney(branchProducts.reduce((s, p) => s + (p.currentQty * p.sellPrice), 0), db.settings.currency)}
               </div>
             </div>
           </div>
 
           {/* Inventory Valuation Cards System */}
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
-            {db.products.map(p => {
+            {branchProducts.map(p => {
               const cost = p.avgCost || p.buyPrice;
               const totalCost = p.currentQty * cost;
               const totalSell = p.currentQty * p.sellPrice;
@@ -634,7 +686,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
       {activeReportTab === 'receivables' && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
           {db.customers.map(c => {
-            const bal = calculateCustomerBalance(db, c.id);
+            const bal = calculateCustomerBalance(db, c.id, branchParam);
             const isOverLimit = (c.creditLimit || 0) > 0 && bal > (c.creditLimit || 0);
 
             return (
@@ -672,7 +724,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db }) => {
       {activeReportTab === 'payables' && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
           {db.suppliers.map(s => {
-            const bal = calculateSupplierBalance(db, s.id);
+            const bal = calculateSupplierBalance(db, s.id, branchParam);
 
             return (
               <div key={s.id} className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs hover:shadow-xs transition-all space-y-2.5">

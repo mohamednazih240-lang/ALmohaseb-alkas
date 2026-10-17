@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   TrendingUp,
   DollarSign,
@@ -23,7 +23,8 @@ import {
 } from '../types/accounting';
 import {
   formatMoney,
-  getTodayDate
+  getTodayDate,
+  getProductForBranch
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -37,14 +38,23 @@ interface ProfitsViewProps {
   onUpdateDb: (updated: AccountingDB) => void;
   onPreviewInvoice?: (inv: Invoice) => void;
   onEditInvoice?: (inv: Invoice) => void;
+  activeBranchId?: string;
 }
 
 export const ProfitsView: React.FC<ProfitsViewProps> = ({
   db,
   onUpdateDb,
   onPreviewInvoice,
-  onEditInvoice
+  onEditInvoice,
+  activeBranchId
 }) => {
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const [selectedBranchId, setSelectedBranchId] = useState<string>(activeBranchId || 'all');
+
+  useEffect(() => {
+    if (activeBranchId) setSelectedBranchId(activeBranchId);
+  }, [activeBranchId]);
+
   const [profitTab, setProfitTab] = useState<'invoices' | 'items'>('invoices');
   const [searchQuery, setSearchQuery] = useState('');
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | 'week' | 'month' | 'custom'>('all');
@@ -57,6 +67,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   const [printDocTitle, setPrintDocTitle] = useState('تقرير الأرباح');
 
   const today = getTodayDate();
+
+  const isTargetBranch = (bId?: string) => {
+    if (selectedBranchId === 'all') return true;
+    return bId === selectedBranchId || (!bId && selectedBranchId === 'br_main');
+  };
 
   // Helper date filter
   const isDateMatch = (dateStr: string) => {
@@ -87,14 +102,16 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
   // 1. INVOICE PROFITS CALCULATION
   const invoiceProfitsData = useMemo(() => {
-    const sales = db.invoices.filter(i => i.type === 'sale' && isDateMatch(i.date));
+    const sales = db.invoices.filter(i => i.type === 'sale' && isDateMatch(i.date) && isTargetBranch(i.branchId));
 
     return sales.map(inv => {
-      // Calculate COGS for this invoice
+      // Calculate COGS for this invoice using branch pricing
+      const invBranch = inv.branchId || 'br_main';
       let invoiceCost = 0;
       inv.items.forEach(it => {
         const prod = db.products.find(p => p.id === it.productId);
-        const costPrice = it.costPrice || prod?.buyPrice || 0;
+        const branchProd = prod ? getProductForBranch(prod, invBranch) : null;
+        const costPrice = it.costPrice || branchProd?.buyPrice || 0;
         invoiceCost += it.qty * costPrice;
       });
 
@@ -125,7 +142,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         row.paymentMethod.toLowerCase().includes(q)
       );
     });
-  }, [db, dateFilter, fromDate, toDate, searchQuery]);
+  }, [db, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
 
   // Grand Total of Invoice Profits (ONLY Grand Total of Profits at bottom as requested!)
   const grandTotalInvoiceProfits = useMemo(() => {
@@ -134,7 +151,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
   // 2. PRODUCT PROFITS CALCULATION
   const itemProfitsData = useMemo(() => {
-    const sales = db.invoices.filter(i => i.type === 'sale' && isDateMatch(i.date));
+    const sales = db.invoices.filter(i => i.type === 'sale' && isDateMatch(i.date) && isTargetBranch(i.branchId));
 
     // Map: productId -> aggregated data
     const map = new Map<string, {
@@ -150,9 +167,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     }>();
 
     sales.forEach(inv => {
+      const invBranch = inv.branchId || 'br_main';
       inv.items.forEach(it => {
         const prod = db.products.find(p => p.id === it.productId);
-        const costPrice = it.costPrice || prod?.buyPrice || 0;
+        const branchProd = prod ? getProductForBranch(prod, invBranch) : null;
+        const costPrice = it.costPrice || branchProd?.buyPrice || 0;
         const itemRev = it.total;
         const itemCost = it.qty * costPrice;
 
@@ -493,6 +512,28 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
               <span>أرباح الأصناف ({itemProfitsData.length})</span>
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* Branch Isolation Filter Bar */}
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-slate-700">تحليل أرباح فرع:</span>
+          <select
+            value={selectedBranchId}
+            onChange={(e) => setSelectedBranchId(e.target.value)}
+            className="bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-bold text-slate-900 shadow-2xs focus:ring-1 focus:ring-black cursor-pointer"
+          >
+            <option value="all">🌐 كافة الفروع مجتمعة (مجمّع)</option>
+            {branches.map(b => (
+              <option key={b.id} value={b.id}>
+                📍 {b.name} {b.isMain ? '(الرئيسي)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="text-[11px] text-slate-500 font-medium">
+          يتم احتساب تكلفة البضاعة وهوامش الربح وفقاً لأسعار وتكاليف كل فرع بشكل مستقل تماماً
         </div>
       </div>
 

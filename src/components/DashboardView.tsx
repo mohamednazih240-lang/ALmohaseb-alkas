@@ -32,7 +32,8 @@ import {
   calculateFinancialSummary, 
   calculateTreasuryBalance, 
   calculateCustomerBalance, 
-  calculateSupplierBalance 
+  calculateSupplierBalance,
+  getProductForBranch
 } from '../services/accountingStorage';
 
 interface DashboardViewProps {
@@ -44,6 +45,8 @@ interface DashboardViewProps {
   onOpenPartyModal: (type: 'customer' | 'supplier') => void;
   onPreviewInvoice: (invoice: Invoice) => void;
   onOpenCashMoveModal: () => void;
+  activeBranchId?: string;
+  onSelectBranch?: (branchId: string) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -54,9 +57,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenProductModal,
   onOpenPartyModal,
   onPreviewInvoice,
-  onOpenCashMoveModal
+  onOpenCashMoveModal,
+  activeBranchId,
+  onSelectBranch
 }) => {
-  const summary = calculateFinancialSummary(db);
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const [selectedBranchId, setSelectedBranchId] = React.useState<string>(activeBranchId || branches[0]?.id || 'br_main');
+
+  React.useEffect(() => {
+    if (activeBranchId) setSelectedBranchId(activeBranchId);
+  }, [activeBranchId]);
+
+  const targetBranch = selectedBranchId;
+  const currentBranch = branches.find(b => b.id === targetBranch) || branches[0];
+  const summary = calculateFinancialSummary(db, targetBranch);
+
+  const isTargetBranch = (bId?: string) => {
+    if (!targetBranch || targetBranch === 'all') return true;
+    return bId === targetBranch || (!bId && targetBranch === 'br_main');
+  };
 
   // 7-day Sales & Purchases chart data
   const last7Days = Array.from({ length: 7 }, (_, i) => {
@@ -66,11 +85,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     const dayLabel = d.toLocaleDateString('ar-EG', { weekday: 'short' });
 
     const daySales = db.invoices
-      .filter(inv => inv.type === 'sale' && inv.date === isoDate)
+      .filter(inv => inv.type === 'sale' && inv.date === isoDate && isTargetBranch(inv.branchId))
       .reduce((sum, inv) => sum + inv.total, 0);
 
     const dayPurchases = db.invoices
-      .filter(inv => inv.type === 'purchase' && inv.date === isoDate)
+      .filter(inv => inv.type === 'purchase' && inv.date === isoDate && isTargetBranch(inv.branchId))
       .reduce((sum, inv) => sum + inv.total, 0);
 
     return {
@@ -83,23 +102,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const maxVal = Math.max(1, ...last7Days.map(d => Math.max(d.sales, d.purchases)));
 
-  // Critical Low stock products
+  // Critical Low stock products for this specific branch
   const lowStockProducts = db.products
+    .map(p => getProductForBranch(p, targetBranch))
     .filter(p => p.minStock > 0 && p.currentQty <= p.minStock)
     .slice(0, 5);
 
-  // Recent invoices
+  // Recent invoices for this branch
   const recentInvoices = [...db.invoices]
+    .filter(inv => isTargetBranch(inv.branchId))
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
     .slice(0, 6);
 
-  // Treasury by channels
+  // Treasury by channels for this branch
   const channels = [
-    { name: 'نقدي', balance: calculateTreasuryBalance(db, 'نقدي') },
-    { name: 'فودافون كاش', balance: calculateTreasuryBalance(db, 'Vodafone Cash') },
-    { name: 'إنستاباي', balance: calculateTreasuryBalance(db, 'InstaPay') },
-    { name: 'فيزا POS', balance: calculateTreasuryBalance(db, 'Visa / POS') },
-    { name: 'تحويل بنكي', balance: calculateTreasuryBalance(db, 'تحويل بنكي') }
+    { name: 'نقدي', balance: calculateTreasuryBalance(db, 'نقدي', targetBranch) },
+    { name: 'فودافون كاش', balance: calculateTreasuryBalance(db, 'Vodafone Cash', targetBranch) },
+    { name: 'إنستاباي', balance: calculateTreasuryBalance(db, 'InstaPay', targetBranch) },
+    { name: 'فيزا POS', balance: calculateTreasuryBalance(db, 'Visa / POS', targetBranch) },
+    { name: 'تحويل بنكي', balance: calculateTreasuryBalance(db, 'تحويل بنكي', targetBranch) }
   ];
 
   return (
@@ -107,15 +128,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       {/* Top Welcome & Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
         <div>
-          <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-            لوحة المؤشرات والرقابة المالية
-          </h1>
-          <p className="text-xs text-slate-500 font-medium mt-0.5">
-            متابعة حية وشاملة للمبيعات والمشتريات وأرصدة الخزائن والمخزون بنظام القيد المزدوج
+          <div className="flex items-center gap-2 mb-1">
+            <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+              لوحة المؤشرات والرقابة المالية
+            </h1>
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
+              <Building className="w-3 h-3" />
+              <span>{currentBranch.name}</span>
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 font-medium">
+            متابعة حية ومستقلة لمبيعات ومشتريات وخزائن ومخزون ({currentBranch.name})
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Quick Branch Switcher in Dashboard */}
+          <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
+            <span className="font-bold text-slate-600 px-1">الفرع:</span>
+            <select
+              value={targetBranch}
+              onChange={(e) => {
+                setSelectedBranchId(e.target.value);
+                if (onSelectBranch) onSelectBranch(e.target.value);
+              }}
+              className="bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-900 shadow-2xs focus:ring-1 focus:ring-black cursor-pointer"
+            >
+              {branches.map(b => (
+                <option key={b.id} value={b.id}>{b.name} {b.isMain ? '(الرئيسي)' : ''}</option>
+              ))}
+            </select>
+          </div>
+
           <button
             onClick={() => onOpenInvoiceModal('sale')}
             className="px-3.5 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"

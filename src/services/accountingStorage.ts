@@ -25,7 +25,8 @@ import {
   AuditLog,
   AppSettings,
   PaymentMethod,
-  User
+  User,
+  BranchProductData
 } from '../types/accounting';
 import {
   getTenantStorageKey,
@@ -504,23 +505,28 @@ export function logAudit(db: AccountingDB, action: string, detail: string = ''):
 /**
  * Recalculate customer balance:
  * Opening balance + sum of unpaid sales (total - paid) - receipts - sale returns
+ * Optionally filtered for a specific branch
  */
-export function calculateCustomerBalance(db: AccountingDB, customerId: string): number {
+export function calculateCustomerBalance(db: AccountingDB, customerId: string, branchId?: string): number {
   const cust = db.customers.find(c => c.id === customerId);
   if (!cust) return 0;
-  let balance = Number(cust.openingBalance) || 0;
+  let balance = branchId ? 0 : (Number(cust.openingBalance) || 0);
 
   // Add unpaid sale invoice portions
   db.invoices.forEach(inv => {
     if (inv.type === 'sale' && inv.partyId === customerId) {
-      balance += (Number(inv.total) - Number(inv.paid));
+      if (!branchId || (inv.branchId === branchId || (!inv.branchId && branchId === 'br_main'))) {
+        balance += (Number(inv.total) - Number(inv.paid));
+      }
     }
   });
 
   // Subtract receipts
   db.vouchers.forEach(v => {
     if (v.type === 'receipt' && v.partyId === customerId) {
-      balance -= Number(v.amount);
+      if (!branchId || (v.branchId === branchId || (!v.branchId && branchId === 'br_main'))) {
+        balance -= Number(v.amount);
+      }
     }
   });
 
@@ -528,7 +534,9 @@ export function calculateCustomerBalance(db: AccountingDB, customerId: string): 
   db.returns.forEach(r => {
     if (r.type === 'sale' && r.partyId === customerId) {
       if (r.paymentMethod === 'آجل') {
-        balance -= Number(r.total);
+        if (!branchId || (r.branchId === branchId || (!r.branchId && branchId === 'br_main'))) {
+          balance -= Number(r.total);
+        }
       }
     }
   });
@@ -539,23 +547,28 @@ export function calculateCustomerBalance(db: AccountingDB, customerId: string): 
 /**
  * Recalculate supplier balance:
  * Opening balance + sum of unpaid purchases (total - paid) - payments - purchase returns
+ * Optionally filtered for a specific branch
  */
-export function calculateSupplierBalance(db: AccountingDB, supplierId: string): number {
+export function calculateSupplierBalance(db: AccountingDB, supplierId: string, branchId?: string): number {
   const supp = db.suppliers.find(s => s.id === supplierId);
   if (!supp) return 0;
-  let balance = Number(supp.openingBalance) || 0;
+  let balance = branchId ? 0 : (Number(supp.openingBalance) || 0);
 
   // Add unpaid purchase invoice portions
   db.invoices.forEach(inv => {
     if (inv.type === 'purchase' && inv.partyId === supplierId) {
-      balance += (Number(inv.total) - Number(inv.paid));
+      if (!branchId || (inv.branchId === branchId || (!inv.branchId && branchId === 'br_main'))) {
+        balance += (Number(inv.total) - Number(inv.paid));
+      }
     }
   });
 
   // Subtract payments
   db.vouchers.forEach(v => {
     if (v.type === 'payment' && v.partyId === supplierId) {
-      balance -= Number(v.amount);
+      if (!branchId || (v.branchId === branchId || (!v.branchId && branchId === 'br_main'))) {
+        balance -= Number(v.amount);
+      }
     }
   });
 
@@ -563,7 +576,9 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string): 
   db.returns.forEach(r => {
     if (r.type === 'purchase' && r.partyId === supplierId) {
       if (r.paymentMethod === 'آجل') {
-        balance -= Number(r.total);
+        if (!branchId || (r.branchId === branchId || (!r.branchId && branchId === 'br_main'))) {
+          balance -= Number(r.total);
+        }
       }
     }
   });
@@ -585,57 +600,73 @@ export function calculateTreasuryBalance(db: AccountingDB, method?: PaymentMetho
 }
 
 /**
- * Calculate total inventory valuation
+ * Calculate total inventory valuation, optionally for a specific branch
  */
-export function calculateInventoryValuation(db: AccountingDB): number {
+export function calculateInventoryValuation(db: AccountingDB, branchId?: string): number {
   return db.products.reduce((acc, p) => {
-    const cost = db.settings.cost === 'last' ? p.buyPrice : (p.avgCost || p.buyPrice);
-    return acc + (p.currentQty * cost);
+    const bp = branchId ? getProductForBranch(p, branchId) : p;
+    const cost = db.settings.cost === 'last' ? bp.buyPrice : (bp.avgCost || bp.buyPrice);
+    return acc + (bp.currentQty * cost);
   }, 0);
 }
 
 /**
- * Calculate Net Profit:
+ * Calculate Net Profit & Financial summary:
  * Sales Revenue - Cost of Goods Sold + Other Revenues - Expenses
+ * Optionally filtered strictly for a branch:
+ * "اريد كل فرع يكون مختص بذاته كليان بكل حركه وتقرير واموال ومخزون وكل شي"
  */
-export function calculateFinancialSummary(db: AccountingDB) {
+export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
   const today = getTodayDate();
 
-  const totalSalesAll = db.invoices
+  const isTargetBranch = (bId?: string) => {
+    if (!branchId || branchId === 'all') return true;
+    return bId === branchId || (!bId && branchId === 'br_main');
+  };
+
+  const branchInvoices = db.invoices.filter(i => isTargetBranch(i.branchId));
+  const branchExpenses = db.expenses.filter(e => isTargetBranch(e.branchId));
+  const branchRevenues = db.revenues.filter(r => isTargetBranch(r.branchId));
+
+  const totalSalesAll = branchInvoices
     .filter(i => i.type === 'sale')
     .reduce((acc, i) => acc + i.total, 0);
 
-  const salesToday = db.invoices
+  const salesToday = branchInvoices
     .filter(i => i.type === 'sale' && i.date === today)
     .reduce((acc, i) => acc + i.total, 0);
 
-  const totalPurchasesAll = db.invoices
+  const totalPurchasesAll = branchInvoices
     .filter(i => i.type === 'purchase')
     .reduce((acc, i) => acc + i.total, 0);
 
-  const purchasesToday = db.invoices
+  const purchasesToday = branchInvoices
     .filter(i => i.type === 'purchase' && i.date === today)
     .reduce((acc, i) => acc + i.total, 0);
 
-  const totalCOGS = db.invoices
+  const totalCOGS = branchInvoices
     .filter(i => i.type === 'sale')
     .reduce((acc, i) => {
       const invoiceCogs = i.items.reduce((s, it) => s + (it.qty * (it.costPrice || 0)), 0);
       return acc + invoiceCogs;
     }, 0);
 
-  const totalExpenses = db.expenses.reduce((acc, e) => acc + e.amount, 0);
-  const totalOtherRevenues = db.revenues.reduce((acc, r) => acc + r.amount, 0);
+  const totalExpenses = branchExpenses.reduce((acc, e) => acc + e.amount, 0);
+  const totalOtherRevenues = branchRevenues.reduce((acc, r) => acc + r.amount, 0);
 
   const grossProfit = totalSalesAll - totalCOGS;
   const netProfit = grossProfit + totalOtherRevenues - totalExpenses;
 
-  const totalCustomerReceivables = db.customers.reduce((acc, c) => acc + Math.max(0, calculateCustomerBalance(db, c.id)), 0);
-  const totalSupplierPayables = db.suppliers.reduce((acc, s) => acc + Math.max(0, calculateSupplierBalance(db, s.id)), 0);
+  const totalCustomerReceivables = db.customers.reduce((acc, c) => acc + Math.max(0, calculateCustomerBalance(db, c.id, branchId)), 0);
+  const totalSupplierPayables = db.suppliers.reduce((acc, s) => acc + Math.max(0, calculateSupplierBalance(db, s.id, branchId)), 0);
 
-  const totalTreasury = calculateTreasuryBalance(db);
-  const totalStockValue = calculateInventoryValuation(db);
-  const lowStockCount = db.products.filter(p => p.minStock > 0 && p.currentQty <= p.minStock).length;
+  const totalTreasury = calculateTreasuryBalance(db, undefined, branchId);
+  const totalStockValue = calculateInventoryValuation(db, branchId);
+  
+  const lowStockCount = db.products.filter(p => {
+    const bp = branchId ? getProductForBranch(p, branchId) : p;
+    return bp.minStock > 0 && bp.currentQty <= bp.minStock;
+  }).length;
 
   return {
     salesToday,
@@ -652,7 +683,7 @@ export function calculateFinancialSummary(db: AccountingDB) {
     totalTreasury,
     totalStockValue,
     lowStockCount,
-    totalInvoicesCount: db.invoices.length,
+    totalInvoicesCount: branchInvoices.length,
     totalProductsCount: db.products.length
   };
 }

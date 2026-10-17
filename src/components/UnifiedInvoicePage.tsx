@@ -21,7 +21,8 @@ import {
   Maximize2,
   Minimize2,
   ShieldCheck,
-  History
+  History,
+  Building2
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -364,10 +365,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       prev.map(item => {
         const prod = db.products.find(p => p.code === item.productCode || p.id === item.productId);
         if (!prod) return item;
-        let newPrice = prod.sellPrice;
-        if (newType === 'wholesale') newPrice = prod.wholesalePrice;
-        else if (newType === 'buy') newPrice = prod.buyPrice;
-        else newPrice = prod.sellPrice;
+        const bp = getProductForBranch(prod, invoiceBranchId);
+        let newPrice = bp.sellPrice;
+        if (newType === 'wholesale') newPrice = bp.wholesalePrice;
+        else if (newType === 'buy') newPrice = bp.buyPrice;
+        else newPrice = bp.sellPrice;
 
         return {
           ...item,

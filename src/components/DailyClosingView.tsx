@@ -29,7 +29,8 @@ import {
   formatMoney,
   generateId,
   getTodayDate,
-  logAudit
+  logAudit,
+  getProductForBranch
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -41,15 +42,22 @@ import { exportTableToCsv } from '../services/exportService';
 interface DailyClosingViewProps {
   db: AccountingDB;
   onUpdateDb: (updated: AccountingDB) => void;
+  activeBranchId?: string;
 }
 
 export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   db,
-  onUpdateDb
+  onUpdateDb,
+  activeBranchId
 }) => {
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
+  const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
+  const [historyBranchFilter, setHistoryBranchFilter] = useState<'current' | 'all'>('current');
+
   const [activeTab, setActiveTab] = useState<'current' | 'history'>('current');
   const [selectedDate, setSelectedDate] = useState<string>(getTodayDate());
-  const [shiftName, setShiftName] = useState<string>('وردية اليوم');
+  const [shiftName, setShiftName] = useState<string>(`وردية ${currentBranch.name}`);
   const [startingCash, setStartingCash] = useState<number>(0);
   const [actualCash, setActualCash] = useState<number>(0);
   const [shiftNotes, setShiftNotes] = useState<string>('');
@@ -65,12 +73,16 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('تقرير تقفيل اليومية');
 
-  // Calculate live shift statistics for selectedDate
+  const isTargetBranch = (bId?: string) => {
+    return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
+  };
+
+  // Calculate live shift statistics for selectedDate strictly for this branch
   const liveStats = useMemo(() => {
-    // 1. Invoices on selected date
-    const daySalesInvoices = db.invoices.filter(i => i.date === selectedDate && i.type === 'sale');
-    const dayPurchaseInvoices = db.invoices.filter(i => i.date === selectedDate && i.type === 'purchase');
-    const dayReturns = db.returns.filter(r => r.date === selectedDate);
+    // 1. Invoices on selected date for target branch
+    const daySalesInvoices = db.invoices.filter(i => i.date === selectedDate && i.type === 'sale' && isTargetBranch(i.branchId));
+    const dayPurchaseInvoices = db.invoices.filter(i => i.date === selectedDate && i.type === 'purchase' && isTargetBranch(i.branchId));
+    const dayReturns = (db.returns || []).filter(r => r.date === selectedDate && isTargetBranch(r.branchId));
 
     // Sales metrics
     const salesTotal = daySalesInvoices.reduce((sum, i) => sum + i.total, 0);
@@ -81,20 +93,20 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     const salesCashIn = daySalesInvoices.reduce((sum, i) => sum + (i.paid || 0), 0);
     const purchasesCashOut = dayPurchaseInvoices.reduce((sum, i) => sum + (i.paid || 0), 0);
 
-    // Vouchers on date
-    const receiptVouchers = db.vouchers.filter(v => v.date === selectedDate && v.type === 'receipt');
-    const paymentVouchers = db.vouchers.filter(v => v.date === selectedDate && v.type === 'payment');
+    // Vouchers on date for target branch
+    const receiptVouchers = db.vouchers.filter(v => v.date === selectedDate && v.type === 'receipt' && isTargetBranch(v.branchId));
+    const paymentVouchers = db.vouchers.filter(v => v.date === selectedDate && v.type === 'payment' && isTargetBranch(v.branchId));
     const vouchersCashIn = receiptVouchers.reduce((sum, v) => sum + v.amount, 0);
     const vouchersCashOut = paymentVouchers.reduce((sum, v) => sum + v.amount, 0);
 
-    // Treasury entries on date
-    const dayTreasury = db.treasury.filter(t => t.date === selectedDate);
+    // Treasury entries on date for target branch
+    const dayTreasury = db.treasury.filter(t => t.date === selectedDate && isTargetBranch(t.branchId));
     const manualTreasuryIn = dayTreasury.filter(t => t.direction === 'in' && !t.sourceType?.includes('invoice') && !t.sourceType?.includes('voucher')).reduce((sum, t) => sum + t.amount, 0);
     const manualTreasuryOut = dayTreasury.filter(t => t.direction === 'out' && !t.sourceType?.includes('invoice') && !t.sourceType?.includes('voucher')).reduce((sum, t) => sum + t.amount, 0);
 
-    // Expenses & Revenues on date
-    const dayExpenses = db.expenses.filter(e => e.date === selectedDate).reduce((sum, e) => sum + e.amount, 0);
-    const dayRevenues = db.revenues.filter(r => r.date === selectedDate).reduce((sum, r) => sum + r.amount, 0);
+    // Expenses & Revenues on date for target branch
+    const dayExpenses = db.expenses.filter(e => e.date === selectedDate && isTargetBranch(e.branchId)).reduce((sum, e) => sum + e.amount, 0);
+    const dayRevenues = db.revenues.filter(r => r.date === selectedDate && isTargetBranch(r.branchId)).reduce((sum, r) => sum + r.amount, 0);
 
     // Total Cash In & Total Cash Out
     const totalCashIn = salesCashIn + vouchersCashIn + manualTreasuryIn + dayRevenues;
@@ -105,7 +117,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     daySalesInvoices.forEach(inv => {
       inv.items.forEach(it => {
         const product = db.products.find(p => p.id === it.productId);
-        const unitCost = it.costPrice || product?.buyPrice || 0;
+        const branchProd = product ? getProductForBranch(product, targetBranchId) : null;
+        const unitCost = it.costPrice || branchProd?.buyPrice || 0;
         cogs += it.qty * unitCost;
       });
     });
@@ -136,7 +149,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       expectedCash,
       diff
     };
-  }, [db, selectedDate, startingCash, actualCash]);
+  }, [db, selectedDate, startingCash, actualCash, targetBranchId]);
 
   // Convert a daily closing object into a MovementPrintBlock
   const buildClosingPrintBlock = (c: DailyClosing): MovementPrintBlock => {
@@ -210,11 +223,13 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       difference: liveStats.diff,
       status: 'مغلق',
       notes: shiftNotes,
+      branchId: targetBranchId,
+      branchName: currentBranch.name,
       createdAt: new Date().toISOString()
     };
 
     updated.dailyClosings.unshift(newClosing);
-    logAudit(updated, 'تقفيل يومية ووردية', `تم تقفيل ${shiftName} بتاريخ ${selectedDate} بنسبة أرباح ${liveStats.profitMargin.toFixed(1)}%`);
+    logAudit(updated, 'تقفيل يومية ووردية', `تم تقفيل ${shiftName} لفرع ${currentBranch.name} بتاريخ ${selectedDate} بنسبة أرباح ${liveStats.profitMargin.toFixed(1)}%`);
 
     onUpdateDb(updated);
     alert('تم حفظ تقفيل الوردية بنجاح!');
@@ -332,25 +347,37 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     exportTableToCsv(`سجل_تقفيلات_الورديات_${Date.now()}.csv`, headers, rows);
   };
 
+  const isHistoryTargetBranch = (bId?: string) => {
+    if (historyBranchFilter === 'all') return true;
+    return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
+  };
+
   // Filter history
-  const filteredHistory = (db.dailyClosings || []).filter(c =>
-    !historySearch ||
-    c.shiftNumber.includes(historySearch) ||
-    c.date.includes(historySearch) ||
-    c.closedBy.includes(historySearch)
-  );
+  const filteredHistory = (db.dailyClosings || [])
+    .filter(c => isHistoryTargetBranch(c.branchId))
+    .filter(c =>
+      !historySearch ||
+      c.shiftNumber.includes(historySearch) ||
+      c.date.includes(historySearch) ||
+      c.closedBy.includes(historySearch)
+    );
 
   return (
     <div className="space-y-4 pb-12">
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-200">
         <div>
-          <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-            <ShieldCheck className="w-6 h-6 text-emerald-600" />
-            <span>تقفيل اليومية والورديات وحساب أرباح الشفت</span>
-          </h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
+              <ShieldCheck className="w-6 h-6 text-emerald-600" />
+              <span>تقفيل اليومية والورديات وحساب أرباح الشفت</span>
+            </h1>
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
+              فرع: {currentBranch.name}
+            </span>
+          </div>
           <p className="text-xs text-slate-500 font-medium mt-0.5">
-            متابعة مدخلات ومخرجات الخزينة يومياً، مطابقة الدرج الفعلي، وعرض نسبة ومجمل الأرباح لكل شفت
+            متابعة مدخلات ومخرجات الخزينة لفرع ({currentBranch.name})، مطابقة الدرج الفعلي، وعرض نسبة ومجمل الأرباح المستقلة
           </p>
         </div>
 

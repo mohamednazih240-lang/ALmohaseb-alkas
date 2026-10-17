@@ -26,7 +26,9 @@ import {
   generateId,
   getTodayDate,
   createInvoiceJournal,
-  logAudit
+  logAudit,
+  getProductForBranch,
+  updateProductBranchData
 } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -36,14 +38,21 @@ interface QuotesOrdersViewProps {
   onUpdateDb: (updated: AccountingDB) => void;
   initialTab?: 'quotes' | 'orders';
   onPreviewInvoice: (invoice: Invoice) => void;
+  activeBranchId?: string;
 }
 
 export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
   db,
   onUpdateDb,
   initialTab = 'quotes',
-  onPreviewInvoice
+  onPreviewInvoice,
+  activeBranchId
 }) => {
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
+  const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
+  const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
+
   const [activeTab, setActiveTab] = useState<'quotes' | 'orders'>(initialTab);
   const [viewSubTab, setViewSubTab] = useState<'editor' | 'list'>('list');
   const [showOrderModal, setShowOrderModal] = useState(false);
@@ -106,6 +115,9 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
     const warehouseId = updated.warehouses[0]?.id || 'wh_main';
     const wh = updated.warehouses.find(w => w.id === warehouseId);
 
+    const branchIdForSale = q.branchId || targetBranchId;
+    const branchForSale = branches.find(b => b.id === branchIdForSale) || currentBranch;
+
     const newInvoice: Invoice = {
       id: invId,
       number: invNumber,
@@ -123,14 +135,21 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       remaining: 0,
       status: 'مدفوع',
       notes: `تم توليدها تلقائياً من عرض السعر رقم ${q.number}`,
+      branchId: branchIdForSale,
+      branchName: branchForSale.name,
       items: JSON.parse(JSON.stringify(q.items))
     };
 
-    // Deduct stock
+    // Deduct branch-isolated stock
     newInvoice.items.forEach(item => {
       const prod = updated.products.find(p => p.id === item.productId);
       if (prod) {
-        prod.currentQty -= item.qty;
+        const bp = getProductForBranch(prod, branchIdForSale);
+        const newQty = bp.currentQty - item.qty;
+        const prodUpdated = updateProductBranchData(prod, branchIdForSale, { currentQty: newQty });
+        const pIdx = updated.products.findIndex(p => p.id === prod.id);
+        if (pIdx > -1) updated.products[pIdx] = prodUpdated;
+
         updated.stockMovements.unshift({
           id: generateId('sm'),
           date: newInvoice.date,
@@ -139,11 +158,13 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
           warehouseId,
           warehouseName: wh ? wh.name : 'المخزن الرئيسي',
           qtyChange: -item.qty,
-          balanceAfter: prod.currentQty,
+          balanceAfter: newQty,
           unitCost: item.costPrice,
           type: 'sale',
           refNumber: newInvoice.number,
-          sourceId: invId
+          sourceId: invId,
+          branchId: branchIdForSale,
+          branchName: branchForSale.name
         });
       }
     });
@@ -157,7 +178,9 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       method: 'نقدي',
       description: `تحصيل فاتورة بيع ${newInvoice.number} (عرض سعر ${q.number})`,
       sourceType: 'sale',
-      sourceId: invId
+      sourceId: invId,
+      branchId: branchIdForSale,
+      branchName: branchForSale.name
     });
 
     // Journal
@@ -201,11 +224,13 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       items: orderItems,
       total,
       status: 'قيد التنفيذ',
-      notes: orderNotes
+      notes: orderNotes,
+      branchId: targetBranchId,
+      branchName: currentBranch.name
     };
 
     updated.orders.unshift(newOrder);
-    logAudit(updated, 'إنشاء أمر توريد/بيع', `أمر ${newOrder.number} (${orderType === 'sale' ? 'بيع' : 'شراء'})`);
+    logAudit(updated, 'إنشاء أمر توريد/بيع', `أمر ${newOrder.number} (${orderType === 'sale' ? 'بيع' : 'شراء'}) لفرع ${currentBranch.name}`);
     onUpdateDb(updated);
     setShowOrderModal(false);
   };
@@ -231,6 +256,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
         <UnifiedInvoicePage
           mode="quote"
           db={db}
+          activeBranchId={targetBranchId}
           onUpdateDb={onUpdateDb}
           onPreviewInvoice={onPreviewInvoice}
           onClose={() => setViewSubTab('list')}

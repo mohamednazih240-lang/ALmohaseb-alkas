@@ -203,6 +203,8 @@ export interface ReturnInvoice {
   total: number;
   notes?: string;
   journalEntryId?: string;
+  branchId?: string;
+  branchName?: string;
 }
 
 export interface Quote {

@@ -393,6 +393,8 @@ export default function App() {
               onOpenPartyModal={(type) => navigateToPage(type === 'customer' ? 'customers' : 'suppliers')}
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
               onOpenCashMoveModal={() => navigateToPage('treasury')}
+              activeBranchId={activeBranchId}
+              onSelectBranch={(bId) => setActiveBranchId(bId)}
             />
           )}
 
@@ -402,6 +404,7 @@ export default function App() {
               onUpdateDb={handleUpdateDb}
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
               onOpenPartyModal={() => navigateToPage('customers')}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -411,6 +414,7 @@ export default function App() {
               onUpdateDb={handleUpdateDb}
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
               onOpenPartyModal={() => navigateToPage('suppliers')}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -461,6 +465,7 @@ export default function App() {
             <DailyClosingView
               db={db}
               onUpdateDb={handleUpdateDb}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -472,6 +477,7 @@ export default function App() {
               onEditInvoice={(inv) => {
                 navigateToPage('sales');
               }}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -488,6 +494,7 @@ export default function App() {
               onUpdateDb={handleUpdateDb}
               initialTab="quotes"
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -497,6 +504,7 @@ export default function App() {
               onUpdateDb={handleUpdateDb}
               initialTab="orders"
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -505,6 +513,7 @@ export default function App() {
               db={db}
               onUpdateDb={handleUpdateDb}
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -531,6 +540,7 @@ export default function App() {
               type="receipt"
               db={db}
               onUpdateDb={handleUpdateDb}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -539,6 +549,7 @@ export default function App() {
               type="payment"
               db={db}
               onUpdateDb={handleUpdateDb}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -552,6 +563,7 @@ export default function App() {
               db={db}
               onUpdateDb={handleUpdateDb}
               onOpenProductModal={(p) => setProductModalState({ isOpen: true, product: p })}
+              activeBranchId={activeBranchId}
             />
           )}
 
@@ -565,11 +577,15 @@ export default function App() {
               subPage={currentPage as any}
               db={db}
               onUpdateDb={handleUpdateDb}
+              activeBranchId={activeBranchId}
             />
           )}
 
           {currentPage === 'reports' && (
-            <ReportsView db={db} />
+            <ReportsView
+              db={db}
+              activeBranchId={activeBranchId}
+            />
           )}
 
           {(currentPage === 'users' ||
@@ -609,6 +625,7 @@ export default function App() {
         product={productModalState.product}
         db={db}
         onUpdateDb={handleUpdateDb}
+        activeBranchId={activeBranchId}
       />
 
       {/* Professional Invoice Preview & Print Modal */}

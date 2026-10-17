@@ -36,15 +36,22 @@ interface VouchersViewProps {
   db: AccountingDB;
   onUpdateDb: (updated: AccountingDB) => void;
   preselectedPartyId?: string;
+  activeBranchId?: string;
 }
 
 export const VouchersView: React.FC<VouchersViewProps> = ({
   type,
   db,
   onUpdateDb,
-  preselectedPartyId
+  preselectedPartyId,
+  activeBranchId
 }) => {
   const isReceipt = type === 'receipt';
+  const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
+  const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
+  const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
+  const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
+
   const [showModal, setShowModal] = useState(false);
   const [editingVoucher, setEditingVoucher] = useState<Voucher | null>(null);
   const [printingVoucher, setPrintingVoucher] = useState<Voucher | null>(null);
@@ -63,8 +70,13 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('نقدي');
   const [description, setDescription] = useState('');
 
+  const isTargetBranch = (bId?: string) => {
+    if (branchFilter === 'all') return true;
+    return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
+  };
+
   const vouchersList = db.vouchers
-    .filter(v => v.type === type)
+    .filter(v => v.type === type && isTargetBranch(v.branchId))
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   const totalAmount = vouchersList.reduce((sum, v) => sum + v.amount, 0);
@@ -161,7 +173,9 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
       partyName,
       amount,
       paymentMethod,
-      description
+      description,
+      branchId: targetBranchId,
+      branchName: currentBranch.name
     };
 
     // 1. Treasury Entry
@@ -173,7 +187,9 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
       method: paymentMethod,
       description: `${isReceipt ? 'سند قبض' : 'سند صرف'} ${vNumber} - ${partyName}: ${description}`,
       sourceType: type,
-      sourceId: vId
+      sourceId: vId,
+      branchId: targetBranchId,
+      branchName: currentBranch.name
     });
 
     // 2. Automated Balanced Double-Entry Journal Entry
@@ -312,6 +328,36 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
             <Plus className="w-4 h-4" />
             <span>{isReceipt ? 'سند قبض جديد (+)' : 'سند صرف جديد (-)'}</span>
           </button>
+        </div>
+      </div>
+
+      {/* Branch Isolation Filter Bar */}
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-slate-700">عرض سندات فرع:</span>
+          <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 shadow-2xs">
+            <button
+              type="button"
+              onClick={() => setBranchFilter('current')}
+              className={`px-3 py-1 rounded-md font-bold text-xs transition-all ${
+                branchFilter === 'current' ? 'bg-black text-white shadow-xs' : 'text-slate-600 hover:text-black'
+              }`}
+            >
+              فرع {currentBranch.name} {currentBranch.isMain ? '(الرئيسي)' : ''}
+            </button>
+            <button
+              type="button"
+              onClick={() => setBranchFilter('all')}
+              className={`px-3 py-1 rounded-md font-bold text-xs transition-all ${
+                branchFilter === 'all' ? 'bg-black text-white shadow-xs' : 'text-slate-600 hover:text-black'
+              }`}
+            >
+              كافة الفروع
+            </button>
+          </div>
+        </div>
+        <div className="text-[11px] text-slate-500 font-medium">
+          يتم تسجيل أي سند جديد تلقائياً بحساب فرع: <span className="font-bold text-slate-900">{currentBranch.name}</span>
         </div>
       </div>
 
