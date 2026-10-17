@@ -22,7 +22,12 @@ import {
   Minimize2,
   ShieldCheck,
   History,
-  Building2
+  Building2,
+  Tag,
+  CheckCircle2,
+  AlertCircle,
+  Minus,
+  Edit3
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -249,6 +254,25 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [liveTime, setLiveTime] = useState<string>('00:00');
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
 
+  // Detailed Item Card Modal states (كارت تفاصيل الصنف لتحديد الكمية وتعديل/تأكيد السعر قبل الإضافة)
+  const [selectedCardProduct, setSelectedCardProduct] = useState<Product | null>(null);
+  const [itemCardQty, setItemCardQty] = useState<string>('1');
+  const [itemCardPrice, setItemCardPrice] = useState<string>('0');
+  const [itemCardDefaultPrice, setItemCardDefaultPrice] = useState<number>(0);
+  const [itemCardSpec, setItemCardSpec] = useState<string>('');
+  const [showItemCardModal, setShowItemCardModal] = useState<boolean>(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const itemQtyInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (showItemCardModal) {
+      setTimeout(() => {
+        itemQtyInputRef.current?.focus();
+        itemQtyInputRef.current?.select();
+      }, 50);
+    }
+  }, [showItemCardModal]);
+
   useEffect(() => {
     const updateTime = () => {
       const d = new Date();
@@ -409,7 +433,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const quickAddItem = (prod: Product) => {
     const branchProd = getProductForBranch(prod, invoiceBranchId);
     let activePrice = branchProd.sellPrice;
-    if (priceType === 'wholesale') activePrice = branchProd.wholesalePrice;
+    if (mode === 'purchase' || mode === 'purchase_return') activePrice = branchProd.buyPrice;
+    else if (mode === 'wholesale' || priceType === 'wholesale') activePrice = branchProd.wholesalePrice;
     else if (priceType === 'buy') activePrice = branchProd.buyPrice;
 
     if (mode === 'sale' && branchProd.currentQty <= 0) {
@@ -447,6 +472,97 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     });
 
     setShowLookupModal(false);
+  };
+
+  // Open detailed card for selected product to specify quantity & verify/modify price
+  const openItemCard = (prod: Product) => {
+    const branchProd = getProductForBranch(prod, invoiceBranchId);
+    let defPrice = branchProd.sellPrice;
+    if (mode === 'purchase' || mode === 'purchase_return') {
+      defPrice = branchProd.buyPrice;
+    } else if (mode === 'wholesale' || priceType === 'wholesale') {
+      defPrice = branchProd.wholesalePrice;
+    } else if (priceType === 'buy') {
+      defPrice = branchProd.buyPrice;
+    }
+
+    setSelectedCardProduct(prod);
+    setItemCardQty('1');
+    setItemCardPrice(defPrice.toString());
+    setItemCardDefaultPrice(defPrice);
+    setItemCardSpec('');
+    setShowItemCardModal(true);
+  };
+
+  // Confirm adding the item from the detailed card into invoice items
+  const confirmAddItemFromCard = (closeCatalog: boolean = false) => {
+    if (!selectedCardProduct) return;
+    const qty = parseFloat(itemCardQty);
+    const unitPrice = parseFloat(itemCardPrice);
+
+    if (isNaN(qty) || qty <= 0) {
+      alert('يرجى إدخال كمية صحيحة أكبر من الصفر');
+      return;
+    }
+    if (isNaN(unitPrice) || unitPrice < 0) {
+      alert('يرجى إدخال سعر صحيح (صفر أو أكثر)');
+      return;
+    }
+
+    const branchProd = getProductForBranch(selectedCardProduct, invoiceBranchId);
+
+    // Negative stock check if sale mode
+    if ((mode === 'sale' || mode === 'wholesale') && branchProd.currentQty < qty) {
+      const confirmNeg = confirm(
+        `⚠️ تنبيه: رصيد الصنف "${selectedCardProduct.name}" بفرع (${invoiceBranch.name}) هو (${branchProd.currentQty}) والكمية المطلوبة هي (${qty}). هل ترغب في المتابعة؟`
+      );
+      if (!confirmNeg) return;
+    }
+
+    setInvoiceItems(prev => {
+      const existingIdx = prev.findIndex(
+        it => it.productId === selectedCardProduct.id && (it.spec || '') === itemCardSpec.trim() && Math.abs(it.unitPrice - unitPrice) < 0.001
+      );
+      if (existingIdx > -1) {
+        const copy = [...prev];
+        const newQty = copy[existingIdx].qty + qty;
+        copy[existingIdx] = {
+          ...copy[existingIdx],
+          qty: newQty,
+          total: newQty * copy[existingIdx].unitPrice - (copy[existingIdx].discount || 0)
+        };
+        return copy;
+      } else {
+        const newItem: InvoiceItem = {
+          productId: selectedCardProduct.id,
+          productCode: selectedCardProduct.code,
+          productName: selectedCardProduct.name,
+          unit: selectedCardProduct.unit,
+          spec: itemCardSpec.trim(),
+          qty: qty,
+          unitPrice: unitPrice,
+          costPrice: branchProd.avgCost || branchProd.buyPrice,
+          discount: 0,
+          taxRate: 0,
+          total: qty * unitPrice
+        };
+        return [...prev, newItem];
+      }
+    });
+
+    const isPriceModified = Math.abs(unitPrice - itemCardDefaultPrice) >= 0.01;
+    const toastText = `✓ تمت إضافة "${selectedCardProduct.name}" (العدد: ${qty} - السعر: ${unitPrice.toFixed(2)} ${db.settings.currency})${isPriceModified ? ' [سعر معدل]' : ''} إلى الفاتورة`;
+    setToastMessage(toastText);
+    setTimeout(() => {
+      setToastMessage(prev => (prev === toastText ? null : prev));
+    }, 3000);
+
+    setShowItemCardModal(false);
+    setSelectedCardProduct(null);
+
+    if (closeCatalog) {
+      setShowLookupModal(false);
+    }
   };
 
   // Modify row modal
@@ -1203,7 +1319,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       (p.barcode && p.barcode === trimmed)
                     );
                     if (match) {
-                      quickAddItem(match);
+                      openItemCard(match);
                       setInlineProductSearch('');
                       setShowInlineDropdown(false);
                     }
@@ -1250,7 +1366,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       <div
                         key={p.id}
                         onClick={() => {
-                          quickAddItem(p);
+                          openItemCard(p);
                           setInlineProductSearch('');
                           setShowInlineDropdown(false);
                         }}
@@ -1620,7 +1736,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-2">
           <div className="bg-slate-200 rounded-lg w-[96vw] max-w-4xl h-[92vh] border-2 border-slate-500 shadow-2xl flex flex-col overflow-hidden">
             <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold">
-              <span>دليل الأصناف (اختر صنفاً للإضافة السريعة)</span>
+              <div className="flex items-center gap-2">
+                <Boxes className="w-4 h-4" />
+                <span>دليل الأصناف (اضغط على أي صنف لتحديد الكمية والسعر)</span>
+                <span className="bg-white/20 text-white px-2 py-0.5 rounded text-[9px] font-normal">
+                  مدرج بالفاتورة: {invoiceItems.length} صنف ({formatMoney(itemsSubTotal, db.settings.currency)})
+                </span>
+              </div>
               <button onClick={() => setShowLookupModal(false)} className="hover:opacity-75">
                 <X className="w-4 h-4" />
               </button>
@@ -1721,40 +1843,57 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         {visible.map(rawItem => {
                           const item = getProductForBranch(rawItem, invoiceBranchId);
                           const isLow = item.currentQty <= item.minStock;
+                          const inInvoiceItems = invoiceItems.filter(it => it.productId === rawItem.id);
+                          const inInvoiceQty = inInvoiceItems.reduce((acc, it) => acc + it.qty, 0);
+
                           return (
                             <div
                               key={item.id}
-                              onClick={() => quickAddItem(rawItem)}
-                              className={`bg-white border rounded p-1.5 flex flex-col gap-0.5 cursor-pointer shadow-2xs hover:border-blue-500 hover:bg-blue-50/40 transition-colors ${
-                                isLow ? 'border-rose-400 bg-rose-50/30' : 'border-slate-300'
+                              onClick={() => openItemCard(rawItem)}
+                              className={`bg-white border rounded p-1.5 flex flex-col gap-1 cursor-pointer shadow-2xs hover:border-blue-500 hover:bg-blue-50/40 hover:shadow-xs transition-all ${
+                                isLow ? 'border-rose-300 bg-rose-50/30' : 'border-slate-300'
                               }`}
                             >
                               <div className="flex justify-between items-center text-[9.5px] font-bold text-slate-900 border-b border-slate-100 pb-0.5">
-                                <span>
-                                  {item.name} <small className="font-normal text-slate-500 text-[8px]">({item.category || 'عامة'})</small>
-                                </span>
-                                <span className="text-sky-600 font-mono text-[8.5px]">{item.code}</span>
+                                <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                                  <span className="truncate">
+                                    {item.name} <small className="font-normal text-slate-500 text-[8px]">({item.category || 'عامة'})</small>
+                                  </span>
+                                  {inInvoiceQty > 0 && (
+                                    <span className="bg-emerald-100 text-emerald-800 text-[7.5px] px-1.5 py-0.2 rounded font-mono font-bold shrink-0">
+                                      مدرج بالفاتورة: {inInvoiceQty}
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-sky-600 font-mono text-[8.5px] shrink-0 mr-1">{item.code}</span>
                               </div>
 
                               <div className="grid grid-cols-4 gap-1 text-[8px] text-center pt-0.5">
                                 <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
                                   <span className="block text-[6.5px] text-slate-500">متاح بالفرع</span>
                                   <strong className={`font-mono text-[9px] ${item.currentQty <= 0 ? 'text-rose-600' : 'text-blue-600'}`}>
-                                    {item.currentQty}
+                                    {item.currentQty} {item.unit || ''}
                                   </strong>
                                 </div>
-                                <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
+                                <div className={`p-0.5 rounded border ${mode === 'sale' && priceType === 'cash' ? 'bg-emerald-50 border-emerald-400 font-bold' : 'bg-slate-50 border-slate-200'}`}>
                                   <span className="block text-[6.5px] text-slate-500">نقدي</span>
                                   <strong className="font-mono text-emerald-600">{item.sellPrice.toFixed(2)}</strong>
                                 </div>
-                                <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
+                                <div className={`p-0.5 rounded border ${mode === 'wholesale' || priceType === 'wholesale' ? 'bg-amber-50 border-amber-400 font-bold' : 'bg-slate-50 border-slate-200'}`}>
                                   <span className="block text-[6.5px] text-slate-500">جملة</span>
                                   <strong className="font-mono text-amber-600">{item.wholesalePrice.toFixed(2)}</strong>
                                 </div>
-                                <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
+                                <div className={`p-0.5 rounded border ${mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy' ? 'bg-blue-50 border-blue-400 font-bold' : 'bg-slate-50 border-slate-200'}`}>
                                   <span className="block text-[6.5px] text-slate-500">شراء</span>
-                                  <strong className="font-mono text-rose-600">{item.buyPrice.toFixed(2)}</strong>
+                                  <strong className="font-mono text-blue-600">{item.buyPrice.toFixed(2)}</strong>
                                 </div>
+                              </div>
+
+                              <div className="flex items-center justify-between text-[7.5px] text-slate-400 pt-0.5">
+                                <span className="text-blue-600 font-bold flex items-center gap-1">
+                                  <span>اضغط لتحديد الكمية وتأكيد/تعديل السعر</span>
+                                </span>
+                                <span>الوحدة: {item.unit || 'قطعة'}</span>
                               </div>
                             </div>
                           );
@@ -1984,6 +2123,386 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
         </div>
       )}
+
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] bg-slate-900/95 backdrop-blur-md text-white px-4 py-2.5 rounded-xl shadow-2xl border border-emerald-500/80 flex items-center gap-2.5 text-xs font-bold animate-in fade-in slide-in-from-top-2 duration-200">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{toastMessage}</span>
+          <button
+            type="button"
+            onClick={() => setToastMessage(null)}
+            className="text-slate-400 hover:text-white p-0.5 mr-1 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* MODAL 5: Detailed Product Card Modal for Adding to Invoice */}
+      {showItemCardModal && selectedCardProduct && (() => {
+        const branchProd = getProductForBranch(selectedCardProduct, invoiceBranchId);
+        const qtyNum = parseFloat(itemCardQty) || 0;
+        const priceNum = parseFloat(itemCardPrice) || 0;
+        const lineTotal = Math.max(0, qtyNum * priceNum);
+        const isPriceModified = Math.abs(priceNum - itemCardDefaultPrice) >= 0.01;
+        const isNegativeStock = (mode === 'sale' || mode === 'wholesale') && branchProd.currentQty < qtyNum;
+
+        // Existing quantity in invoice
+        const existingRow = invoiceItems.find(
+          it => it.productId === selectedCardProduct.id && (it.spec || '') === itemCardSpec.trim()
+        );
+
+        return (
+          <div
+            className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-3 animate-in fade-in duration-150"
+            onKeyDown={e => {
+              if (e.key === 'Escape') {
+                setShowItemCardModal(false);
+                setSelectedCardProduct(null);
+              }
+            }}
+          >
+            <div className="bg-white rounded-xl w-full max-w-lg border-2 border-blue-600 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+              {/* Modal Header */}
+              <div className="bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 text-white px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center">
+                    <Boxes className="w-4 h-4 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold leading-tight">كارت إدراج الصنف في الفاتورة</h3>
+                    <p className="text-[10px] text-blue-100 flex items-center gap-1.5 mt-0.5">
+                      <span className="font-semibold">
+                        {mode === 'purchase' ? 'فاتورة مشتريات' :
+                         mode === 'purchase_return' ? 'مرتجع مشتريات' :
+                         mode === 'sale_return' ? 'مرتجع مبيعات' :
+                         mode === 'wholesale' ? 'فاتورة بيع جملة' :
+                         mode === 'quote' ? 'عرض أسعار' : 'فاتورة مبيعات'}
+                      </span>
+                      <span>•</span>
+                      <span>الفرع: {invoiceBranch.name}</span>
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowItemCardModal(false);
+                    setSelectedCardProduct(null);
+                  }}
+                  className="p-1 text-white/80 hover:text-white hover:bg-white/10 rounded-md transition-colors cursor-pointer"
+                  title="إلغاء وإغلاق"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="p-4 space-y-3.5 overflow-y-auto flex-1">
+                {/* Product Info Bar */}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <h4 className="text-base font-bold text-slate-900 leading-snug">
+                        {selectedCardProduct.name}
+                      </h4>
+                      <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[10px] text-slate-600">
+                        <span className="bg-white px-2 py-0.5 rounded border border-slate-200 font-mono font-bold text-blue-700">
+                          كود: {selectedCardProduct.code}
+                        </span>
+                        {selectedCardProduct.barcode && (
+                          <span className="bg-white px-2 py-0.5 rounded border border-slate-200 font-mono text-slate-700">
+                            باركود: {selectedCardProduct.barcode}
+                          </span>
+                        )}
+                        <span className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700">
+                          المجموعة: {selectedCardProduct.category || 'عامة'}
+                        </span>
+                        <span className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700">
+                          الوحدة: {selectedCardProduct.unit || 'قطعة'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Stock badge */}
+                    <div className="text-left shrink-0">
+                      <div className={`px-2.5 py-1 rounded-md text-[10px] font-bold border ${
+                        branchProd.currentQty <= 0 
+                          ? 'bg-rose-50 text-rose-700 border-rose-300' 
+                          : 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                      }`}>
+                        <span className="block text-[8px] text-slate-500 font-normal">الرصيد المتاح بالفرع</span>
+                        <span className="font-mono text-xs">{branchProd.currentQty}</span> {selectedCardProduct.unit || 'قطعة'}
+                      </div>
+                      {existingRow && (
+                        <div className="mt-1 text-[8.5px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-center">
+                          مدرج حالياً: {existingRow.qty}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {isNegativeStock && (
+                    <div className="mt-2 text-[10px] bg-rose-100 text-rose-800 p-2 rounded-md border border-rose-300 flex items-center gap-1.5 font-bold">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600" />
+                      <span>تنبيه: الرصيد المتاح غير كافٍ للكمية المطلوبة (سيتم البيع بالسالب إذا أكدت الإضافة).</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Preset System Prices quick clickable pills */}
+                <div>
+                  <div className="text-[10px] font-bold text-slate-600 mb-1 flex items-center justify-between">
+                    <span>الأسعار المسجلة في النظام (اضغط لاختيار سعر فوري):</span>
+                    <span className="text-[9px] text-slate-400">السعر المحدد: {itemCardPrice || 0} {db.settings.currency}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setItemCardPrice(branchProd.sellPrice.toString())}
+                      className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
+                        Math.abs(priceNum - branchProd.sellPrice) < 0.001
+                          ? 'bg-emerald-50 border-emerald-500 ring-2 ring-emerald-500/20 shadow-xs'
+                          : 'bg-white border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="text-[9px] text-slate-500 font-semibold">سعر البيع (نقدي)</span>
+                      <span className="font-mono font-bold text-xs text-emerald-700">
+                        {branchProd.sellPrice.toFixed(2)} <small className="text-[8px] font-normal">{db.settings.currency}</small>
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setItemCardPrice(branchProd.wholesalePrice.toString())}
+                      className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
+                        Math.abs(priceNum - branchProd.wholesalePrice) < 0.001
+                          ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20 shadow-xs'
+                          : 'bg-white border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="text-[9px] text-slate-500 font-semibold">سعر الجملة</span>
+                      <span className="font-mono font-bold text-xs text-amber-700">
+                        {branchProd.wholesalePrice.toFixed(2)} <small className="text-[8px] font-normal">{db.settings.currency}</small>
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setItemCardPrice(branchProd.buyPrice.toString())}
+                      className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
+                        Math.abs(priceNum - branchProd.buyPrice) < 0.001
+                          ? 'bg-blue-50 border-blue-500 ring-2 ring-blue-500/20 shadow-xs'
+                          : 'bg-white border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="text-[9px] text-slate-500 font-semibold">سعر الشراء (التكلفة)</span>
+                      <span className="font-mono font-bold text-xs text-blue-700">
+                        {branchProd.buyPrice.toFixed(2)} <small className="text-[8px] font-normal">{db.settings.currency}</small>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Primary Inputs: Quantity & Price */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  {/* Field 1: Quantity */}
+                  <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-300 flex flex-col gap-1.5">
+                    <label className="text-xs font-bold text-slate-800 flex items-center justify-between">
+                      <span>الكمية أو العدد للصنف *</span>
+                      <span className="text-[10px] text-slate-500 font-normal">({selectedCardProduct.unit || 'قطعة'})</span>
+                    </label>
+
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const current = parseFloat(itemCardQty) || 0;
+                          setItemCardQty(String(Math.max(1, current - 1)));
+                        }}
+                        className="w-8 h-8 rounded bg-slate-200 hover:bg-slate-300 font-bold text-slate-700 flex items-center justify-center shrink-0 text-sm cursor-pointer"
+                        title="نقصان 1"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                      </button>
+
+                      <input
+                        ref={itemQtyInputRef}
+                        type="number"
+                        min="0.01"
+                        step="any"
+                        value={itemCardQty}
+                        onChange={e => setItemCardQty(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            confirmAddItemFromCard(false);
+                          }
+                        }}
+                        className="w-full text-center font-mono font-bold text-base h-8 rounded border border-slate-300 bg-white text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                        placeholder="1"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const current = parseFloat(itemCardQty) || 0;
+                          setItemCardQty(String(current + 1));
+                        }}
+                        className="w-8 h-8 rounded bg-slate-200 hover:bg-slate-300 font-bold text-slate-700 flex items-center justify-center shrink-0 text-sm cursor-pointer"
+                        title="زيادة 1"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Quick quantity chips */}
+                    <div className="flex items-center justify-between gap-1 pt-0.5">
+                      {[1, 2, 5, 10, 20, 50].map(n => (
+                        <button
+                          key={n}
+                          type="button"
+                          onClick={() => setItemCardQty(String(n))}
+                          className={`flex-1 py-0.5 rounded text-[9px] font-bold border transition-colors cursor-pointer ${
+                            parseFloat(itemCardQty) === n
+                              ? 'bg-blue-600 text-white border-blue-600'
+                              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Field 2: Price */}
+                  <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-300 flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-bold text-slate-800">
+                        سعر الصنف (الوحدة) *
+                      </label>
+                      {isPriceModified ? (
+                        <span className="text-[8.5px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded flex items-center gap-1">
+                          <Edit3 className="w-2.5 h-2.5" />
+                          <span>سعر معدل</span>
+                        </span>
+                      ) : (
+                        <span className="text-[8.5px] font-bold text-emerald-800 bg-emerald-100 px-1.5 py-0.5 rounded flex items-center gap-1">
+                          <CheckCircle2 className="w-2.5 h-2.5" />
+                          <span>سعر مضبوط</span>
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="relative">
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={itemCardPrice}
+                        onChange={e => setItemCardPrice(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            confirmAddItemFromCard(false);
+                          }
+                        }}
+                        className={`w-full text-center font-mono font-bold text-base h-8 rounded border bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 ${
+                          isPriceModified ? 'border-amber-400 text-amber-800' : 'border-slate-300 text-emerald-700'
+                        }`}
+                        placeholder="0.00"
+                      />
+                      <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 font-bold pointer-events-none">
+                        {db.settings.currency}
+                      </span>
+                    </div>
+
+                    <div className="text-[8.5px] text-slate-500 text-center flex items-center justify-center gap-1">
+                      {isPriceModified ? (
+                        <span>السعر الأصلي: <strong>{itemCardDefaultPrice.toFixed(2)}</strong> (اضغط لاستعادته: <button type="button" onClick={() => setItemCardPrice(String(itemCardDefaultPrice))} className="text-blue-600 underline font-bold cursor-pointer">استعادة</button>)</span>
+                      ) : (
+                        <span className="text-emerald-700">السعر مضبوط، يمكنك الضغط على إضافة فوراً</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Optional Spec / Note */}
+                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+                  <label className="text-[10px] font-bold text-slate-700 block mb-1">
+                    ملاحظات أو مواصفات خاصة للصنف (اختياري)
+                  </label>
+                  <input
+                    type="text"
+                    value={itemCardSpec}
+                    onChange={e => setItemCardSpec(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        confirmAddItemFromCard(false);
+                      }
+                    }}
+                    placeholder="مثال: مقاس خاص، لون، رقم شحنة، تاريخ انتهاء..."
+                    className="w-full px-2.5 py-1 text-xs border border-slate-300 rounded bg-white text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+
+                {/* Real-time Total Display Box */}
+                <div className="bg-gradient-to-r from-slate-900 to-blue-950 text-white rounded-lg p-3 flex items-center justify-between shadow-inner">
+                  <div>
+                    <span className="text-[10px] text-slate-300 block">إجمالي هذا الصنف (الكمية × السعر):</span>
+                    <div className="flex items-center gap-1 text-[11px] text-blue-200 mt-0.5 font-mono">
+                      <span>{qtyNum}</span>
+                      <span>×</span>
+                      <span>{priceNum.toFixed(2)}</span>
+                    </div>
+                  </div>
+                  <div className="text-left font-mono">
+                    <span className="text-xl font-extrabold text-emerald-400 block leading-tight">
+                      {lineTotal.toFixed(2)}
+                    </span>
+                    <span className="text-[10px] text-slate-300">{db.settings.currency}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Buttons Footer */}
+              <div className="bg-slate-100 border-t border-slate-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowItemCardModal(false);
+                    setSelectedCardProduct(null);
+                  }}
+                  className="px-3 py-1.5 bg-white hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                >
+                  إلغاء (Esc)
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => confirmAddItemFromCard(false)}
+                    className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>✓ إضافة ومتابعة تصفح الدليل (Enter)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => confirmAddItemFromCard(true)}
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>✓ إضافة وإنهاء</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Invoice Audit Log Modal */}
       {showAuditModal && editingInvoice && (
