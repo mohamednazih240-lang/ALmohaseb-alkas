@@ -1193,3 +1193,93 @@ export function getBranchFinancialSummary(db: AccountingDB, branchId: string) {
     invoicesCount: branchSales.length + branchPurchases.length,
   };
 }
+
+/**
+ * Deletes an invoice and fully reverts all its inventory, accounting, treasury, and balance effects:
+ * - Returns stock to products in the exact invoice branch
+ * - Removes stock movements
+ * - Removes treasury movements
+ * - Removes double-entry journal entries
+ * - Removes return items (if return invoice)
+ * - Updates party (customer/supplier) balance
+ * - Logs comprehensive audit trail
+ */
+export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): AccountingDB {
+  const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  const targetBranch = invoice.branchId || 'br_main';
+
+  // 1. Revert stock for each item in the invoice's branch
+  invoice.items.forEach(oldItem => {
+    const prod = updated.products.find(p => p.id === oldItem.productId || p.code === oldItem.productCode);
+    if (prod) {
+      const bp = getProductForBranch(prod, targetBranch);
+      let revertedQty = bp.currentQty;
+
+      if (invoice.type === 'sale' || invoice.invoiceKind === 'sale' || invoice.invoiceKind === 'wholesale') {
+        // Sale had subtracted items -> add them back to inventory
+        revertedQty += oldItem.qty;
+      } else if (invoice.type === 'purchase' || invoice.invoiceKind === 'purchase') {
+        // Purchase had added items -> subtract them from inventory
+        revertedQty -= oldItem.qty;
+      } else if (invoice.invoiceKind === 'sale_return') {
+        // Sale return had added items -> subtract them from inventory
+        revertedQty -= oldItem.qty;
+      } else if (invoice.invoiceKind === 'purchase_return') {
+        // Purchase return had returned items -> add them back to inventory
+        revertedQty += oldItem.qty;
+      }
+
+      const updatedProd = updateProductBranchData(prod, targetBranch, { currentQty: revertedQty });
+      const pIdx = updated.products.findIndex(p => p.id === prod.id);
+      if (pIdx > -1) {
+        updated.products[pIdx] = updatedProd;
+      }
+    }
+  });
+
+  // 2. Remove related stock movements
+  updated.stockMovements = updated.stockMovements.filter(
+    sm => sm.sourceId !== invoice.id && sm.refNumber !== invoice.number
+  );
+
+  // 3. Remove treasury entries
+  updated.treasury = updated.treasury.filter(tr => tr.sourceId !== invoice.id);
+
+  // 4. Remove journal entry
+  updated.journals = updated.journals.filter(
+    j => j.sourceId !== invoice.id && j.id !== invoice.journalEntryId
+  );
+
+  // 5. Remove any return entries
+  if (updated.returns) {
+    updated.returns = updated.returns.filter(
+      r => r.originalInvoiceId !== invoice.id && r.number !== invoice.number
+    );
+  }
+
+  // 6. Remove the invoice itself
+  updated.invoices = updated.invoices.filter(i => i.id !== invoice.id);
+
+  // 7. Update party balance if party exists
+  if (invoice.partyId) {
+    const cust = updated.customers.find(c => c.id === invoice.partyId);
+    if (cust) {
+      cust.balance = calculateCustomerBalance(updated, cust.id);
+    }
+    const supp = updated.suppliers.find(s => s.id === invoice.partyId);
+    if (supp) {
+      supp.balance = calculateSupplierBalance(updated, supp.id);
+    }
+  }
+
+  // 8. Log audit trail
+  const invTypeName = invoice.type === 'purchase' ? 'فاتورة شراء' : 'فاتورة بيع';
+  logAudit(
+    updated,
+    `حذف ${invTypeName} وعكس التأثير بالكامل`,
+    `تم حذف الفاتورة ${invoice.number} وعكس المخزون (${invoice.items.length} أصناف) والخزينة والقيود المحاسبية والأرصدة بالكامل`
+  );
+
+  return updated;
+}
+

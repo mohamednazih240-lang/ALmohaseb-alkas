@@ -24,7 +24,8 @@ import {
 import {
   formatMoney,
   getTodayDate,
-  getProductForBranch
+  getProductForBranch,
+  deleteInvoiceAndRevert
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -240,26 +241,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       return;
     }
 
-    if (!confirm(`هل أنت متأكد من حذف الفاتورة "${inv.number}"؟ سيتم عكس المخزون والحسابات بالكامل.`)) {
+    if (!confirm(`هل أنت متأكد من حذف الفاتورة "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) {
       return;
     }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-
-    // 1. Revert stock
-    inv.items.forEach(oldItem => {
-      const prod = updated.products.find(p => p.id === oldItem.productId);
-      if (prod) {
-        prod.currentQty += oldItem.qty;
-      }
-    });
-
-    // 2. Remove related movements
-    updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== inv.id);
-    updated.treasury = updated.treasury.filter(tr => tr.sourceId !== inv.id);
-    updated.journals = updated.journals.filter(j => j.sourceId !== inv.id);
-    updated.invoices = updated.invoices.filter(i => i.id !== inv.id);
-
+    const updated = deleteInvoiceAndRevert(db, inv);
     onUpdateDb(updated);
   };
 

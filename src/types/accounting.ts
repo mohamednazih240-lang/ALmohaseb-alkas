@@ -95,9 +95,11 @@ export interface Party {
   code?: string;
   type: 'customer' | 'supplier';
   name: string;
+  company?: string;
   phone: string;
   address: string;
   openingBalance: number;
+  balance?: number;
   creditLimit: number;
   taxNumber?: string;
   notes?: string;
@@ -533,6 +535,7 @@ export interface UserPermissions {
 
 export interface AppSettings {
   company: string;
+  companyCode?: string; // كود الشركة الفريد لتسجيل الدخول والمزامنة المتعددة (Tenant Code)
   phone: string;
   address: string;
   currency: string;

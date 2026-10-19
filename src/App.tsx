@@ -87,10 +87,20 @@ export default function App() {
   // Modals
   const [showQuickSearch, setShowQuickSearch] = useState(false);
   const [previewInvoice, setPreviewInvoice] = useState<Invoice | null>(null);
+  const [editingInvoiceState, setEditingInvoiceState] = useState<Invoice | null>(null);
   const [productModalState, setProductModalState] = useState<{ isOpen: boolean; product?: Product | null }>({
     isOpen: false,
     product: null
   });
+
+  const handleEditInvoice = (inv: Invoice) => {
+    setEditingInvoiceState(inv);
+    if (inv.type === 'purchase' || inv.invoiceKind === 'purchase') {
+      navigateToPage('purchases');
+    } else {
+      navigateToPage('sales');
+    }
+  };
 
   // Mobile Back Button handlers for App-level overlays
   // When user hits phone back button while drawer or modal is open, it closes the modal without leaving the page!
@@ -405,6 +415,7 @@ export default function App() {
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
               onOpenPartyModal={() => navigateToPage('customers')}
               activeBranchId={activeBranchId}
+              initialEditingInvoice={editingInvoiceState}
             />
           )}
 
@@ -415,6 +426,7 @@ export default function App() {
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
               onOpenPartyModal={() => navigateToPage('suppliers')}
               activeBranchId={activeBranchId}
+              initialEditingInvoice={editingInvoiceState}
             />
           )}
 
@@ -474,9 +486,7 @@ export default function App() {
               db={db}
               onUpdateDb={handleUpdateDb}
               onPreviewInvoice={setPreviewInvoice}
-              onEditInvoice={(inv) => {
-                navigateToPage('sales');
-              }}
+              onEditInvoice={handleEditInvoice}
               activeBranchId={activeBranchId}
             />
           )}
@@ -564,6 +574,8 @@ export default function App() {
               onUpdateDb={handleUpdateDb}
               onOpenProductModal={(p) => setProductModalState({ isOpen: true, product: p })}
               activeBranchId={activeBranchId}
+              onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
+              onEditInvoice={handleEditInvoice}
             />
           )}
 

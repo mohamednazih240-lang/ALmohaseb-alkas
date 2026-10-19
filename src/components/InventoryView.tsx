@@ -23,14 +23,22 @@ import {
   Printer,
   Download,
   History,
-  Eye
+  Eye,
+  ArrowRight,
+  Calendar,
+  ShoppingCart,
+  ShoppingBag,
+  RotateCcw,
+  FileText,
+  DollarSign
 } from 'lucide-react';
 import {
   AccountingDB,
   Product,
   Warehouse as WarehouseType,
   StockAdjustment,
-  StockTransfer
+  StockTransfer,
+  Invoice
 } from '../types/accounting';
 import { mergeCatalogIntoDb } from '../data/defaultCatalog1001';
 import {
@@ -59,6 +67,8 @@ interface InventoryViewProps {
   onUpdateDb: (updated: AccountingDB) => void;
   onOpenProductModal: (p?: Product) => void;
   activeBranchId?: string;
+  onPreviewInvoice?: (inv: Invoice) => void;
+  onEditInvoice?: (inv: Invoice) => void;
 }
 
 export const InventoryView: React.FC<InventoryViewProps> = ({
@@ -66,7 +76,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   db,
   onUpdateDb,
   onOpenProductModal,
-  activeBranchId
+  activeBranchId,
+  onPreviewInvoice,
+  onEditInvoice
 }) => {
   const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
   const [selectedBranchId, setSelectedBranchId] = useState<string>(activeBranchId || branches[0]?.id || 'br_main');
@@ -77,6 +89,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   }, [activeBranchId]);
 
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedProductForMovement, setSelectedProductForMovement] = useState<Product | null>(null);
+  const [stockSearchQuery, setStockSearchQuery] = useState('');
+  const [stockMovementTypeFilter, setStockMovementTypeFilter] = useState<'all' | 'sale' | 'purchase' | 'returns'>('all');
 
   // Modals
   const [showWhModal, setShowWhModal] = useState(false);
@@ -1204,80 +1219,561 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         </>
       )}
 
-      {/* 3. STOCK MOVEMENTS (كارت حركة الصنف - Responsive Card System) */}
+      {/* 3. STOCK MOVEMENTS (قسم حركة الأصناف الشامل وتتبع كافة فواتير البيع والشراء) */}
       {subPage === 'stock' && (
         <>
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
-            <div>
-              <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-                <ArrowLeftRight className="w-6 h-6" />
-                <span>كارت حركة المخزون الشامل</span>
-              </h1>
-              <p className="text-xs text-slate-500 font-medium mt-0.5">
-                تتبع كل صادر ووارد مع الرصيد التراكمي الدقيق بنظام الكروت
-              </p>
-            </div>
-          </div>
+          {selectedProductForMovement ? (
+            /* DETAILED MOVEMENT PAGE FOR SELECTED ITEM */
+            (() => {
+              const product = selectedProductForMovement;
+              const bp = getProductForBranch(product, selectedBranchId);
 
-          {db.stockMovements.length === 0 ? (
-            <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs text-slate-400 text-xs">
-              لا توجد حركات مخزنية مسجلة حتى الآن
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
-              {db.stockMovements.map(sm => {
-                const isPositive = sm.qtyChange > 0;
-                return (
-                  <div
-                    key={sm.id}
-                    className="bg-white p-3.5 rounded-xl border border-slate-200 hover:border-slate-300 shadow-2xs hover:shadow-xs transition-all space-y-2"
-                  >
-                    <div className="flex items-start justify-between border-b border-slate-100 pb-2">
+              // Gather all transactions & invoices for this product
+              const itemMoves: {
+                id: string;
+                date: string;
+                time: string;
+                type: 'sale' | 'purchase' | 'sale_return' | 'purchase_return' | 'adjustment';
+                refNumber: string;
+                partyName: string;
+                qty: number; // positive or negative
+                unitPrice: number;
+                total: number;
+                invoiceTotal: number;
+                invoiceStatus: string;
+                invoice?: Invoice;
+                notes?: string;
+                branchName?: string;
+              }[] = [];
+
+              // Invoices
+              db.invoices.forEach(inv => {
+                const matchItems = inv.items.filter(
+                  it => it.productId === product.id || it.productCode === product.code
+                );
+                matchItems.forEach(it => {
+                  const isSale = inv.type === 'sale';
+                  let moveType: 'sale' | 'purchase' | 'sale_return' | 'purchase_return' = isSale ? 'sale' : 'purchase';
+                  if (inv.invoiceKind === 'sale_return') moveType = 'sale_return';
+                  else if (inv.invoiceKind === 'purchase_return') moveType = 'purchase_return';
+
+                  const qtySigned = (moveType === 'sale' || moveType === 'purchase_return') ? -it.qty : it.qty;
+
+                  itemMoves.push({
+                    id: `${inv.id}_${it.productId}`,
+                    date: inv.date,
+                    time: inv.time || '12:00',
+                    type: moveType,
+                    refNumber: inv.number,
+                    partyName: inv.partyName || (isSale ? 'عميل نقدي' : 'مورد عام'),
+                    qty: qtySigned,
+                    unitPrice: it.unitPrice,
+                    total: it.total,
+                    invoiceTotal: inv.total,
+                    invoiceStatus: inv.status || 'مدفوع',
+                    invoice: inv,
+                    notes: it.spec || inv.notes,
+                    branchName: inv.branchName || currentBranch.name
+                  });
+                });
+              });
+
+              // Adjustments
+              db.adjustments.forEach(adj => {
+                if (adj.productId === product.id) {
+                  itemMoves.push({
+                    id: adj.id,
+                    date: adj.date,
+                    time: '12:00',
+                    type: 'adjustment',
+                    refNumber: `تسوية-${adj.id.slice(-4)}`,
+                    partyName: 'تسوية جردية بالمستودع',
+                    qty: adj.diffQty,
+                    unitPrice: adj.unitCost,
+                    total: Math.abs(adj.diffQty * adj.unitCost),
+                    invoiceTotal: Math.abs(adj.diffQty * adj.unitCost),
+                    invoiceStatus: 'تمت التسوية',
+                    notes: adj.reason,
+                    branchName: currentBranch.name
+                  });
+                }
+              });
+
+              // Sort newest first
+              itemMoves.sort((a, b) => new Date(`${b.date}T${b.time || '00:00'}`).getTime() - new Date(`${a.date}T${a.time || '00:00'}`).getTime());
+
+              // Calculate stats
+              const totalPurchased = itemMoves
+                .filter(m => m.type === 'purchase' || m.type === 'sale_return')
+                .reduce((s, m) => s + Math.max(0, m.qty), 0);
+
+              const totalSold = itemMoves
+                .filter(m => m.type === 'sale' || m.type === 'purchase_return')
+                .reduce((s, m) => s + Math.abs(Math.min(0, m.qty)), 0);
+
+              const salesInvoicesCount = itemMoves.filter(m => m.type === 'sale').length;
+              const purchasesInvoicesCount = itemMoves.filter(m => m.type === 'purchase').length;
+
+              const filteredMoves = itemMoves.filter(m => {
+                if (stockMovementTypeFilter === 'sale') return m.type === 'sale';
+                if (stockMovementTypeFilter === 'purchase') return m.type === 'purchase';
+                if (stockMovementTypeFilter === 'returns') return m.type === 'sale_return' || m.type === 'purchase_return' || m.type === 'adjustment';
+                return true;
+              });
+
+              return (
+                <div className="space-y-4 animate-in fade-in duration-200">
+                  {/* Top Bar with Back Button */}
+                  <div className="bg-white p-3 sm:p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedProductForMovement(null)}
+                        className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+                      >
+                        <ArrowRight className="w-4 h-4" />
+                        <span>← الرجوع لقائمة الأصناف</span>
+                      </button>
+
                       <div>
-                        <span className="font-bold text-xs text-slate-900 block">{sm.productName}</span>
-                        <span className="text-[10px] text-slate-500 font-mono">{sm.date} • {sm.refNumber}</span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h2 className="text-lg sm:text-xl font-black text-slate-900 leading-tight">
+                            {product.name}
+                          </h2>
+                          <span className="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-xs font-mono font-bold">
+                            كود: {product.code}
+                          </span>
+                          {product.barcode && (
+                            <span className="px-2 py-0.5 bg-slate-100 text-slate-700 border border-slate-200 rounded text-xs font-mono">
+                              باركود: {product.barcode}
+                            </span>
+                          )}
+                          <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded text-xs">
+                            {product.category || 'عامة'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-500 font-medium mt-1">
+                          سجل حركة المبيعات والمشتريات الشامل • فرع: {currentBranch.name}
+                        </p>
                       </div>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        sm.type === 'sale' ? 'bg-slate-100 text-slate-900' :
-                        sm.type === 'purchase' ? 'bg-emerald-100 text-emerald-800' :
-                        sm.type === 'adjustment' ? 'bg-purple-100 text-purple-800' :
-                        'bg-slate-200 text-slate-800'
-                      }`}>
-                        {sm.type === 'sale' ? 'فاتورة بيع' :
-                         sm.type === 'purchase' ? 'فاتورة شراء' :
-                         sm.type === 'sale_return' ? 'مرتجع مبيعات' :
-                         sm.type === 'purchase_return' ? 'مرتجع مشتريات' :
-                         sm.type === 'adjustment' ? 'تسوية جرد' : sm.type}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 justify-end">
+                      <button
+                        type="button"
+                        onClick={() => handlePrintItemCard(product)}
+                        className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>طباعة كارت حركة الصنف</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpenProductModal(product)}
+                        className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                      >
+                        <Edit className="w-3.5 h-3.5 text-blue-600" />
+                        <span>تعديل الصنف</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 4 Summary Stats Cards */}
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3.5">
+                    <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                      <span className="text-[11px] font-bold text-slate-500 block mb-1">
+                        الرصيد المتاح الحالي ({currentBranch.name})
+                      </span>
+                      <div className="flex items-baseline gap-1">
+                        <span className={`text-xl sm:text-2xl font-black font-mono ${
+                          bp.currentQty <= 0 ? 'text-rose-600' : 'text-emerald-700'
+                        }`}>
+                          {bp.currentQty}
+                        </span>
+                        <span className="text-xs font-bold text-slate-500">{product.unit || 'قطعة'}</span>
+                      </div>
+                      <span className="text-[9.5px] text-slate-400 block mt-0.5">
+                        حد الطلب الأدنى: {bp.minStock || 5}
                       </span>
                     </div>
 
-                    <div className="text-xs space-y-1.5">
-                      <div className="flex items-center justify-between text-slate-600">
-                        <span>المستودع:</span>
-                        <span className="font-medium text-slate-800">{sm.warehouseName}</span>
+                    <div className="bg-white p-3 rounded-xl border border-emerald-200 shadow-2xs">
+                      <span className="text-[11px] font-bold text-emerald-800 block mb-1">
+                        إجمالي المشتريات الواردة
+                      </span>
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-xl sm:text-2xl font-black font-mono text-emerald-700">
+                          +{totalPurchased}
+                        </span>
+                        <span className="text-xs font-bold text-slate-500">{product.unit || 'قطعة'}</span>
                       </div>
+                      <span className="text-[9.5px] text-emerald-600 block mt-0.5">
+                        من {purchasesInvoicesCount} فاتورة شراء
+                      </span>
+                    </div>
 
-                      <div className="bg-slate-50 p-2 rounded-lg grid grid-cols-3 gap-1 text-center border border-slate-100">
-                        <div>
-                          <span className="text-[10px] text-slate-500 block">حركة الكمية</span>
-                          <span className={`font-mono font-black text-xs ${isPositive ? 'text-emerald-700' : 'text-rose-700'}`}>
-                            {isPositive ? `+${sm.qtyChange}` : sm.qtyChange}
-                          </span>
+                    <div className="bg-white p-3 rounded-xl border border-blue-200 shadow-2xs">
+                      <span className="text-[11px] font-bold text-blue-800 block mb-1">
+                        إجمالي المبيعات المنصرفة
+                      </span>
+                      <div className="flex items-baseline gap-1">
+                        <span className="text-xl sm:text-2xl font-black font-mono text-blue-700">
+                          -{totalSold}
+                        </span>
+                        <span className="text-xs font-bold text-slate-500">{product.unit || 'قطعة'}</span>
+                      </div>
+                      <span className="text-[9.5px] text-blue-600 block mt-0.5">
+                        في {salesInvoicesCount} فاتورة بيع
+                      </span>
+                    </div>
+
+                    <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                      <span className="text-[11px] font-bold text-slate-500 block mb-1">
+                        أسعار الصنف بالفرع
+                      </span>
+                      <div className="text-[10px] space-y-0.5 font-bold">
+                        <div className="flex justify-between text-slate-700">
+                          <span>سعر البيع:</span>
+                          <span className="font-mono text-emerald-700">{formatMoney(bp.sellPrice, db.settings.currency)}</span>
                         </div>
-                        <div>
-                          <span className="text-[10px] text-slate-500 block">الرصيد بعدها</span>
-                          <span className="font-mono font-bold text-xs text-slate-950">{sm.balanceAfter}</span>
+                        <div className="flex justify-between text-slate-700">
+                          <span>سعر الشراء:</span>
+                          <span className="font-mono text-blue-700">{formatMoney(bp.buyPrice, db.settings.currency)}</span>
                         </div>
-                        <div>
-                          <span className="text-[10px] text-slate-500 block">تكلفة الوحدة</span>
-                          <span className="font-mono text-xs text-slate-700">{formatMoney(sm.unitCost, db.settings.currency)}</span>
+                        <div className="flex justify-between text-slate-700">
+                          <span>سعر الجملة:</span>
+                          <span className="font-mono text-amber-700">{formatMoney(bp.wholesalePrice, db.settings.currency)}</span>
                         </div>
                       </div>
                     </div>
                   </div>
+
+                  {/* Filter Pills */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-100 p-1.5 rounded-lg border border-slate-200">
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs font-bold">
+                      <button
+                        type="button"
+                        onClick={() => setStockMovementTypeFilter('all')}
+                        className={`px-3 py-1.5 rounded-md transition-all cursor-pointer ${
+                          stockMovementTypeFilter === 'all'
+                            ? 'bg-slate-900 text-white shadow-xs'
+                            : 'bg-white text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        جميع الفواتير والتحركات ({itemMoves.length})
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setStockMovementTypeFilter('sale')}
+                        className={`px-3 py-1.5 rounded-md transition-all cursor-pointer flex items-center gap-1 ${
+                          stockMovementTypeFilter === 'sale'
+                            ? 'bg-blue-600 text-white shadow-xs font-black'
+                            : 'bg-white text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        <ShoppingCart className="w-3.5 h-3.5" />
+                        <span>فواتير البيع ({salesInvoicesCount})</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setStockMovementTypeFilter('purchase')}
+                        className={`px-3 py-1.5 rounded-md transition-all cursor-pointer flex items-center gap-1 ${
+                          stockMovementTypeFilter === 'purchase'
+                            ? 'bg-emerald-600 text-white shadow-xs font-black'
+                            : 'bg-white text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        <ShoppingBag className="w-3.5 h-3.5" />
+                        <span>فواتير الشراء ({purchasesInvoicesCount})</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setStockMovementTypeFilter('returns')}
+                        className={`px-3 py-1.5 rounded-md transition-all cursor-pointer flex items-center gap-1 ${
+                          stockMovementTypeFilter === 'returns'
+                            ? 'bg-amber-600 text-white shadow-xs font-black'
+                            : 'bg-white text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>المرتجعات والتسويات ({itemMoves.length - salesInvoicesCount - purchasesInvoicesCount})</span>
+                      </button>
+                    </div>
+
+                    <span className="text-[10px] text-slate-500 font-bold px-2">
+                      اضغط على أي فاتورة لمعاينتها أو اضغط "تعديل" لتعديل الفاتورة مباشرة
+                    </span>
+                  </div>
+
+                  {/* Movements and Invoices Table */}
+                  {filteredMoves.length === 0 ? (
+                    <div className="p-12 text-center bg-white rounded-xl border border-slate-200 text-slate-400 text-xs">
+                      لا توجد فواتير أو حركات مطابقة لهذا الفلتر
+                    </div>
+                  ) : (
+                    <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-right text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold text-[11px]">
+                              <th className="py-2.5 px-3">التاريخ والوقت</th>
+                              <th className="py-2.5 px-3">رقم الفاتورة</th>
+                              <th className="py-2.5 px-3">نوع الحركة</th>
+                              <th className="py-2.5 px-3">الطرف (العميل / المورد)</th>
+                              <th className="py-2.5 px-3 text-center">الكمية</th>
+                              <th className="py-2.5 px-3 text-center">سعر الوحدة</th>
+                              <th className="py-2.5 px-3 text-center">إجمالي البند</th>
+                              <th className="py-2.5 px-3 text-center">إجمالي الفاتورة</th>
+                              <th className="py-2.5 px-3 text-center">حالة الفاتورة</th>
+                              <th className="py-2.5 px-3 text-center">الإجراءات</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {filteredMoves.map(m => {
+                              const isPositive = m.qty > 0;
+                              return (
+                                <tr
+                                  key={m.id}
+                                  className="hover:bg-blue-50/40 transition-colors cursor-pointer group"
+                                  onClick={() => {
+                                    if (m.invoice && onPreviewInvoice) {
+                                      onPreviewInvoice(m.invoice);
+                                    }
+                                  }}
+                                >
+                                  <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 whitespace-nowrap">
+                                    {m.date} <span className="text-slate-400 text-[10px]">({m.time})</span>
+                                  </td>
+
+                                  <td className="py-2.5 px-3 font-mono font-bold text-slate-900 whitespace-nowrap">
+                                    {m.refNumber}
+                                  </td>
+
+                                  <td className="py-2.5 px-3 whitespace-nowrap">
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                      m.type === 'sale' ? 'bg-blue-100 text-blue-800' :
+                                      m.type === 'purchase' ? 'bg-emerald-100 text-emerald-800' :
+                                      m.type === 'sale_return' ? 'bg-amber-100 text-amber-800' :
+                                      m.type === 'purchase_return' ? 'bg-orange-100 text-orange-800' :
+                                      'bg-purple-100 text-purple-800'
+                                    }`}>
+                                      {m.type === 'sale' ? 'فاتورة بيع' :
+                                       m.type === 'purchase' ? 'فاتورة شراء' :
+                                       m.type === 'sale_return' ? 'مرتجع مبيعات' :
+                                       m.type === 'purchase_return' ? 'مرتجع مشتريات' :
+                                       'تسوية جرد'}
+                                    </span>
+                                  </td>
+
+                                  <td className="py-2.5 px-3 font-bold text-slate-800">
+                                    {m.partyName}
+                                    {m.notes && <span className="text-[10px] text-slate-400 block font-normal truncate max-w-[140px]">{m.notes}</span>}
+                                  </td>
+
+                                  <td className="py-2.5 px-3 text-center font-mono font-black text-xs whitespace-nowrap">
+                                    <span className={isPositive ? 'text-emerald-700' : 'text-rose-700'}>
+                                      {isPositive ? `+${m.qty}` : m.qty}
+                                    </span>
+                                  </td>
+
+                                  <td className="py-2.5 px-3 text-center font-mono text-slate-700 whitespace-nowrap">
+                                    {formatMoney(m.unitPrice, db.settings.currency)}
+                                  </td>
+
+                                  <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-900 whitespace-nowrap">
+                                    {formatMoney(m.total, db.settings.currency)}
+                                  </td>
+
+                                  <td className="py-2.5 px-3 text-center font-mono text-slate-800 whitespace-nowrap">
+                                    {formatMoney(m.invoiceTotal, db.settings.currency)}
+                                  </td>
+
+                                  <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                      m.invoiceStatus === 'مدفوع' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                                      m.invoiceStatus === 'جزئي' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                                      'bg-amber-50 text-amber-700 border border-amber-200'
+                                    }`}>
+                                      {m.invoiceStatus}
+                                    </span>
+                                  </td>
+
+                                  <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                                    <div className="flex items-center justify-center gap-1.5">
+                                      {m.invoice && onPreviewInvoice && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onPreviewInvoice(m.invoice!)}
+                                          className="p-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-md transition-all flex items-center gap-1 text-[10px] font-bold cursor-pointer"
+                                          title="معاينة الفاتورة كاملة وطباعتها"
+                                        >
+                                          <Eye className="w-3.5 h-3.5" />
+                                          <span className="hidden sm:inline">معاينة</span>
+                                        </button>
+                                      )}
+
+                                      {m.invoice && onEditInvoice && (
+                                        <button
+                                          type="button"
+                                          onClick={() => onEditInvoice(m.invoice!)}
+                                          className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-md transition-all flex items-center gap-1 text-[10px] font-bold cursor-pointer"
+                                          title="تعديل الفاتورة في محرر الفواتير"
+                                        >
+                                          <Edit className="w-3.5 h-3.5" />
+                                          <span className="hidden sm:inline">تعديل</span>
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()
+          ) : (
+            /* PRODUCT SELECTION HUB (ابحث عن أي صنف واضغط عليه) */
+            <>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
+                <div>
+                  <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
+                    <ArrowLeftRight className="w-6 h-6 text-blue-600" />
+                    <span>قسم حركة الأصناف الشامل وتتبع الفواتير</span>
+                  </h1>
+                  <p className="text-xs text-slate-500 font-medium mt-0.5">
+                    ابحث عن أي صنف بالاسم أو الكود واضغط عليه لعرض كافة فواتير البيع وفواتير الشراء مع المعاينة والتعديل المباشر
+                  </p>
+                </div>
+              </div>
+
+              {/* Instant Search Bar for Products */}
+              <div className="relative">
+                <div className="flex items-center gap-2 bg-white border-2 border-blue-500 rounded-xl p-2.5 shadow-sm">
+                  <Search className="w-5 h-5 text-blue-600 shrink-0" />
+                  <input
+                    type="text"
+                    placeholder="ابحث عن أي صنف بالاسم، الكود، الباركود أو المجموعة لمعاينة تحركاته وفواتيره..."
+                    value={stockSearchQuery}
+                    onChange={e => setStockSearchQuery(e.target.value)}
+                    className="flex-1 text-xs sm:text-sm font-bold text-slate-900 outline-none bg-transparent"
+                    autoFocus
+                  />
+                  {stockSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setStockSearchQuery('')}
+                      className="p-1 text-slate-400 hover:text-slate-700 rounded"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Products Grid */}
+              {(() => {
+                const q = stockSearchQuery.trim().toLowerCase();
+                const matchedProducts = db.products.filter(p => {
+                  if (!q) return true;
+                  return (
+                    p.name.toLowerCase().includes(q) ||
+                    p.code.toLowerCase().includes(q) ||
+                    (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+                    (p.category && p.category.toLowerCase().includes(q))
+                  );
+                });
+
+                if (matchedProducts.length === 0) {
+                  return (
+                    <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs text-slate-400 text-xs">
+                      لا توجد أصناف مطابقة للبحث "{stockSearchQuery}"
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-500 px-1">
+                      <span>الأصناف المتاحة: {matchedProducts.length} صنف (اضغط على أي صنف لفتح شاشة تحركاته وفواتيره)</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                      {matchedProducts.map(p => {
+                        const bp = getProductForBranch(p, selectedBranchId);
+                        
+                        // Count invoices
+                        const salesCount = db.invoices.filter(
+                          inv => inv.type === 'sale' && inv.items.some(it => it.productId === p.id || it.productCode === p.code)
+                        ).length;
+
+                        const purchasesCount = db.invoices.filter(
+                          inv => inv.type === 'purchase' && inv.items.some(it => it.productId === p.id || it.productCode === p.code)
+                        ).length;
+
+                        return (
+                          <div
+                            key={p.id}
+                            onClick={() => {
+                              setSelectedProductForMovement(p);
+                              window.scrollTo({ top: 0, behavior: 'smooth' });
+                            }}
+                            className="bg-white p-3.5 rounded-xl border border-slate-200 hover:border-blue-500 shadow-2xs hover:shadow-md transition-all cursor-pointer flex flex-col justify-between group space-y-2.5"
+                          >
+                            <div className="flex items-start justify-between border-b border-slate-100 pb-2">
+                              <div>
+                                <span className="font-bold text-sm text-slate-900 group-hover:text-blue-600 transition-colors block">
+                                  {p.name}
+                                </span>
+                                <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-500 font-mono">
+                                  <span className="font-bold text-blue-700">كود: {p.code}</span>
+                                  {p.barcode && <span>• باركود: {p.barcode}</span>}
+                                  <span>• {p.category || 'عامة'}</span>
+                                </div>
+                              </div>
+
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                bp.currentQty <= 0 ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'
+                              }`}>
+                                رصيد: {bp.currentQty} {p.unit || 'قطعة'}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 text-center text-xs bg-slate-50 p-2 rounded-lg border border-slate-100">
+                              <div className="border-l border-slate-200">
+                                <span className="text-[10px] text-slate-500 block">فواتير البيع</span>
+                                <span className="font-bold text-blue-700">{salesCount} فاتورة</span>
+                              </div>
+                              <div>
+                                <span className="text-[10px] text-slate-500 block">فواتير الشراء</span>
+                                <span className="font-bold text-emerald-700">{purchasesCount} فاتورة</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100">
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                بيع: {formatMoney(bp.sellPrice, db.settings.currency)}
+                              </span>
+                              <span className="text-blue-600 font-bold flex items-center gap-1 group-hover:translate-x-[-3px] transition-transform text-[11px]">
+                                <span>عرض كارت التحركات والفواتير</span>
+                                <ArrowLeftRight className="w-3.5 h-3.5" />
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 );
-              })}
-            </div>
+              })()}
+            </>
           )}
         </>
       )}

@@ -27,7 +27,9 @@ import {
   CheckCircle2,
   AlertCircle,
   Minus,
-  Edit3
+  Edit3,
+  Wallet,
+  CreditCard
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -254,21 +256,36 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [liveTime, setLiveTime] = useState<string>('00:00');
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
 
+  // Settlement / Payment Type Choice (نقدي كاش vs آجل ذمم vs سداد جزئي)
+  const [settlementType, setSettlementType] = useState<'cash' | 'credit' | 'partial'>('cash');
+  const [partialPaidInput, setPartialPaidInput] = useState<string>('');
+
+  // Fast on-the-fly item creation modal states (إضافة صنف غير موجود فوراً بالمخزون والفاتورة)
+  const [showFastCreateModal, setShowFastCreateModal] = useState<boolean>(false);
+  const [fastItemName, setFastItemName] = useState<string>('');
+  const [fastItemQty, setFastItemQty] = useState<string>('');
+  const [fastItemPrice, setFastItemPrice] = useState<string>('');
+  const [fastItemUnit, setFastItemUnit] = useState<string>('قطعة');
+  const [fastItemCategory, setFastItemCategory] = useState<string>('عامة');
+
   // Detailed Item Card Modal states (كارت تفاصيل الصنف لتحديد الكمية وتعديل/تأكيد السعر قبل الإضافة)
   const [selectedCardProduct, setSelectedCardProduct] = useState<Product | null>(null);
-  const [itemCardQty, setItemCardQty] = useState<string>('1');
-  const [itemCardPrice, setItemCardPrice] = useState<string>('0');
+  const [itemCardQty, setItemCardQty] = useState<string>('');
+  const [itemCardPrice, setItemCardPrice] = useState<string>('');
   const [itemCardDefaultPrice, setItemCardDefaultPrice] = useState<number>(0);
   const [itemCardSpec, setItemCardSpec] = useState<string>('');
   const [showItemCardModal, setShowItemCardModal] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3500);
+  };
   const itemQtyInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (showItemCardModal) {
       setTimeout(() => {
         itemQtyInputRef.current?.focus();
-        itemQtyInputRef.current?.select();
       }, 50);
     }
   }, [showItemCardModal]);
@@ -302,6 +319,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setInvTaxType(editingInvoice.taxType || 'percent');
       setExtraIncomeName(editingInvoice.extraIncomeName || '');
       setExtraIncomeVal(editingInvoice.extraIncomeVal ? String(editingInvoice.extraIncomeVal) : '');
+
+      if (editingInvoice.remaining > 0 && editingInvoice.paid === 0) {
+        setSettlementType('credit');
+        setPartialPaidInput('');
+      } else if (editingInvoice.remaining > 0 && editingInvoice.paid > 0) {
+        setSettlementType('partial');
+        setPartialPaidInput(String(editingInvoice.paid));
+      } else {
+        setSettlementType('cash');
+        setPartialPaidInput('');
+      }
 
       if (editingInvoice.payments && editingInvoice.payments.length > 0) {
         setPaymentRows([...editingInvoice.payments]);
@@ -422,10 +450,19 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const netTotal = Math.max(0, itemsSubTotal - globalDiscCalculated + globalTaxCalculated + extraIncome);
 
   let paidTotal = 0;
-  if (paymentRows.length === 0) {
+  if (settlementType === 'cash') {
     paidTotal = netTotal;
+  } else if (settlementType === 'credit') {
+    paidTotal = 0;
+  } else if (settlementType === 'partial') {
+    const p = parseFloat(partialPaidInput) || 0;
+    paidTotal = Math.min(netTotal, Math.max(0, p));
   } else {
-    paidTotal = paymentRows.reduce((s, r) => s + Math.max(0, Number(r.amount) || 0), 0);
+    if (paymentRows.length === 0) {
+      paidTotal = netTotal;
+    } else {
+      paidTotal = paymentRows.reduce((s, r) => s + Math.max(0, Number(r.amount) || 0), 0);
+    }
   }
   const remainTotal = Math.max(0, netTotal - paidTotal);
 
@@ -487,8 +524,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     }
 
     setSelectedCardProduct(prod);
-    setItemCardQty('1');
-    setItemCardPrice(defPrice.toString());
+    setItemCardQty(''); // Empty string! No pre-filled numbers or zeroes!
+    setItemCardPrice(''); // Empty string! No pre-filled numbers or zeroes!
     setItemCardDefaultPrice(defPrice);
     setItemCardSpec('');
     setShowItemCardModal(true);
@@ -498,14 +535,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const confirmAddItemFromCard = (closeCatalog: boolean = false) => {
     if (!selectedCardProduct) return;
     const qty = parseFloat(itemCardQty);
-    const unitPrice = parseFloat(itemCardPrice);
+    let unitPrice = itemCardPrice.trim() !== '' ? parseFloat(itemCardPrice) : itemCardDefaultPrice;
 
     if (isNaN(qty) || qty <= 0) {
-      alert('يرجى إدخال كمية صحيحة أكبر من الصفر');
+      alert('يرجى إدخال الكمية أو العدد للصنف (الخانة خالية حالياً)');
       return;
     }
     if (isNaN(unitPrice) || unitPrice < 0) {
-      alert('يرجى إدخال سعر صحيح (صفر أو أكثر)');
+      alert('يرجى إدخال سعر الصنف (الخانة خالية حالياً)');
       return;
     }
 
@@ -563,6 +600,125 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (closeCatalog) {
       setShowLookupModal(false);
     }
+  };
+
+  // Fast on-the-fly item creation & registration into DB and invoice
+  const confirmFastCreateItem = () => {
+    const name = fastItemName.trim();
+    if (!name) {
+      alert('يرجى إدخال اسم الصنف أو البند');
+      return;
+    }
+    const qty = parseFloat(fastItemQty);
+    const price = parseFloat(fastItemPrice);
+
+    if (isNaN(qty) || qty <= 0) {
+      alert('يرجى إدخال كمية أو عدد الصنف');
+      return;
+    }
+    if (isNaN(price) || price < 0) {
+      alert('يرجى إدخال سعر الصنف');
+      return;
+    }
+
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    const newCode = `P-${String(1000 + updated.products.length + 1)}`;
+    const newId = generateId('prod');
+
+    // The product starts with 0 stock in inventory, and saving the invoice will record the movement (negative for sale, positive for purchase)
+    const isSale = mode === 'sale' || mode === 'wholesale';
+    const initialQty = 0;
+
+    const newProd: Product = {
+      id: newId,
+      code: newCode,
+      barcode: '',
+      name,
+      category: fastItemCategory || 'عامة',
+      unit: fastItemUnit || 'قطعة',
+      buyPrice: mode === 'purchase' ? price : (price * 0.8),
+      sellPrice: mode === 'purchase' ? (price * 1.25) : price,
+      wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+      minStock: 5,
+      currentQty: initialQty,
+      avgCost: mode === 'purchase' ? price : (price * 0.8),
+      branchesData: {
+        [invoiceBranchId]: {
+          currentQty: initialQty,
+          buyPrice: mode === 'purchase' ? price : (price * 0.8),
+          sellPrice: mode === 'purchase' ? (price * 1.25) : price,
+          wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+          minStock: 5,
+          avgCost: mode === 'purchase' ? price : (price * 0.8)
+        }
+      }
+    };
+
+    updated.products.push(newProd);
+    logAudit(updated, `إثبات صنف جديد أثناء البحث بالفاتورة (${invoiceBranch.name})`, `${newProd.name} (كود: ${newProd.code}) - الرصيد: ${initialQty}`);
+    onUpdateDb(updated);
+
+    const newItem: InvoiceItem = {
+      productId: newProd.id,
+      productCode: newProd.code,
+      productName: newProd.name,
+      unit: newProd.unit,
+      spec: isSale ? 'صنف جديد مضاف أثناء البيع (بالسالب)' : 'صنف جديد مضاف أثناء الشراء',
+      qty,
+      unitPrice: price,
+      costPrice: newProd.buyPrice,
+      discount: 0,
+      taxRate: 0,
+      total: qty * price
+    };
+
+    setInvoiceItems(prev => [...prev, newItem]);
+    setShowFastCreateModal(false);
+    setInlineProductSearch('');
+    setShowInlineDropdown(false);
+    setShowLookupModal(false);
+
+    showToast(`✓ تم إثبات الصنف "${name}" بالمخزون بنجاح وتسجيله${isSale ? ` بالسالب (${initialQty})` : ` (+${initialQty})`} وإدراجه بالفاتورة`);
+  };
+
+  // Quick Register Party (عميل / مورد / شركة)
+  const quickRegisterParty = (partyNameInput?: string) => {
+    const pName = (partyNameInput || custSearchInput).trim();
+    if (!pName) {
+      alert(`يرجى كتابة اسم ${theme.partyLabel} / الشركة أولاً`);
+      return;
+    }
+
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    const isCust = theme.partyRole === 'customer';
+    const list = isCust ? updated.customers : updated.suppliers;
+    const prefix = isCust ? 'C-' : 'S-';
+    const newCode = `${prefix}${String(list.length + 1).padStart(3, '0')}`;
+    const newId = generateId('party');
+
+    const newParty: Party = {
+      id: newId,
+      code: newCode,
+      name: pName,
+      company: pName,
+      phone: custPhone.trim() || '',
+      address: '',
+      type: theme.partyRole,
+      balance: 0,
+      openingBalance: 0,
+      creditLimit: 0,
+      notes: 'تم التسجيل والإثبات أثناء إنشاء الفاتورة'
+    };
+
+    list.push(newParty);
+    logAudit(updated, `إثبات ${theme.partyLabel} / شركة جديدة`, `${newParty.name} (${newParty.code})`);
+    onUpdateDb(updated);
+
+    setSelectedParty(newParty);
+    setCustCode(newParty.code || '');
+    setCustSearchInput(newParty.name);
+    setShowCustDropdown(false);
+    showToast(`✓ تم إثبات وتسجيل شركة/طرف جديد: "${newParty.name}" (كود: ${newParty.code})`);
   };
 
   // Modify row modal
@@ -678,21 +834,60 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
-    // Check Party
+    // Check Party and auto-register if new
     const partyName = custSearchInput.trim() || (theme.partyRole === 'customer' ? 'عميل نقدي' : 'مورد عام');
-    const partyId = selectedParty?.id;
+    let activePartyId = selectedParty?.id;
+    let activePartyCode = custCode;
+    const isCust = theme.partyRole === 'customer';
+    const targetPartyList = isCust ? updated.customers : updated.suppliers;
 
-    // Determine final status & payment method
+    if (!activePartyId && custSearchInput.trim()) {
+      const existing = targetPartyList.find(p => p.name.trim().toLowerCase() === custSearchInput.trim().toLowerCase());
+      if (existing) {
+        activePartyId = existing.id;
+        activePartyCode = existing.code || '';
+      } else {
+        const prefix = isCust ? 'C-' : 'S-';
+        const newCode = `${prefix}${String(targetPartyList.length + 1).padStart(3, '0')}`;
+        const newPartyId = generateId('party');
+        const newlyCreated: Party = {
+          id: newPartyId,
+          code: newCode,
+          name: custSearchInput.trim(),
+          company: custSearchInput.trim(),
+          phone: custPhone.trim() || '',
+          address: '',
+          type: theme.partyRole,
+          balance: 0,
+          openingBalance: 0,
+          creditLimit: 0,
+          notes: 'تم الإثبات والتسجيل أثناء حفظ الفاتورة'
+        };
+        targetPartyList.push(newlyCreated);
+        activePartyId = newPartyId;
+        activePartyCode = newCode;
+      }
+    }
+
+    // Determine final status & payment method based on settlementType
     let finalPaid = paidTotal;
     let finalRemaining = remainTotal;
     let mainPaymentMethod: PaymentMethod = 'نقدي';
 
-    if (paymentRows.length === 1) {
-      mainPaymentMethod = paymentRows[0].method;
-    } else if (paymentRows.length > 1) {
-      mainPaymentMethod = paymentRows[0].method;
+    if (settlementType === 'credit') {
+      mainPaymentMethod = 'آجل';
+      finalPaid = 0;
+      finalRemaining = netTotal;
+    } else if (settlementType === 'cash') {
+      mainPaymentMethod = 'نقدي';
+      finalPaid = netTotal;
+      finalRemaining = 0;
     } else {
-      mainPaymentMethod = finalRemaining > 0 && finalPaid === 0 ? 'آجل' : 'نقدي';
+      mainPaymentMethod = finalPaid > 0 ? 'نقدي' : 'آجل';
+    }
+
+    if (paymentRows.length > 0) {
+      mainPaymentMethod = paymentRows[0].method;
     }
 
     let status: 'مدفوع' | 'جزئي' | 'آجل' = 'مدفوع';
@@ -708,8 +903,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         if (prod) {
           const bp = getProductForBranch(prod, prevBranchId);
           let revertedQty = bp.currentQty;
-          if (editingInvoice.type === 'sale') revertedQty += oldItem.qty;
-          else revertedQty = Math.max(0, revertedQty - oldItem.qty);
+          if (editingInvoice.type === 'sale' || editingInvoice.invoiceKind === 'sale' || editingInvoice.invoiceKind === 'wholesale') {
+            revertedQty += oldItem.qty;
+          } else if (editingInvoice.type === 'purchase' || editingInvoice.invoiceKind === 'purchase') {
+            revertedQty -= oldItem.qty;
+          } else if (editingInvoice.invoiceKind === 'sale_return') {
+            revertedQty -= oldItem.qty;
+          } else if (editingInvoice.invoiceKind === 'purchase_return') {
+            revertedQty += oldItem.qty;
+          }
           const updatedProd = updateProductBranchData(prod, prevBranchId, { currentQty: revertedQty });
           const pIdx = updated.products.findIndex(p => p.id === prod.id);
           if (pIdx > -1) updated.products[pIdx] = updatedProd;
@@ -820,8 +1022,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       time: invTime,
       jobSite,
       priceType,
-      partyId,
-      partyCode: custCode,
+      partyId: activePartyId,
+      partyCode: activePartyCode,
       partyName,
       partyPhone: custPhone,
       warehouseId: updated.warehouses[0]?.id || 'wh_main',
@@ -882,7 +1084,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           newQty += item.qty;
         } else if (mode === 'purchase_return') {
           qtyChange = -item.qty;
-          newQty = Math.max(0, newQty - item.qty);
+          newQty -= item.qty;
         }
 
         const updatedProd = updateProductBranchData(prod, invoiceBranchId, {
@@ -1186,11 +1388,24 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             </div>
 
             <div className="flex flex-col gap-0.5 relative col-span-1 sm:col-span-2">
-              <label className="font-bold text-slate-600 text-[8px]">اسم {theme.partyLabel} (بحث)</label>
+              <div className="flex items-center justify-between">
+                <label className="font-bold text-slate-600 text-[8px]">اسم {theme.partyLabel} / الشركة (بحث)</label>
+                {custSearchInput.trim().length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => quickRegisterParty(custSearchInput)}
+                    className="text-[7.5px] font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-0.5"
+                    title="تسجيل هذه الشركة في الدليل"
+                  >
+                    <Plus className="w-2.5 h-2.5" />
+                    <span>إثبات جديد</span>
+                  </button>
+                )}
+              </div>
               <input
                 type="text"
                 value={custSearchInput}
-                placeholder="اكتب للبحث..."
+                placeholder="اكتب اسم الشركة أو العميل أو رقمه..."
                 onFocus={() => setShowCustDropdown(true)}
                 onChange={e => {
                   setCustSearchInput(e.target.value);
@@ -1200,17 +1415,45 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               />
               {/* Autocomplete Dropdown */}
               {showCustDropdown && (
-                <div className="absolute top-full right-0 left-0 bg-white border border-blue-600 rounded max-h-28 overflow-y-auto z-50 shadow-lg mt-0.5">
+                <div className="absolute top-full right-0 left-0 bg-white border border-blue-600 rounded-lg max-h-36 overflow-y-auto z-50 shadow-xl mt-0.5 divide-y divide-slate-100">
+                  {custSearchInput.trim().length > 0 && (
+                    <div
+                      onClick={() => quickRegisterParty(custSearchInput)}
+                      className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 cursor-pointer flex items-center justify-between text-[9px] font-bold transition-colors"
+                    >
+                      <span className="flex items-center gap-1">
+                        <Plus className="w-3 h-3 text-emerald-700" />
+                        <span>+ إثبات وتسجيل "{custSearchInput}" كشركة جديدة فوراً</span>
+                      </span>
+                      <span className="bg-emerald-600 text-white text-[7.5px] px-1.5 py-0.2 rounded">حفظ بالنظام</span>
+                    </div>
+                  )}
+
                   {partiesList
-                    .filter(p => p.name.toLowerCase().includes(custSearchInput.toLowerCase()) || (p.code && p.code.includes(custSearchInput)))
+                    .filter(p => {
+                      const q = custSearchInput.trim().toLowerCase();
+                      if (!q) return true;
+                      return (
+                        p.name.toLowerCase().includes(q) ||
+                        (p.code && p.code.toLowerCase().includes(q)) ||
+                        (p.phone && p.phone.includes(q)) ||
+                        (p.company && p.company.toLowerCase().includes(q))
+                      );
+                    })
+                    .slice(0, 15)
                     .map(p => (
                       <div
                         key={p.id}
                         onClick={() => selectParty(p)}
-                        className="p-1 text-[9px] hover:bg-blue-50 cursor-pointer border-b border-slate-100 flex items-center justify-between"
+                        className="p-1.5 text-[9px] hover:bg-blue-50 cursor-pointer flex items-center justify-between transition-colors"
                       >
-                        <span className="font-bold text-slate-900">{p.code || '—'} - {p.name}</span>
-                        <span className="text-[8px] text-slate-400 font-mono">{p.phone}</span>
+                        <div>
+                          <span className="font-bold text-slate-900">{p.code ? `[${p.code}] ` : ''}{p.name}</span>
+                          {p.company && p.company !== p.name && (
+                            <span className="text-[8px] text-slate-500 block">{p.company}</span>
+                          )}
+                        </div>
+                        <span className="text-[8px] text-slate-500 font-mono">{p.phone || '—'}</span>
                       </div>
                     ))}
                 </div>
@@ -1233,7 +1476,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               {showPhoneDropdown && (
                 <div className="absolute top-full right-0 left-0 bg-white border border-blue-600 rounded max-h-24 overflow-y-auto z-50 shadow-lg mt-0.5">
                   {partiesList
-                    .filter(p => p.phone && p.phone.includes(custPhone))
+                    .filter(p => p.phone && p.phone.includes(custPhone.trim()))
                     .map(p => (
                       <div
                         key={p.id}
@@ -1272,6 +1515,93 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 <span className="font-mono font-black text-slate-950">
                   {formatMoney(partyBalance, db.settings.currency)}
                 </span>
+              </div>
+            </div>
+
+            {/* Settlement / Payment Choice Bar (نقدي كاش vs آجل ذمم vs سداد جزئي) */}
+            <div className="col-span-3 sm:col-span-6 bg-slate-900 text-white p-2 rounded-md flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2 shadow-xs">
+              <div className="flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-emerald-400 shrink-0" />
+                <div>
+                  <span className="text-[10px] font-bold block">
+                    طريقة السداد / نوع التسوية ({mode === 'purchase' ? 'مع المورد' : 'مع العميل'}):
+                  </span>
+                  <span className="text-[8.5px] text-slate-300">
+                    {settlementType === 'cash' ? '✓ نقدي - سداد كامل بالصندوق والخزينة' :
+                     settlementType === 'credit' ? '✓ آجل ذمم - قيد المبلغ على حساب الطرف (غير مسدد)' :
+                     '✓ سداد جزئي - جزء نقدي والمتبقي آجل على الحساب'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSettlementType('cash');
+                    setPartialPaidInput('');
+                  }}
+                  className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                    settlementType === 'cash'
+                      ? 'bg-emerald-600 text-white shadow ring-2 ring-emerald-400 font-black'
+                      : 'bg-white/10 text-white hover:bg-white/20'
+                  }`}
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>نقدي (كاش)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSettlementType('credit');
+                    setPartialPaidInput('');
+                  }}
+                  className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                    settlementType === 'credit'
+                      ? 'bg-amber-600 text-white shadow ring-2 ring-amber-400 font-black'
+                      : 'bg-white/10 text-white hover:bg-white/20'
+                  }`}
+                >
+                  <Building2 className="w-3.5 h-3.5" />
+                  <span>آجل ذمم (على الحساب)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSettlementType('partial');
+                    setPartialPaidInput(partialPaidInput || String(Math.round(netTotal / 2)));
+                  }}
+                  className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                    settlementType === 'partial'
+                      ? 'bg-blue-600 text-white shadow ring-2 ring-blue-400 font-black'
+                      : 'bg-white/10 text-white hover:bg-white/20'
+                  }`}
+                >
+                  <CreditCard className="w-3.5 h-3.5" />
+                  <span>سداد جزئي</span>
+                </button>
+
+                {settlementType === 'partial' && (
+                  <div className="flex items-center gap-1 bg-white text-slate-900 px-2 py-0.5 rounded text-[10px]">
+                    <span className="font-bold text-slate-700">المسدد نقداً:</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={netTotal}
+                      step="any"
+                      value={partialPaidInput}
+                      onChange={e => setPartialPaidInput(e.target.value)}
+                      placeholder="0.00"
+                      className="w-16 text-center font-mono font-bold text-xs text-blue-700 outline-none"
+                    />
+                    <span className="font-bold text-slate-500">{db.settings.currency}</span>
+                    <span className="text-[9px] text-rose-600 font-bold mr-1">
+                      (المتبقي: {(Math.max(0, netTotal - (parseFloat(partialPaidInput) || 0))).toFixed(2)})
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1313,6 +1643,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   if (e.key === 'Enter') {
                     e.preventDefault();
                     const trimmed = inlineProductSearch.trim().toLowerCase();
+                    if (!trimmed) return;
                     const match = db.products.find(p =>
                       p.name.toLowerCase().includes(trimmed) ||
                       p.code.toLowerCase() === trimmed ||
@@ -1321,6 +1652,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     if (match) {
                       openItemCard(match);
                       setInlineProductSearch('');
+                      setShowInlineDropdown(false);
+                    } else {
+                      setFastItemName(inlineProductSearch.trim());
+                      setFastItemQty('');
+                      setFastItemPrice('');
+                      setShowFastCreateModal(true);
                       setShowInlineDropdown(false);
                     }
                   }
@@ -1354,13 +1691,45 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                   if (matches.length === 0) {
                     return (
-                      <div className="p-2.5 text-center text-[9px] text-slate-500">
-                        لا توجد نتائج مطابقة لـ "{inlineProductSearch}"
+                      <div className="p-3 text-center text-[9.5px] text-slate-600 space-y-2">
+                        <div>لا توجد أصناف مطابقة لـ "{inlineProductSearch}"</div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFastItemName(inlineProductSearch.trim());
+                            setFastItemQty('');
+                            setFastItemPrice('');
+                            setShowFastCreateModal(true);
+                            setShowInlineDropdown(false);
+                          }}
+                          className="w-full py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[9.5px] font-bold flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>+ إثبات وإضافة "{inlineProductSearch}" كصنف جديد فوراً</span>
+                        </button>
                       </div>
                     );
                   }
 
-                  return matches.map(p => {
+                  return (
+                    <>
+                      <div
+                        onClick={() => {
+                          setFastItemName(inlineProductSearch.trim());
+                          setFastItemQty('');
+                          setFastItemPrice('');
+                          setShowFastCreateModal(true);
+                          setShowInlineDropdown(false);
+                        }}
+                        className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 cursor-pointer flex items-center justify-between text-[8.5px] font-bold border-b border-emerald-200 transition-colors"
+                      >
+                        <span className="flex items-center gap-1">
+                          <Plus className="w-3 h-3 text-emerald-700" />
+                          <span>+ إضافة بند جديد غير موجود باسم "{inlineProductSearch}"</span>
+                        </span>
+                        <span className="text-[7.5px] bg-emerald-600 text-white px-1.5 py-0.2 rounded">صنف جديد</span>
+                      </div>
+                      {matches.map(p => {
                     const bp = getProductForBranch(p, invoiceBranchId);
                     return (
                       <div
@@ -1391,8 +1760,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         </div>
                       </div>
                     );
-                  });
-                })()}
+                  })}
+                </>
+              );
+            })()}
               </div>
             )}
           </div>
@@ -1825,8 +2196,21 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                     if (visible.length === 0) {
                       return (
-                        <div className="p-6 text-center text-slate-400 text-[10px]">
-                          لا توجد أصناف مطابقة للبحث
+                        <div className="p-6 text-center text-slate-500 text-[10px] space-y-2.5">
+                          <div className="font-bold">لا توجد أصناف مطابقة لـ "{lookupSearch}" في الدليل</div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setFastItemName(lookupSearch.trim());
+                              setFastItemQty('');
+                              setFastItemPrice('');
+                              setShowFastCreateModal(true);
+                            }}
+                            className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold inline-flex items-center gap-1.5 shadow-sm cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>+ إثبات وإضافة "{lookupSearch}" كصنف جديد فوراً بالعدد والسعر</span>
+                          </button>
                         </div>
                       );
                     }
@@ -2341,7 +2725,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           }
                         }}
                         className="w-full text-center font-mono font-bold text-base h-8 rounded border border-slate-300 bg-white text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
-                        placeholder="1"
+                        placeholder="أدخل الكمية..."
                       />
 
                       <button
@@ -2382,16 +2766,21 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       <label className="text-xs font-bold text-slate-800">
                         سعر الصنف (الوحدة) *
                       </label>
-                      {isPriceModified ? (
+                      {itemCardPrice.trim() !== '' && isPriceModified ? (
                         <span className="text-[8.5px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded flex items-center gap-1">
                           <Edit3 className="w-2.5 h-2.5" />
-                          <span>سعر معدل</span>
+                          <span>سعر يدوي معدل</span>
                         </span>
                       ) : (
-                        <span className="text-[8.5px] font-bold text-emerald-800 bg-emerald-100 px-1.5 py-0.5 rounded flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setItemCardPrice(String(itemCardDefaultPrice))}
+                          className="text-[8.5px] font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 px-1.5 py-0.5 rounded flex items-center gap-1 cursor-pointer"
+                          title="اضغط لتأكيد السعر المسجل"
+                        >
                           <CheckCircle2 className="w-2.5 h-2.5" />
-                          <span>سعر مضبوط</span>
-                        </span>
+                          <span>السعر مضبوط ({itemCardDefaultPrice.toFixed(2)})</span>
+                        </button>
                       )}
                     </div>
 
@@ -2409,9 +2798,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           }
                         }}
                         className={`w-full text-center font-mono font-bold text-base h-8 rounded border bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 ${
-                          isPriceModified ? 'border-amber-400 text-amber-800' : 'border-slate-300 text-emerald-700'
+                          itemCardPrice.trim() !== '' && isPriceModified ? 'border-amber-400 text-amber-800' : 'border-slate-300 text-emerald-700'
                         }`}
-                        placeholder="0.00"
+                        placeholder="أدخل السعر يدوياً..."
                       />
                       <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 font-bold pointer-events-none">
                         {db.settings.currency}
@@ -2419,10 +2808,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     </div>
 
                     <div className="text-[8.5px] text-slate-500 text-center flex items-center justify-center gap-1">
-                      {isPriceModified ? (
-                        <span>السعر الأصلي: <strong>{itemCardDefaultPrice.toFixed(2)}</strong> (اضغط لاستعادته: <button type="button" onClick={() => setItemCardPrice(String(itemCardDefaultPrice))} className="text-blue-600 underline font-bold cursor-pointer">استعادة</button>)</span>
+                      {itemCardPrice.trim() !== '' ? (
+                        isPriceModified ? (
+                          <span>السعر الأصلي: <strong>{itemCardDefaultPrice.toFixed(2)}</strong> (اضغط لاستعادته: <button type="button" onClick={() => setItemCardPrice(String(itemCardDefaultPrice))} className="text-blue-600 underline font-bold cursor-pointer">استعادة</button>)</span>
+                        ) : (
+                          <span className="text-emerald-700 font-semibold">✓ السعر المدخل يطابق السعر المسجل</span>
+                        )
                       ) : (
-                        <span className="text-emerald-700">السعر مضبوط، يمكنك الضغط على إضافة فوراً</span>
+                        <span className="text-slate-600">
+                          الخانة خالية. يمكنك إدخال السعر يدوياً أو سيتم اعتماد السعر المضبوط تلقائياً: <strong>{itemCardDefaultPrice.toFixed(2)} {db.settings.currency}</strong>
+                        </span>
                       )}
                     </div>
                   </div>
@@ -2503,6 +2898,163 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
         );
       })()}
+
+      {/* MODAL 6: Fast On-the-fly Item Creation (إضافة صنف غير موجود فوراً بالمخزون والفاتورة) */}
+      {showFastCreateModal && (
+        <div className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-3 animate-in fade-in duration-150">
+          <div className="bg-white rounded-xl w-full max-w-md border-2 border-emerald-600 shadow-2xl overflow-hidden flex flex-col">
+            <div className="bg-gradient-to-r from-emerald-700 to-teal-800 text-white px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Boxes className="w-5 h-5 text-white" />
+                <div>
+                  <h3 className="text-sm font-bold">إثبات وإضافة صنف غير موجود فوراً</h3>
+                  <p className="text-[10px] text-emerald-100">
+                    تسجيل الصنف في المخزون وإدراجه مباشرة بالفاتورة الحالية
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowFastCreateModal(false)}
+                className="text-white/80 hover:text-white p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3 text-xs">
+              {/* Notice regarding stock */}
+              <div className="bg-amber-50 border border-amber-300 rounded-lg p-2.5 text-[10px] text-amber-900 leading-relaxed font-medium">
+                {mode === 'sale' || mode === 'wholesale' ? (
+                  <span>
+                    💡 <strong>تنبيه المخزون:</strong> يتم إثبات هذا الصنف الجديد بدليل الأصناف وتسجيل حركته ورصيده بالسالب (<strong>-{(parseFloat(fastItemQty) || 0)}</strong>) في المخزن تلقائياً، لحين توريده وشراء بضاعته لاحقاً فتتم التسوية.
+                  </span>
+                ) : (
+                  <span>
+                    💡 <strong>تنبيه المخزون:</strong> سيتم إثبات هذا الصنف الجديد بدليل الأصناف وإضافة رصيده (+{(parseFloat(fastItemQty) || 0)}) وتكلفة شرائه تلقائياً للمخزن.
+                  </span>
+                )}
+              </div>
+
+              {/* Item Name */}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-800 mb-1">
+                  اسم الصنف أو البند الجديد *
+                </label>
+                <input
+                  type="text"
+                  value={fastItemName}
+                  onChange={e => setFastItemName(e.target.value)}
+                  placeholder="اكتب اسم الصنف أو البند بدقة..."
+                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-bold text-slate-900 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  autoFocus
+                />
+              </div>
+
+              {/* Qty & Price Row (Empty inputs with no pre-filled zeroes or forced numbers!) */}
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-800 mb-1">
+                    العدد أو الكمية *
+                  </label>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="any"
+                    value={fastItemQty}
+                    onChange={e => setFastItemQty(e.target.value)}
+                    placeholder="أدخل الكمية أو العدد..."
+                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-bold font-mono text-slate-900 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 text-center"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-800 mb-1">
+                    سعر الصنف (الوحدة) *
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={fastItemPrice}
+                      onChange={e => setFastItemPrice(e.target.value)}
+                      placeholder="أدخل السعر يدوياً..."
+                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-bold font-mono text-emerald-700 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 text-center"
+                    />
+                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[9px] text-slate-400 font-bold pointer-events-none">
+                      {db.settings.currency}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Unit & Category */}
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-700 mb-1">الوحدة</label>
+                  <select
+                    value={fastItemUnit}
+                    onChange={e => setFastItemUnit(e.target.value)}
+                    className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-xs bg-white text-slate-800"
+                  >
+                    <option value="قطعة">قطعة</option>
+                    <option value="كيلو">كيلو</option>
+                    <option value="متر">متر</option>
+                    <option value="كرتونة">كرتونة</option>
+                    <option value="علبة">علبة</option>
+                    <option value="لتر">لتر</option>
+                    <option value="طقم">طقم</option>
+                    <option value="طن">طن</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-700 mb-1">المجموعة / القسم</label>
+                  <select
+                    value={fastItemCategory}
+                    onChange={e => setFastItemCategory(e.target.value)}
+                    className="w-full px-2 py-1.5 border border-slate-300 rounded-lg text-xs bg-white text-slate-800"
+                  >
+                    {categoriesList.map(c => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                    <option value="عامة">عامة</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Realtime Line Total Preview */}
+              {fastItemQty && fastItemPrice && (
+                <div className="bg-slate-900 text-white p-2 rounded-lg flex items-center justify-between text-xs font-bold">
+                  <span>إجمالي البند بالفاتورة:</span>
+                  <span className="font-mono text-emerald-400 text-sm">
+                    {((parseFloat(fastItemQty) || 0) * (parseFloat(fastItemPrice) || 0)).toFixed(2)} {db.settings.currency}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="bg-slate-100 border-t border-slate-200 px-4 py-2.5 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setShowFastCreateModal(false)}
+                className="px-3 py-1.5 bg-white text-slate-700 border border-slate-300 rounded-lg text-xs font-bold hover:bg-slate-200"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={confirmFastCreateItem}
+                className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow flex items-center gap-1.5 cursor-pointer"
+              >
+                <Check className="w-4 h-4" />
+                <span>✓ إثبات الصنف بالمخزون وإدراجه بالفاتورة</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Invoice Audit Log Modal */}
       {showAuditModal && editingInvoice && (

@@ -22,7 +22,7 @@ import {
   AccountingDB,
   Invoice
 } from '../types/accounting';
-import { formatMoney, logAudit } from '../services/accountingStorage';
+import { formatMoney, logAudit, deleteInvoiceAndRevert } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -39,6 +39,8 @@ interface PurchasesViewProps {
   onPreviewInvoice: (invoice: Invoice) => void;
   onOpenPartyModal: (type: 'customer' | 'supplier') => void;
   activeBranchId?: string;
+  initialEditingInvoice?: Invoice | null;
+  initialTab?: 'editor' | 'list';
 }
 
 export const PurchasesView: React.FC<PurchasesViewProps> = ({
@@ -46,19 +48,28 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   onUpdateDb,
   onPreviewInvoice,
   onOpenPartyModal,
-  activeBranchId
+  activeBranchId,
+  initialEditingInvoice = null,
+  initialTab = 'list'
 }) => {
   const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
   const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
   const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
   const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
 
-  const [activeTab, setActiveTab] = useState<'editor' | 'list'>('list');
+  const [activeTab, setActiveTab] = useState<'editor' | 'list'>(initialTab);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'مدفوع' | 'جزئي' | 'آجل'>('all');
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'month'>('all');
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'highest' | 'lowest'>('newest');
-  const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
+  const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(initialEditingInvoice);
+
+  React.useEffect(() => {
+    if (initialEditingInvoice) {
+      setEditingInvoice(initialEditingInvoice);
+      setActiveTab('editor');
+    }
+  }, [initialEditingInvoice]);
 
   // Permissions checks
   const userPerms = db.currentUser?.permissions;
@@ -202,34 +213,11 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       return;
     }
 
-    if (!confirm(`هل أنت متأكد من حذف فاتورة الشراء "${inv.number}"؟ سيتم عكس كميات المخزون والمصروفات والقيود المحاسبية.`)) {
+    if (!confirm(`هل أنت متأكد من حذف فاتورة الشراء "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والمصروفات والأرصدة والقيود المحاسبية.`)) {
       return;
     }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-
-    // 1. Revert stock
-    inv.items.forEach(oldItem => {
-      const prod = updated.products.find(p => p.id === oldItem.productId);
-      if (prod) {
-        prod.currentQty = Math.max(0, prod.currentQty - oldItem.qty);
-      }
-    });
-
-    // 2. Remove stock movements
-    updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== inv.id);
-
-    // 3. Remove treasury entries
-    updated.treasury = updated.treasury.filter(tr => tr.sourceId !== inv.id);
-
-    // 4. Remove journal entry
-    updated.journals = updated.journals.filter(j => j.sourceId !== inv.id);
-
-    // 5. Remove invoice
-    updated.invoices = updated.invoices.filter(i => i.id !== inv.id);
-
-    logAudit(updated, 'حذف فاتورة شراء', `تم حذف فاتورة الشراء ${inv.number} وعكس أثرها`);
-
+    const updated = deleteInvoiceAndRevert(db, inv);
     onUpdateDb(updated);
   };
 

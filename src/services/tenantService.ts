@@ -2,6 +2,7 @@ import { User as AppUser, AccountingDB } from '../types/accounting';
 
 export interface CompanyTenant {
   id: string; // e.g. "comp_xxxx" or "comp_g_xxxx"
+  code: string; // e.g. "COMP-101" (كود الشركة لتسجيل الدخول السريع)
   name: string; // Company / Organization Name (اسم المنشأة / الشركة)
   activityType?: string; // Type of activity
   adminName: string; // Admin's full name
@@ -74,11 +75,26 @@ export function getActiveCompany(): CompanyTenant | null {
 }
 
 /**
- * Retrieves a company tenant by ID
+ * Retrieves a company tenant by ID or by Company Code (كود الشركة)
  */
 export function getCompanyTenant(id: string): CompanyTenant | null {
   const list = getCompaniesList();
-  return list.find(c => c.id === id) || null;
+  return list.find(c => c.id === id || (c.code && c.code.toLowerCase() === id.toLowerCase())) || null;
+}
+
+/**
+ * Retrieves a company tenant by Company Code / Tenant ID / Name / Email
+ */
+export function getCompanyByCode(codeOrIdOrName: string): CompanyTenant | null {
+  const clean = codeOrIdOrName.trim().toLowerCase();
+  if (!clean) return null;
+  const list = getCompaniesList();
+  return list.find(c => 
+    (c.code && c.code.toLowerCase() === clean) ||
+    c.id.toLowerCase() === clean || 
+    c.name.toLowerCase() === clean ||
+    (c.googleEmail && c.googleEmail.toLowerCase() === clean)
+  ) || null;
 }
 
 /**
@@ -99,6 +115,7 @@ export function registerCompany(data: {
   name: string;
   adminName: string;
   adminUsername: string;
+  code?: string;
   password?: string;
   currency?: string;
   activityType?: string;
@@ -116,18 +133,23 @@ export function registerCompany(data: {
     ? `comp_g_${data.googleEmail.toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 60)}`
     : `comp_${cleanName}_${Date.now().toString(36)}_${randomSuffix}`;
 
+  // Generate clean, memorable company code e.g. COMP-101, COMP-102
+  const code = data.code?.trim().toUpperCase() || `COMP-${100 + list.length + 1}`;
+
   // Check if already exists (especially for Google logins)
-  const existing = list.find(c => c.id === id);
+  const existing = list.find(c => c.id === id || (c.code && c.code.toLowerCase() === code.toLowerCase()));
   if (existing) {
     // Update name or details if provided
     existing.name = data.name.trim() || existing.name;
     existing.adminName = data.adminName.trim() || existing.adminName;
+    if (!existing.code) existing.code = code;
     saveCompaniesList(list);
     return existing;
   }
 
   const newTenant: CompanyTenant = {
     id,
+    code,
     name: data.name.trim() || 'منشأة جديدة',
     activityType: data.activityType?.trim() || 'نشاط تجاري عام',
     adminName: data.adminName.trim() || 'مدير المنشأة',
