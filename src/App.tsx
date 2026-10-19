@@ -151,12 +151,34 @@ export default function App() {
     });
 
     // 4. Subscribe to live Firestore updates across all phones
+    const currentCompanyCode = db.settings.companyCode || 'COMP-101';
     const unsubCloud = subscribeToCloudDatabase((remoteDb, updatedBy) => {
       setDb(prevDb => {
         const storedSession = getStoredAuthSession();
         const currentLocalUser = storedSession?.user || prevDb.currentUser;
-        const matchedUser = currentLocalUser ? remoteDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
-        const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
+        const matchedUser = currentLocalUser
+          ? remoteDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username)
+          : null;
+
+        // Apply updated role & permissions while keeping local login session
+        const effectiveUser = matchedUser
+          ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin }
+          : currentLocalUser;
+
+        if (storedSession && effectiveUser) {
+          const updatedSession: AuthSession = {
+            ...storedSession,
+            user: effectiveUser
+          };
+          localStorage.setItem('hesabaty_active_user', JSON.stringify(updatedSession));
+          setAuthSession(updatedSession);
+        }
+
+        // Restrict branch view if user has assigned branch and cannot manage branches
+        if (effectiveUser?.branchId && !effectiveUser.permissions?.canManageBranches && effectiveUser.role !== 'مدير') {
+          setActiveBranchId(effectiveUser.branchId);
+        }
+
         const merged: AccountingDB = {
           ...remoteDb,
           currentUser: effectiveUser || remoteDb.currentUser || remoteDb.users[0]
@@ -164,7 +186,7 @@ export default function App() {
         saveDatabase(merged);
         return merged;
       });
-    });
+    }, currentCompanyCode);
 
     return () => {
       unsubStatus();
@@ -362,10 +384,8 @@ export default function App() {
           if (cloudDb) {
             setDb(cloudDb);
             saveDatabase(cloudDb);
-            alert('تمت المزامنة اللحظية بنجاح وتحديث كافة البيانات مع السحابة!');
           } else {
-            await pushDatabaseToCloud(db);
-            alert('تم إرسال ومزامنة أحدث بياناتك بنجاح لكافة الهواتف المتصلة!');
+            await pushDatabaseToCloud(db, true);
           }
         }}
         onQuickAction={(action) => {
