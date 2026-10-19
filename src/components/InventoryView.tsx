@@ -1514,126 +1514,135 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       لا توجد فواتير أو حركات مطابقة لهذا الفلتر
                     </div>
                   ) : (
-                    <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-right text-xs border-collapse">
-                          <thead>
-                            <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold text-[11px]">
-                              <th className="py-2.5 px-3">التاريخ والوقت</th>
-                              <th className="py-2.5 px-3">رقم الفاتورة</th>
-                              <th className="py-2.5 px-3">نوع الحركة</th>
-                              <th className="py-2.5 px-3">الطرف (العميل / المورد)</th>
-                              <th className="py-2.5 px-3 text-center">الكمية</th>
-                              <th className="py-2.5 px-3 text-center">سعر الوحدة</th>
-                              <th className="py-2.5 px-3 text-center">إجمالي البند</th>
-                              <th className="py-2.5 px-3 text-center">إجمالي الفاتورة</th>
-                              <th className="py-2.5 px-3 text-center">حالة الفاتورة</th>
-                              <th className="py-2.5 px-3 text-center">الإجراءات</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {filteredMoves.map(m => {
-                              const isPositive = m.qty > 0;
-                              return (
-                                <tr
-                                  key={m.id}
-                                  className="hover:bg-blue-50/40 transition-colors cursor-pointer group"
-                                  onClick={() => {
-                                    if (m.invoice && onPreviewInvoice) {
-                                      onPreviewInvoice(m.invoice);
-                                    }
-                                  }}
-                                >
-                                  <td className="py-2.5 px-3 font-mono text-[11px] text-slate-600 whitespace-nowrap">
-                                    {m.date} <span className="text-slate-400 text-[10px]">({m.time})</span>
-                                  </td>
+                    /* Cards Grid Layout (نظام كروت كامل ومتجاوب بدون أي تمرير أفقي) */
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {filteredMoves.map(m => {
+                        const isPositive = m.qty > 0;
+                        return (
+                          <div
+                            key={m.id}
+                            onClick={() => {
+                              if (m.invoice && onPreviewInvoice) {
+                                onPreviewInvoice(m.invoice);
+                              }
+                            }}
+                            className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs hover:border-blue-400 hover:shadow-xs transition-all cursor-pointer flex flex-col justify-between gap-3 group"
+                          >
+                            {/* Card Header: Type Badge, Invoice Number, Status, Date */}
+                            <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className={`px-2 py-0.5 rounded text-[10.5px] font-bold ${
+                                  m.type === 'sale' ? 'bg-blue-100 text-blue-800' :
+                                  m.type === 'purchase' ? 'bg-emerald-100 text-emerald-800' :
+                                  m.type === 'sale_return' ? 'bg-amber-100 text-amber-800' :
+                                  m.type === 'purchase_return' ? 'bg-orange-100 text-orange-800' :
+                                  'bg-purple-100 text-purple-800'
+                                }`}>
+                                  {m.type === 'sale' ? 'فاتورة بيع' :
+                                   m.type === 'purchase' ? 'فاتورة شراء' :
+                                   m.type === 'sale_return' ? 'مرتجع مبيعات' :
+                                   m.type === 'purchase_return' ? 'مرتجع مشتريات' :
+                                   'تسوية جرد'}
+                                </span>
 
-                                  <td className="py-2.5 px-3 font-mono font-bold text-slate-900 whitespace-nowrap">
-                                    {m.refNumber}
-                                  </td>
+                                <span className="font-mono font-black text-xs text-slate-900 group-hover:text-blue-700 transition-colors">
+                                  {m.refNumber}
+                                </span>
+                              </div>
 
-                                  <td className="py-2.5 px-3 whitespace-nowrap">
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                      m.type === 'sale' ? 'bg-blue-100 text-blue-800' :
-                                      m.type === 'purchase' ? 'bg-emerald-100 text-emerald-800' :
-                                      m.type === 'sale_return' ? 'bg-amber-100 text-amber-800' :
-                                      m.type === 'purchase_return' ? 'bg-orange-100 text-orange-800' :
-                                      'bg-purple-100 text-purple-800'
-                                    }`}>
-                                      {m.type === 'sale' ? 'فاتورة بيع' :
-                                       m.type === 'purchase' ? 'فاتورة شراء' :
-                                       m.type === 'sale_return' ? 'مرتجع مبيعات' :
-                                       m.type === 'purchase_return' ? 'مرتجع مشتريات' :
-                                       'تسوية جرد'}
-                                    </span>
-                                  </td>
+                              <div className="flex items-center gap-1.5">
+                                <span className={`px-2 py-0.5 rounded text-[9.5px] font-bold ${
+                                  m.invoiceStatus === 'مدفوع' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                                  m.invoiceStatus === 'جزئي' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                                  'bg-amber-50 text-amber-700 border border-amber-200'
+                                }`}>
+                                  {m.invoiceStatus}
+                                </span>
+                                <span className="font-mono text-[10px] text-slate-400">
+                                  {m.date}
+                                </span>
+                              </div>
+                            </div>
 
-                                  <td className="py-2.5 px-3 font-bold text-slate-800">
-                                    {m.partyName}
-                                    {m.notes && <span className="text-[10px] text-slate-400 block font-normal truncate max-w-[140px]">{m.notes}</span>}
-                                  </td>
+                            {/* Card Body: Party & Metric Numbers */}
+                            <div className="space-y-2">
+                              {/* Party Info */}
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="text-slate-500 font-medium text-[11px]">الطرف (العميل / المورد):</span>
+                                <span className="font-bold text-slate-900 truncate max-w-[65%] text-left">
+                                  {m.partyName}
+                                </span>
+                              </div>
 
-                                  <td className="py-2.5 px-3 text-center font-mono font-black text-xs whitespace-nowrap">
-                                    <span className={isPositive ? 'text-emerald-700' : 'text-rose-700'}>
-                                      {isPositive ? `+${m.qty}` : m.qty}
-                                    </span>
-                                  </td>
+                              {/* 3 Metrics Box */}
+                              <div className="grid grid-cols-3 gap-1.5 bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-center">
+                                <div>
+                                  <span className="block text-[10px] text-slate-500 font-medium">الكمية</span>
+                                  <span className={`font-mono font-black text-sm block mt-0.5 ${isPositive ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                    {isPositive ? `+${m.qty}` : m.qty}
+                                  </span>
+                                </div>
 
-                                  <td className="py-2.5 px-3 text-center font-mono text-slate-700 whitespace-nowrap">
+                                <div>
+                                  <span className="block text-[10px] text-slate-500 font-medium">سعر الوحدة</span>
+                                  <span className="font-mono font-bold text-xs text-slate-800 block mt-0.5">
                                     {formatMoney(m.unitPrice, db.settings.currency)}
-                                  </td>
+                                  </span>
+                                </div>
 
-                                  <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-900 whitespace-nowrap">
+                                <div>
+                                  <span className="block text-[10px] text-slate-500 font-medium">إجمالي البند</span>
+                                  <span className="font-mono font-black text-xs text-slate-900 block mt-0.5">
                                     {formatMoney(m.total, db.settings.currency)}
-                                  </td>
+                                  </span>
+                                </div>
+                              </div>
 
-                                  <td className="py-2.5 px-3 text-center font-mono text-slate-800 whitespace-nowrap">
-                                    {formatMoney(m.invoiceTotal, db.settings.currency)}
-                                  </td>
+                              {m.notes && (
+                                <p className="text-[10px] text-slate-500 bg-white px-2 py-1 rounded border border-slate-100 truncate">
+                                  {m.notes}
+                                </p>
+                              )}
+                            </div>
 
-                                  <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                      m.invoiceStatus === 'مدفوع' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
-                                      m.invoiceStatus === 'جزئي' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
-                                      'bg-amber-50 text-amber-700 border border-amber-200'
-                                    }`}>
-                                      {m.invoiceStatus}
-                                    </span>
-                                  </td>
+                            {/* Card Footer: Invoice Total & Direct Action Buttons */}
+                            <div className="flex items-center justify-between pt-2 border-t border-slate-100">
+                              <div className="text-[11px] text-slate-600">
+                                <span>إجمالي الفاتورة: </span>
+                                <strong className="font-mono font-black text-slate-900">
+                                  {formatMoney(m.invoiceTotal, db.settings.currency)}
+                                </strong>
+                              </div>
 
-                                  <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
-                                    <div className="flex items-center justify-center gap-1.5">
-                                      {m.invoice && onPreviewInvoice && (
-                                        <button
-                                          type="button"
-                                          onClick={() => onPreviewInvoice(m.invoice!)}
-                                          className="p-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-md transition-all flex items-center gap-1 text-[10px] font-bold cursor-pointer"
-                                          title="معاينة الفاتورة كاملة وطباعتها"
-                                        >
-                                          <Eye className="w-3.5 h-3.5" />
-                                          <span className="hidden sm:inline">معاينة</span>
-                                        </button>
-                                      )}
+                              <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                                {m.invoice && onPreviewInvoice && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onPreviewInvoice(m.invoice!)}
+                                    className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-md transition-all flex items-center gap-1 text-[11px] font-bold cursor-pointer"
+                                    title="معاينة الفاتورة كاملة وطباعتها"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    <span>معاينة</span>
+                                  </button>
+                                )}
 
-                                      {m.invoice && onEditInvoice && (
-                                        <button
-                                          type="button"
-                                          onClick={() => onEditInvoice(m.invoice!)}
-                                          className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-md transition-all flex items-center gap-1 text-[10px] font-bold cursor-pointer"
-                                          title="تعديل الفاتورة في محرر الفواتير"
-                                        >
-                                          <Edit className="w-3.5 h-3.5" />
-                                          <span className="hidden sm:inline">تعديل</span>
-                                        </button>
-                                      )}
-                                    </div>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
+                                {m.invoice && onEditInvoice && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onEditInvoice(m.invoice!)}
+                                    className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-md transition-all flex items-center gap-1 text-[11px] font-bold cursor-pointer"
+                                    title="تعديل الفاتورة في محرر الفواتير"
+                                  >
+                                    <Edit className="w-3.5 h-3.5" />
+                                    <span>تعديل</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
