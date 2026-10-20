@@ -324,6 +324,8 @@ export function subscribeToCloudDatabase(
 
     const currentDevId = getLocalDeviceId();
 
+    const cleanCode = (companyCode || 'COMP-101').trim().toUpperCase();
+
     // 1. Instant local BroadcastChannel listener (0ms between tabs / PWA windows)
     const handleBroadcast = (event: MessageEvent) => {
       if (
@@ -331,6 +333,9 @@ export function subscribeToCloudDatabase(
         event.data?.deviceId !== currentDevId &&
         event.data?.data
       ) {
+        if (event.data.companyCode && event.data.companyCode !== cleanCode) {
+          return;
+        }
         try {
           const remoteDb = JSON.parse(event.data.data) as AccountingDB;
           if (remoteDb && Array.isArray(remoteDb.products) && remoteDb.settings) {
@@ -357,6 +362,11 @@ export function subscribeToCloudDatabase(
         return;
       }
 
+      // Filter out updates for a different company
+      if (data.companyCode && data.companyCode.trim().toUpperCase() !== cleanCode) {
+        return;
+      }
+
       // Secondary protection: if deviceId was not present, check recent local timestamp within 300ms
       if (!data.deviceId && data.updatedAt && Math.abs(data.updatedAt - lastLocalSavedTimestamp) < 300) {
         return;
@@ -372,20 +382,18 @@ export function subscribeToCloudDatabase(
       }
     };
 
-    // 3. Listen to company-specific document if companyCode exists
-    const cleanCode = (companyCode || '').trim().toUpperCase();
+    // 3. Listen to company-specific document or main document
     if (cleanCode && cleanCode !== 'COMP-101') {
       const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
       unsubscribeCompListener = onSnapshot(compDocRef, handleSnapshot, (error) => {
         console.warn('Firestore company listener notice:', error.message);
       });
+    } else {
+      const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
+      unsubscribeListener = onSnapshot(docRef, handleSnapshot, (error) => {
+        console.warn('Firestore realtime listener notice:', error.message);
+      });
     }
-
-    // 4. Always also listen to the main company database document
-    const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-    unsubscribeListener = onSnapshot(docRef, handleSnapshot, (error) => {
-      console.warn('Firestore realtime listener notice:', error.message);
-    });
 
     return () => {
       if (unsubscribeListener) {

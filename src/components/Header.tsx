@@ -43,7 +43,7 @@ interface HeaderProps {
   onManualSync?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({
+const HeaderComponent: React.FC<HeaderProps> = ({
   settings,
   currentUser,
   branches = [],
@@ -611,3 +611,5 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+
+export const Header = React.memo(HeaderComponent);

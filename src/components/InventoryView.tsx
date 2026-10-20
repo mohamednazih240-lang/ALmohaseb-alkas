@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Package,
   Warehouse,
@@ -131,45 +131,61 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('طباعة المخزون');
 
-  // Resolve products for this specific branch
-  // "والاصناف تكون ايضاف موجوده في كل الفروع لكن بدون اعداد و اسعار ويتم ادخالهم حسب الفرع ولا يؤثرو علي اي فروع اخره، يبقي كل فرع لحاله"
-  const branchProducts = db.products.map(p => getProductForBranch(p, selectedBranchId));
+  // Resolve products for this specific branch (memoized)
+  const branchProducts = useMemo(
+    () => db.products.map(p => getProductForBranch(p, selectedBranchId)),
+    [db.products, selectedBranchId]
+  );
 
-  // Statistics for this branch
-  const inStockCount = branchProducts.filter(p => p.currentQty > 0).length;
-  const zeroStockCount = branchProducts.filter(p => p.currentQty === 0).length;
-  const lowStockCount = branchProducts.filter(p => p.currentQty <= p.minStock && p.currentQty > 0).length;
-  const totalStockValue = branchProducts.reduce((acc, p) => acc + (p.currentQty * (p.avgCost || p.buyPrice)), 0);
+  // Statistics for this branch (computed in a single fast pass)
+  const { inStockCount, zeroStockCount, lowStockCount, totalStockValue } = useMemo(() => {
+    let inStock = 0;
+    let zeroStock = 0;
+    let lowStock = 0;
+    let totalVal = 0;
+    for (const p of branchProducts) {
+      if (p.currentQty > 0) inStock++;
+      if (p.currentQty === 0) zeroStock++;
+      if (p.currentQty <= p.minStock && p.currentQty > 0) lowStock++;
+      totalVal += p.currentQty * (p.avgCost || p.buyPrice);
+    }
+    return { inStockCount: inStock, zeroStockCount: zeroStock, lowStockCount: lowStock, totalStockValue: totalVal };
+  }, [branchProducts]);
 
-  // Filtered and sorted products
-  const filteredProducts = branchProducts.filter(p => {
+  // Filtered and sorted products (memoized to eliminate sorting lag on page changes)
+  const filteredProducts = useMemo(() => {
     const s = searchTerm.trim().toLowerCase();
-    const matchSearch = !s ||
-      p.name.toLowerCase().includes(s) ||
-      p.code.toLowerCase().includes(s) ||
-      (p.barcode && p.barcode.toLowerCase().includes(s)) ||
-      (p.notes && p.notes.toLowerCase().includes(s));
+    return branchProducts.filter(p => {
+      const matchSearch = !s ||
+        p.name.toLowerCase().includes(s) ||
+        p.code.toLowerCase().includes(s) ||
+        (p.barcode && p.barcode.toLowerCase().includes(s)) ||
+        (p.notes && p.notes.toLowerCase().includes(s));
 
-    let matchStock = true;
-    if (stockStatusFilter === 'in_stock') matchStock = p.currentQty > 0;
-    else if (stockStatusFilter === 'out_of_stock') matchStock = p.currentQty === 0;
-    else if (stockStatusFilter === 'low_stock') matchStock = p.currentQty <= p.minStock && p.currentQty > 0;
+      let matchStock = true;
+      if (stockStatusFilter === 'in_stock') matchStock = p.currentQty > 0;
+      else if (stockStatusFilter === 'out_of_stock') matchStock = p.currentQty === 0;
+      else if (stockStatusFilter === 'low_stock') matchStock = p.currentQty <= p.minStock && p.currentQty > 0;
 
-    return matchSearch && matchStock;
-  }).sort((a, b) => {
-    if (sortBy === 'name_asc') return a.name.localeCompare(b.name, 'ar');
-    if (sortBy === 'name_desc') return b.name.localeCompare(a.name, 'ar');
-    if (sortBy === 'code_asc') return a.code.localeCompare(b.code);
-    if (sortBy === 'qty_desc') return b.currentQty - a.currentQty;
-    if (sortBy === 'qty_asc') return a.currentQty - b.currentQty;
-    if (sortBy === 'price_desc') return b.sellPrice - a.sellPrice;
-    if (sortBy === 'price_asc') return a.sellPrice - b.sellPrice;
-    return 0;
-  });
+      return matchSearch && matchStock;
+    }).sort((a, b) => {
+      if (sortBy === 'name_asc') return a.name.localeCompare(b.name, 'ar');
+      if (sortBy === 'name_desc') return b.name.localeCompare(a.name, 'ar');
+      if (sortBy === 'code_asc') return a.code.localeCompare(b.code);
+      if (sortBy === 'qty_desc') return b.currentQty - a.currentQty;
+      if (sortBy === 'qty_asc') return a.currentQty - b.currentQty;
+      if (sortBy === 'price_desc') return b.sellPrice - a.sellPrice;
+      if (sortBy === 'price_asc') return a.sellPrice - b.sellPrice;
+      return 0;
+    });
+  }, [branchProducts, searchTerm, stockStatusFilter, sortBy]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / itemsPerPage));
   const currentSafePage = Math.min(currentPage, totalPages);
-  const paginatedProducts = filteredProducts.slice((currentSafePage - 1) * itemsPerPage, currentSafePage * itemsPerPage);
+  const paginatedProducts = useMemo(
+    () => filteredProducts.slice((currentSafePage - 1) * itemsPerPage, currentSafePage * itemsPerPage),
+    [filteredProducts, currentSafePage, itemsPerPage]
+  );
 
   const handleMergeCatalogAction = () => {
     const { db: updatedDb, addedCount } = mergeCatalogIntoDb(db);

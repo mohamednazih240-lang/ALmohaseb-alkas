@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Wallet,
   ArrowDownCircle,
@@ -107,10 +107,19 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   const [creditAccId, setCreditAccId] = useState(db.accounts[1]?.id || '');
   const [journalAmount, setJournalAmount] = useState<number>(0);
 
-  // Branch-isolated visible data
-  const visibleTreasury = db.treasury.filter(t => branchFilter === 'all' || (t.branchId === targetBranchId || (!t.branchId && targetBranchId === 'br_main')));
-  const visibleExpenses = db.expenses.filter(e => branchFilter === 'all' || (e.branchId === targetBranchId || (!e.branchId && targetBranchId === 'br_main')));
-  const visibleRevenues = db.revenues.filter(r => branchFilter === 'all' || (r.branchId === targetBranchId || (!r.branchId && targetBranchId === 'br_main')));
+  // Branch-isolated visible data (memoized)
+  const visibleTreasury = useMemo(
+    () => db.treasury.filter(t => branchFilter === 'all' || (t.branchId === targetBranchId || (!t.branchId && targetBranchId === 'br_main'))),
+    [db.treasury, branchFilter, targetBranchId]
+  );
+  const visibleExpenses = useMemo(
+    () => db.expenses.filter(e => branchFilter === 'all' || (e.branchId === targetBranchId || (!e.branchId && targetBranchId === 'br_main'))),
+    [db.expenses, branchFilter, targetBranchId]
+  );
+  const visibleRevenues = useMemo(
+    () => db.revenues.filter(r => branchFilter === 'all' || (r.branchId === targetBranchId || (!r.branchId && targetBranchId === 'br_main'))),
+    [db.revenues, branchFilter, targetBranchId]
+  );
   const visibleSimpleList = subPage === 'expenses' ? visibleExpenses : visibleRevenues;
 
   const renderBranchFilterBar = (title: string) => (

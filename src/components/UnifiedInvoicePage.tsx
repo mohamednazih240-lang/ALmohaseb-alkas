@@ -57,6 +57,24 @@ import {
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
 
+const InvoiceLiveClock = React.memo(() => {
+  const [time, setTime] = useState(() =>
+    new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })
+  );
+  useEffect(() => {
+    const updateTime = () => {
+      setTime(new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }));
+    };
+    const timer = setInterval(updateTime, 10000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <span className="text-[10px] font-mono font-medium text-white/90 bg-black/20 px-1.5 py-0.5 rounded" id="liveTime">
+      {time}
+    </span>
+  );
+});
+
 interface UnifiedInvoicePageProps {
   mode: InvoiceMode;
   db: AccountingDB;
@@ -251,9 +269,6 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [newWholesalePriceManual, setNewWholesalePriceManual] = useState<string>('');
   const [newCategory, setNewCategory] = useState<string>('عامة');
   const [newStockQty, setNewStockQty] = useState<string>('10');
-
-  // Live Time clock
-  const [liveTime, setLiveTime] = useState<string>('00:00');
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
 
   // Settlement / Payment Type Choice (نقدي كاش vs آجل ذمم vs سداد جزئي)
@@ -289,16 +304,6 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }, 50);
     }
   }, [showItemCardModal]);
-
-  useEffect(() => {
-    const updateTime = () => {
-      const d = new Date();
-      setLiveTime(d.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }));
-    };
-    updateTime();
-    const timer = setInterval(updateTime, 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   // Initialize or load editing invoice
   useEffect(() => {
@@ -382,11 +387,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     }
   }, [editingInvoice, mode]);
 
-  // Parties list based on role
-  const partiesList = theme.partyRole === 'customer' ? db.customers : db.suppliers;
+  // Parties list based on role (memoized to prevent recomputing on every keystroke)
+  const partiesList = React.useMemo(
+    () => (theme.partyRole === 'customer' ? db.customers : db.suppliers),
+    [theme.partyRole, db.customers, db.suppliers]
+  );
 
-  // Categories list
-  const categoriesList = Array.from(new Set(db.products.map(p => p.category || 'عامة'))).filter(Boolean);
+  // Categories list (memoized across 1000+ products)
+  const categoriesList = React.useMemo(
+    () => Array.from(new Set(db.products.map(p => p.category || 'عامة'))).filter(Boolean),
+    [db.products]
+  );
 
   // Sync Party by code
   const syncPartyByCode = (codeValue: string) => {
@@ -1280,9 +1291,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               <span>{layoutWidth === 'mobile' ? 'شاشة واسعة' : 'شاشة مدمجة'}</span>
             </button>
 
-            <span className="text-[10px] font-mono font-medium text-white/90 bg-black/20 px-1.5 py-0.5 rounded" id="liveTime">
-              {liveTime}
-            </span>
+            <InvoiceLiveClock />
 
             {/* Close Button X (requested by user) */}
             {(onClose || onCloseEdit) && (

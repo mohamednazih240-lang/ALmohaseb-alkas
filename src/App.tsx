@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   loadDatabase,
   saveDatabase,
@@ -84,6 +84,9 @@ export default function App() {
   const [showLoginView, setShowLoginView] = useState(() => !getStoredAuthSession());
   const [showDriveBackupModal, setShowDriveBackupModal] = useState(false);
 
+  // Realtime Live Movement Sync Notification
+  const [liveSyncNotification, setLiveSyncNotification] = useState<{ message: string; author: string } | null>(null);
+
   // Modals
   const [showQuickSearch, setShowQuickSearch] = useState(false);
   const [previewInvoice, setPreviewInvoice] = useState<Invoice | null>(null);
@@ -150,9 +153,25 @@ export default function App() {
       setSyncState(state);
     });
 
-    // 4. Subscribe to live Firestore updates across all phones
-    const currentCompanyCode = db.settings.companyCode || 'COMP-101';
+    return () => {
+      unsubStatus();
+    };
+  }, []);
+
+  // 4. Subscribe to live Firestore updates across all phones (reacts to company code changes)
+  useEffect(() => {
+    const currentCompanyCode = (db.settings.companyCode || 'COMP-101').trim().toUpperCase();
+
     const unsubCloud = subscribeToCloudDatabase((remoteDb, updatedBy) => {
+      // Visual feedback when an invoice, voucher, or report is synced from another device
+      if (updatedBy) {
+        setLiveSyncNotification({
+          message: `تم تسجيل حركة جديدة وتحديثها فورياً من جهاز «${updatedBy}»`,
+          author: updatedBy
+        });
+        setTimeout(() => setLiveSyncNotification(null), 4500);
+      }
+
       setDb(prevDb => {
         const storedSession = getStoredAuthSession();
         const currentLocalUser = storedSession?.user || prevDb.currentUser;
@@ -189,17 +208,16 @@ export default function App() {
     }, currentCompanyCode);
 
     return () => {
-      unsubStatus();
       unsubCloud();
     };
-  }, []);
+  }, [db.settings.companyCode, authSession?.user?.id]);
 
   // Save changes to IndexedDB, localStorage, and Firestore Cloud Realtime
-  const handleUpdateDb = (updated: AccountingDB) => {
+  const handleUpdateDb = useCallback((updated: AccountingDB) => {
     setDb(updated);
     saveDatabase(updated);
-    pushDatabaseToCloud(updated); // Sync immediately to Firestore for all other phones!
-  };
+    pushDatabaseToCloud(updated, true); // Sync immediately to Firestore for all other phones!
+  }, []);
 
   const validPages: PageId[] = [
     'dashboard', 'sales', 'purchases', 'procurement', 'quotes', 'orders', 'returns',
@@ -303,7 +321,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const summary = calculateFinancialSummary(db);
+  const summary = useMemo(() => calculateFinancialSummary(db), [db]);
 
   const getPageTitle = (page: PageId): string => {
     switch (page) {
@@ -695,6 +713,7 @@ export default function App() {
               const targetDb = { ...baseDb, currentUser: session.user };
               setDb(targetDb);
               saveDatabase(targetDb);
+              pushDatabaseToCloud(targetDb, true);
 
               if (session.user.branchId) {
                 setActiveBranchId(session.user.branchId);
@@ -704,6 +723,20 @@ export default function App() {
               }
             }}
           />
+        </div>
+      )}
+
+      {/* Realtime Instant Live Movement Sync Toast Notification */}
+      {liveSyncNotification && (
+        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2.5 bg-slate-900/95 backdrop-blur-xs text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700/80 text-xs font-bold animate-in fade-in slide-in-from-bottom-4 duration-300 pointer-events-none">
+          <span className="relative flex h-2.5 w-2.5">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+          </span>
+          <div className="flex flex-col">
+            <span className="text-[10px] font-black text-emerald-400">مزامنة فورية حية</span>
+            <span className="text-[11px] text-slate-200">{liveSyncNotification.message}</span>
+          </div>
         </div>
       )}
     </div>

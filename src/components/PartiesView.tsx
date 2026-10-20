@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Users,
   Building,
@@ -80,38 +80,53 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
   const [taxNumber, setTaxNumber] = useState('');
   const [notes, setNotes] = useState('');
 
-  const partiesList = isCustomer ? db.customers : db.suppliers;
+  const partiesList = useMemo(() => (isCustomer ? db.customers : db.suppliers), [isCustomer, db.customers, db.suppliers]);
 
-  const filteredParties = partiesList.filter(p => {
-    const s = searchTerm.trim().toLowerCase();
-    const matchSearch = !s ||
-      p.name.toLowerCase().includes(s) ||
-      (p.phone && p.phone.toLowerCase().includes(s)) ||
-      (p.address && p.address.toLowerCase().includes(s)) ||
-      (p.taxNumber && p.taxNumber.toLowerCase().includes(s));
-
-    const bal = isCustomer ? calculateCustomerBalance(db, p.id) : calculateSupplierBalance(db, p.id);
-    let matchBalance = true;
-    if (balanceFilter === 'due') {
-      matchBalance = bal > 0;
-    } else if (balanceFilter === 'settled') {
-      matchBalance = bal <= 0;
+  // Precompute party balances once in an O(1) lookup Map instead of thousands of scans in sort
+  const partyBalances = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const p of partiesList) {
+      map.set(p.id, isCustomer ? calculateCustomerBalance(db, p.id) : calculateSupplierBalance(db, p.id));
     }
+    return map;
+  }, [partiesList, isCustomer, db]);
 
-    return matchSearch && matchBalance;
-  }).sort((a, b) => {
-    if (sortBy === 'name_asc') return a.name.localeCompare(b.name, 'ar');
-    const balA = isCustomer ? calculateCustomerBalance(db, a.id) : calculateSupplierBalance(db, a.id);
-    const balB = isCustomer ? calculateCustomerBalance(db, b.id) : calculateSupplierBalance(db, b.id);
-    if (sortBy === 'balance_desc') return balB - balA;
-    if (sortBy === 'balance_asc') return balA - balB;
-    return 0;
-  });
+  const filteredParties = useMemo(() => {
+    const s = searchTerm.trim().toLowerCase();
+    return partiesList.filter(p => {
+      const matchSearch = !s ||
+        p.name.toLowerCase().includes(s) ||
+        (p.phone && p.phone.toLowerCase().includes(s)) ||
+        (p.address && p.address.toLowerCase().includes(s)) ||
+        (p.taxNumber && p.taxNumber.toLowerCase().includes(s));
 
-  const totalBalance = partiesList.reduce((sum, p) => {
-    const bal = isCustomer ? calculateCustomerBalance(db, p.id) : calculateSupplierBalance(db, p.id);
-    return sum + Math.max(0, bal);
-  }, 0);
+      const bal = partyBalances.get(p.id) || 0;
+      let matchBalance = true;
+      if (balanceFilter === 'due') {
+        matchBalance = bal > 0;
+      } else if (balanceFilter === 'settled') {
+        matchBalance = bal <= 0;
+      }
+
+      return matchSearch && matchBalance;
+    }).sort((a, b) => {
+      if (sortBy === 'name_asc') return a.name.localeCompare(b.name, 'ar');
+      const balA = partyBalances.get(a.id) || 0;
+      const balB = partyBalances.get(b.id) || 0;
+      if (sortBy === 'balance_desc') return balB - balA;
+      if (sortBy === 'balance_asc') return balA - balB;
+      return 0;
+    });
+  }, [partiesList, searchTerm, balanceFilter, sortBy, partyBalances]);
+
+  const totalBalance = useMemo(() => {
+    let sum = 0;
+    for (const p of partiesList) {
+      const bal = partyBalances.get(p.id) || 0;
+      sum += Math.max(0, bal);
+    }
+    return sum;
+  }, [partiesList, partyBalances]);
 
   const handleOpenNewModal = () => {
     setEditingParty(null);

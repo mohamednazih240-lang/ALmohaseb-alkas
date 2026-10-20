@@ -245,7 +245,7 @@ const navSections: NavSection[] = [
   }
 ];
 
-export const Sidebar: React.FC<SidebarProps> = ({
+const SidebarComponent: React.FC<SidebarProps> = ({
   currentPage,
   onSelectPage,
   isOpen,
@@ -352,3 +352,5 @@ export const Sidebar: React.FC<SidebarProps> = ({
     </>
   );
 };
+
+export const Sidebar = React.memo(SidebarComponent);

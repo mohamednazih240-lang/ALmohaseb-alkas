@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -69,59 +69,65 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }, [activeBranchId]);
 
   const targetBranch = selectedBranchId;
-  const currentBranch = branches.find(b => b.id === targetBranch) || branches[0];
-  const summary = calculateFinancialSummary(db, targetBranch);
+  const currentBranch = useMemo(() => branches.find(b => b.id === targetBranch) || branches[0], [branches, targetBranch]);
+  const summary = useMemo(() => calculateFinancialSummary(db, targetBranch), [db, targetBranch]);
 
   const isTargetBranch = (bId?: string) => {
     if (!targetBranch || targetBranch === 'all') return true;
     return bId === targetBranch || (!bId && targetBranch === 'br_main');
   };
 
-  // 7-day Sales & Purchases chart data
-  const last7Days = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() - (6 - i));
-    const isoDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    const dayLabel = d.toLocaleDateString('ar-EG', { weekday: 'short' });
+  // 7-day Sales & Purchases chart data (memoized)
+  const last7Days: { date: string; label: string; sales: number; purchases: number }[] = useMemo(() => {
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (6 - i));
+      const isoDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const dayLabel = d.toLocaleDateString('ar-EG', { weekday: 'short' });
 
-    const daySales = db.invoices
-      .filter(inv => inv.type === 'sale' && inv.date === isoDate && isTargetBranch(inv.branchId))
-      .reduce((sum, inv) => sum + inv.total, 0);
+      let daySales = 0;
+      let dayPurchases = 0;
+      for (const inv of db.invoices) {
+        if (inv.date === isoDate && (inv.branchId === targetBranch || (!inv.branchId && targetBranch === 'br_main') || targetBranch === 'all')) {
+          if (inv.type === 'sale') daySales += inv.total;
+          else if (inv.type === 'purchase') dayPurchases += inv.total;
+        }
+      }
 
-    const dayPurchases = db.invoices
-      .filter(inv => inv.type === 'purchase' && inv.date === isoDate && isTargetBranch(inv.branchId))
-      .reduce((sum, inv) => sum + inv.total, 0);
+      return {
+        date: isoDate,
+        label: dayLabel,
+        sales: daySales,
+        purchases: dayPurchases
+      };
+    });
+  }, [db.invoices, targetBranch]);
 
-    return {
-      date: isoDate,
-      label: dayLabel,
-      sales: daySales,
-      purchases: dayPurchases
-    };
-  });
+  const maxVal = useMemo(() => Math.max(1, ...last7Days.map(d => Math.max(d.sales, d.purchases))), [last7Days]);
 
-  const maxVal = Math.max(1, ...last7Days.map(d => Math.max(d.sales, d.purchases)));
+  // Critical Low stock products for this specific branch (memoized)
+  const lowStockProducts = useMemo(() => {
+    return db.products
+      .map(p => getProductForBranch(p, targetBranch))
+      .filter(p => p.minStock > 0 && p.currentQty <= p.minStock)
+      .slice(0, 5);
+  }, [db.products, targetBranch]);
 
-  // Critical Low stock products for this specific branch
-  const lowStockProducts = db.products
-    .map(p => getProductForBranch(p, targetBranch))
-    .filter(p => p.minStock > 0 && p.currentQty <= p.minStock)
-    .slice(0, 5);
+  // Recent invoices for this branch (memoized)
+  const recentInvoices = useMemo(() => {
+    return db.invoices
+      .filter(inv => isTargetBranch(inv.branchId))
+      .slice(0, 6);
+  }, [db.invoices, targetBranch]);
 
-  // Recent invoices for this branch
-  const recentInvoices = [...db.invoices]
-    .filter(inv => isTargetBranch(inv.branchId))
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-    .slice(0, 6);
-
-  // Treasury by channels for this branch
-  const channels = [
+  // Treasury by channels for this branch (memoized)
+  const channels = useMemo(() => [
     { name: 'نقدي', balance: calculateTreasuryBalance(db, 'نقدي', targetBranch) },
     { name: 'فودافون كاش', balance: calculateTreasuryBalance(db, 'Vodafone Cash', targetBranch) },
     { name: 'إنستاباي', balance: calculateTreasuryBalance(db, 'InstaPay', targetBranch) },
     { name: 'فيزا POS', balance: calculateTreasuryBalance(db, 'Visa / POS', targetBranch) },
     { name: 'تحويل بنكي', balance: calculateTreasuryBalance(db, 'تحويل بنكي', targetBranch) }
-  ];
+  ], [db, targetBranch]);
 
   return (
     <div className="space-y-6 pb-12">

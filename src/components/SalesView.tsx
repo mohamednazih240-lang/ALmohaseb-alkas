@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   ShoppingCart,
   Boxes,
@@ -102,47 +102,53 @@ export const SalesView: React.FC<SalesViewProps> = ({
     'sales_editor'
   );
 
-  // Filter sales invoices for active branch
+  // Filter sales invoices for active branch (memoized)
   const todayStr = new Date().toISOString().slice(0, 10);
   const currentMonthStr = todayStr.slice(0, 7);
 
-  const salesInvoices = db.invoices
-    .filter(inv => inv.type === 'sale')
-    .filter(inv => {
-      const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
-      if (!matchBranch) return false;
+  const salesInvoices = useMemo(() => {
+    return db.invoices
+      .filter(inv => inv.type === 'sale')
+      .filter(inv => {
+        const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
+        if (!matchBranch) return false;
 
-      const s = searchTerm.trim().toLowerCase();
-      const matchSearch = !s ||
-        inv.number.toLowerCase().includes(s) ||
-        inv.partyName.toLowerCase().includes(s) ||
-        (inv.notes && inv.notes.toLowerCase().includes(s)) ||
-        inv.items.some(it => it.productName.toLowerCase().includes(s));
+        const s = searchTerm.trim().toLowerCase();
+        const matchSearch = !s ||
+          inv.number.toLowerCase().includes(s) ||
+          inv.partyName.toLowerCase().includes(s) ||
+          (inv.notes && inv.notes.toLowerCase().includes(s)) ||
+          inv.items.some(it => it.productName.toLowerCase().includes(s));
 
-      const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
+        const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
 
-      let matchDate = true;
-      if (dateFilter === 'today') matchDate = inv.date === todayStr;
-      else if (dateFilter === 'month') matchDate = inv.date.startsWith(currentMonthStr);
+        let matchDate = true;
+        if (dateFilter === 'today') matchDate = inv.date === todayStr;
+        else if (dateFilter === 'month') matchDate = inv.date.startsWith(currentMonthStr);
 
-      return matchSearch && matchStatus && matchDate;
-    })
-    .sort((a, b) => {
-      if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
-      if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
-      if (sortBy === 'highest') return b.total - a.total;
-      if (sortBy === 'lowest') return a.total - b.total;
-      return 0;
-    });
+        return matchSearch && matchStatus && matchDate;
+      })
+      .sort((a, b) => {
+        if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
+        if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
+        if (sortBy === 'highest') return b.total - a.total;
+        if (sortBy === 'lowest') return a.total - b.total;
+        return 0;
+      });
+  }, [db.invoices, branchFilter, targetBranchId, searchTerm, statusFilter, dateFilter, sortBy, todayStr, currentMonthStr]);
 
-  // Statistics for this branch
-  const branchSales = db.invoices
-    .filter(i => i.type === 'sale')
-    .filter(i => branchFilter === 'all' || (i.branchId === targetBranchId || (!i.branchId && targetBranchId === 'br_main')));
-
-  const totalSales = branchSales.reduce((s, i) => s + i.total, 0);
-  const totalCollected = branchSales.reduce((s, i) => s + i.paid, 0);
-  const totalPending = totalSales - totalCollected;
+  // Statistics for this branch (memoized)
+  const { totalSales, totalCollected, totalPending } = useMemo(() => {
+    let sales = 0;
+    let collected = 0;
+    for (const i of db.invoices) {
+      if (i.type === 'sale' && (branchFilter === 'all' || (i.branchId === targetBranchId || (!i.branchId && targetBranchId === 'br_main')))) {
+        sales += i.total;
+        collected += i.paid;
+      }
+    }
+    return { totalSales: sales, totalCollected: collected, totalPending: sales - collected };
+  }, [db.invoices, branchFilter, targetBranchId]);
 
   // Print all filtered sales invoices in approved design
   const handlePrintBatch = () => {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   ShoppingBag,
   Plus,
@@ -94,47 +94,53 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     'purchases_editor'
   );
 
-  // Filter purchase invoices for active branch
+  // Filter purchase invoices for active branch (memoized)
   const todayStr = new Date().toISOString().slice(0, 10);
   const currentMonthStr = todayStr.slice(0, 7);
 
-  const purchaseInvoices = db.invoices
-    .filter(inv => inv.type === 'purchase')
-    .filter(inv => {
-      const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
-      if (!matchBranch) return false;
+  const purchaseInvoices = useMemo(() => {
+    return db.invoices
+      .filter(inv => inv.type === 'purchase')
+      .filter(inv => {
+        const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
+        if (!matchBranch) return false;
 
-      const s = searchTerm.trim().toLowerCase();
-      const matchSearch = !s ||
-        inv.number.toLowerCase().includes(s) ||
-        inv.partyName.toLowerCase().includes(s) ||
-        (inv.notes && inv.notes.toLowerCase().includes(s)) ||
-        inv.items.some(it => it.productName.toLowerCase().includes(s));
+        const s = searchTerm.trim().toLowerCase();
+        const matchSearch = !s ||
+          inv.number.toLowerCase().includes(s) ||
+          inv.partyName.toLowerCase().includes(s) ||
+          (inv.notes && inv.notes.toLowerCase().includes(s)) ||
+          inv.items.some(it => it.productName.toLowerCase().includes(s));
 
-      const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
+        const matchStatus = statusFilter === 'all' || inv.status === statusFilter;
 
-      let matchDate = true;
-      if (dateFilter === 'today') matchDate = inv.date === todayStr;
-      else if (dateFilter === 'month') matchDate = inv.date.startsWith(currentMonthStr);
+        let matchDate = true;
+        if (dateFilter === 'today') matchDate = inv.date === todayStr;
+        else if (dateFilter === 'month') matchDate = inv.date.startsWith(currentMonthStr);
 
-      return matchSearch && matchStatus && matchDate;
-    })
-    .sort((a, b) => {
-      if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
-      if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
-      if (sortBy === 'highest') return b.total - a.total;
-      if (sortBy === 'lowest') return a.total - b.total;
-      return 0;
-    });
+        return matchSearch && matchStatus && matchDate;
+      })
+      .sort((a, b) => {
+        if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
+        if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
+        if (sortBy === 'highest') return b.total - a.total;
+        if (sortBy === 'lowest') return a.total - b.total;
+        return 0;
+      });
+  }, [db.invoices, branchFilter, targetBranchId, searchTerm, statusFilter, dateFilter, sortBy, todayStr, currentMonthStr]);
 
-  // Statistics for this branch
-  const branchPurchases = db.invoices
-    .filter(i => i.type === 'purchase')
-    .filter(i => branchFilter === 'all' || (i.branchId === targetBranchId || (!i.branchId && targetBranchId === 'br_main')));
-
-  const totalPurchases = branchPurchases.reduce((s, i) => s + i.total, 0);
-  const totalPaid = branchPurchases.reduce((s, i) => s + i.paid, 0);
-  const totalDue = totalPurchases - totalPaid;
+  // Statistics for this branch (memoized)
+  const { totalPurchases, totalPaid, totalDue } = useMemo(() => {
+    let purchases = 0;
+    let paid = 0;
+    for (const i of db.invoices) {
+      if (i.type === 'purchase' && (branchFilter === 'all' || (i.branchId === targetBranchId || (!i.branchId && targetBranchId === 'br_main')))) {
+        purchases += i.total;
+        paid += i.paid;
+      }
+    }
+    return { totalPurchases: purchases, totalPaid: paid, totalDue: purchases - paid };
+  }, [db.invoices, branchFilter, targetBranchId]);
 
   // Print all filtered purchase invoices in approved design
   const handlePrintBatch = () => {

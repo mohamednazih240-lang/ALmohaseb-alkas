@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   BarChart3,
   TrendingUp,
@@ -65,14 +65,23 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId }) 
   };
 
   const branchParam = selectedBranchId === 'all' ? undefined : selectedBranchId;
-  const summary = calculateFinancialSummary(db, branchParam);
+  const summary = useMemo(() => calculateFinancialSummary(db, branchParam), [db, branchParam]);
 
-  // Filtered sales and purchases
-  const filteredSales = db.invoices.filter(i => i.type === 'sale' && isTargetBranch(i.branchId));
-  const filteredPurchases = db.invoices.filter(i => i.type === 'purchase' && isTargetBranch(i.branchId));
+  // Filtered sales and purchases (memoized)
+  const filteredSales = useMemo(
+    () => db.invoices.filter(i => i.type === 'sale' && isTargetBranch(i.branchId)),
+    [db.invoices, selectedBranchId]
+  );
+  const filteredPurchases = useMemo(
+    () => db.invoices.filter(i => i.type === 'purchase' && isTargetBranch(i.branchId)),
+    [db.invoices, selectedBranchId]
+  );
 
-  // Resolved branch products
-  const branchProducts = db.products.map(p => selectedBranchId === 'all' ? p : getProductForBranch(p, selectedBranchId));
+  // Resolved branch products (memoized)
+  const branchProducts = useMemo(
+    () => db.products.map(p => selectedBranchId === 'all' ? p : getProductForBranch(p, selectedBranchId)),
+    [db.products, selectedBranchId]
+  );
 
   // Generate structured report blocks for UniversalPrintModal
   const generateReportBlocks = (): { title: string; docs: MovementPrintBlock[] } => {
