@@ -48,6 +48,7 @@ import {
   pushDatabaseToCloud,
   fetchDatabaseFromCloud,
   subscribeToSyncStatus,
+  normalizeCompanyCode,
   CloudSyncState
 } from './services/cloudSyncService';
 
@@ -130,10 +131,20 @@ export default function App() {
     });
 
     // 2. Fetch fresh cloud database on startup
-    // 2. Fetch fresh cloud database on startup
-    fetchDatabaseFromCloud().then(cloudDb => {
+    const initialCompanyCode = normalizeCompanyCode(db.settings.companyCode);
+    fetchDatabaseFromCloud(initialCompanyCode).then(cloudDb => {
       if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
         setDb(prevDb => {
+          // Safeguard: If local has real data (invoices/customers) and cloud is empty, don't overwrite local with empty cloud
+          const localHasData = (prevDb.invoices && prevDb.invoices.length > 0) || (prevDb.customers && prevDb.customers.length > 0);
+          const cloudHasData = (cloudDb.invoices && cloudDb.invoices.length > 0) || (cloudDb.customers && cloudDb.customers.length > 0);
+
+          if (localHasData && !cloudHasData) {
+            console.log('Preserving local invoices and accounts, syncing to cloud...');
+            pushDatabaseToCloud(prevDb, true);
+            return prevDb;
+          }
+
           const storedSession = getStoredAuthSession();
           const currentLocalUser = storedSession?.user || prevDb.currentUser;
           const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
@@ -160,7 +171,7 @@ export default function App() {
 
   // 4. Subscribe to live Firestore updates across all phones (reacts to company code changes)
   useEffect(() => {
-    const currentCompanyCode = (db.settings.companyCode || 'COMP-101').trim().toUpperCase();
+    const currentCompanyCode = normalizeCompanyCode(db.settings.companyCode);
 
     const unsubCloud = subscribeToCloudDatabase((remoteDb, updatedBy) => {
       // Visual feedback when an invoice, voucher, or report is synced from another device

@@ -431,18 +431,32 @@ export function saveTenantDatabase(tenantId: string, db: AccountingDB): void {
 export function loadDatabase(): AccountingDB {
   const activeTenantId = getActiveTenantId();
   if (activeTenantId) {
-    return loadTenantDatabase(activeTenantId);
+    const tenantDb = loadTenantDatabase(activeTenantId);
+    if (tenantDb) return tenantDb;
   }
 
   // If no active tenant, check if we have any registered companies
   const companies = getCompaniesList();
   if (companies.length > 0) {
+    // Look for any tenant that already has saved data
+    for (const comp of companies) {
+      try {
+        const raw = localStorage.getItem(getTenantStorageKey(comp.id));
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && Array.isArray(parsed.accounts) && (parsed.invoices?.length > 0 || parsed.products?.length > 0)) {
+            setActiveTenantId(comp.id);
+            return loadTenantDatabase(comp.id);
+          }
+        }
+      } catch (e) {}
+    }
     const firstCompany = companies[0];
     setActiveTenantId(firstCompany.id);
     return loadTenantDatabase(firstCompany.id);
   }
 
-  // Check if legacy database exists: if so, migrate to initial primary company
+  // Check if primary database exists
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -465,7 +479,7 @@ export function loadDatabase(): AccountingDB {
       }
     }
   } catch (e) {
-    console.warn('Legacy database migration note:', e);
+    console.warn('Primary database load note:', e);
   }
 
   // Default: Return pristine initial seed data
@@ -478,14 +492,14 @@ export function saveDatabase(db: AccountingDB): void {
   const activeTenantId = getActiveTenantId();
   if (activeTenantId) {
     saveTenantDatabase(activeTenantId, db);
-  } else {
-    // Also save to default storage key
-    saveToIndexedDB(db);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-    } catch (err) {
-      console.warn('localStorage limit notice:', err);
-    }
+  }
+
+  // Always save a primary fallback copy to ensure no data is ever lost between sessions
+  saveToIndexedDB(db, IDB_KEY);
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  } catch (err) {
+    console.warn('localStorage limit notice:', err);
   }
 }
 

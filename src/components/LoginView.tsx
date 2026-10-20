@@ -35,9 +35,10 @@ import {
   fetchDatabaseFromCloud,
   pushDatabaseToCloud,
   fetchCompanyUsersAndBranchesByCode,
+  normalizeCompanyCode,
   CompanyCloudResult
 } from '../services/cloudSyncService';
-import { getCompaniesList, registerCompany, getCompanyByCode } from '../services/tenantService';
+import { getCompaniesList, registerCompany, getCompanyByCode, setActiveTenantId } from '../services/tenantService';
 
 interface LoginViewProps {
   settings: AppSettings;
@@ -54,6 +55,7 @@ export interface CompanyAccountData {
   branches: Branch[];
   ownerEmail?: string;
   source?: 'cloud' | 'local';
+  db?: AccountingDB;
 }
 
 export interface SavedAccountItem {
@@ -140,11 +142,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
   });
 
   // =========================================================================
+  // =========================================================================
   // Requirement 1 & 3: Database Query / Cloud API & Auto-Refresh Function
   // Fetches ALL registered users (not just default/admin) and branches from cloud
   // =========================================================================
   const fetchAndSyncCompanyUsers = async (codeToQuery?: string, silent: boolean = false) => {
-    const code = (codeToQuery || companyCodeInput || defaultCode).trim();
+    const rawCode = (codeToQuery || companyCodeInput || defaultCode);
+    const code = normalizeCompanyCode(rawCode);
     if (!code) {
       if (!silent) showToast('يرجى كتابة كود الشركة للبحث والمزامنة', 'error');
       return;
@@ -158,10 +162,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
       if (result && Array.isArray(result.users) && result.users.length > 0) {
         const compData: CompanyAccountData = {
           companyName: result.companyName,
-          companyCode: result.companyCode,
+          companyCode: normalizeCompanyCode(result.companyCode),
           users: result.users, // Full array of all registered users
           branches: result.branches || [],
-          source: result.source
+          source: result.source,
+          db: result.db
         };
 
         setLoadedCompany(compData);
@@ -187,10 +192,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
         const localDb = currentDb;
         const compData: CompanyAccountData = {
           companyName: localDb.settings.company || 'المنشأة',
-          companyCode: localDb.settings.companyCode || 'COMP-101',
+          companyCode: normalizeCompanyCode(localDb.settings.companyCode),
           users: localDb.users || [],
           branches: localDb.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }],
-          source: 'local'
+          source: 'local',
+          db: localDb
         };
         setLoadedCompany(compData);
         setSelectedUserId(compData.users[0]?.id || '');
@@ -237,12 +243,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
     try {
       // 1. Fetch freshest database state from Cloud Firestore to ensure accurate password verification
-      let targetDb: AccountingDB = currentDb;
-      const codeToQuery = loadedCompany?.companyCode || companyCodeInput || defaultCode;
+      let targetDb: AccountingDB = loadedCompany?.db || currentDb;
+      const codeToQuery = normalizeCompanyCode(loadedCompany?.companyCode || companyCodeInput || defaultCode);
       const freshCloud = await fetchCompanyUsersAndBranchesByCode(codeToQuery);
 
       if (freshCloud && freshCloud.db) {
         targetDb = freshCloud.db;
+      } else if (loadedCompany?.db) {
+        targetDb = loadedCompany.db;
       }
 
       // 2. Find the selected user by ID (or username) in the freshest database
@@ -285,13 +293,25 @@ export const LoginView: React.FC<LoginViewProps> = ({
       }
       targetDb.currentUser = updatedUser;
 
+      // Register or switch company tenant
+      const activeCompCode = normalizeCompanyCode(targetDb.settings.companyCode || loadedCompany?.companyCode);
+      const tenant = registerCompany({
+        name: targetDb.settings.company || loadedCompany?.companyName || 'منشأة حساباتي',
+        code: activeCompCode,
+        adminName: updatedUser.name,
+        adminUsername: updatedUser.username,
+        currency: targetDb.settings.currency || 'ج.م'
+      });
+      setActiveTenantId(tenant.id);
+
       // Save locally and push to cloud
       saveDatabase(targetDb);
-      pushDatabaseToCloud(targetDb).catch(() => {});
+      pushDatabaseToCloud(targetDb, true).catch(() => {});
 
       const session: AuthSession = {
         user: updatedUser,
         isGoogle: false,
+        tenantId: tenant.id,
         companyName: loadedCompany?.companyName || targetDb.settings.company || 'حساباتي'
       };
 
@@ -574,27 +594,31 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   </button>
                 </div>
 
-                {/* Company Registered Quick Chips */}
+                {/* Company Registered Quick Chips - De-duplicated by normalized code */}
                 {registeredTenants.length > 0 && (
                   <div className="flex items-center gap-1.5 flex-wrap pt-1">
                     <span className="text-[10px] text-slate-400 font-medium">المنشآت المسجلة:</span>
-                    {registeredTenants.slice(0, 3).map(t => (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => {
-                          setCompanyCodeInput(t.code || t.id);
-                          fetchAndSyncCompanyUsers(t.code || t.id, false);
-                        }}
-                        className={`text-[9.5px] px-2 py-0.5 rounded-lg border font-mono transition cursor-pointer ${
-                          companyCodeInput === (t.code || t.id)
-                            ? 'bg-amber-500 text-slate-950 border-amber-500 font-bold'
-                            : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-                        }`}
-                      >
-                        {t.code || 'COMP-101'} ({t.name})
-                      </button>
-                    ))}
+                    {Array.from(new Map(registeredTenants.map(t => [normalizeCompanyCode(t.code || t.id), t])).values()).slice(0, 4).map(t => {
+                      const normCode = normalizeCompanyCode(t.code || t.id);
+                      const isSelected = normalizeCompanyCode(companyCodeInput) === normCode;
+                      return (
+                        <button
+                          key={t.id}
+                          type="button"
+                          onClick={() => {
+                            setCompanyCodeInput(normCode);
+                            fetchAndSyncCompanyUsers(normCode, false);
+                          }}
+                          className={`text-[9.5px] px-2 py-0.5 rounded-lg border font-mono transition cursor-pointer ${
+                            isSelected
+                              ? 'bg-amber-500 text-slate-950 border-amber-500 font-bold'
+                              : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                          }`}
+                        >
+                          {normCode} ({t.name})
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </div>

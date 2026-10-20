@@ -34,6 +34,7 @@ import {
   AppSettings,
   Branch
 } from '../types/accounting';
+import { normalizeCompanyCode } from '../services/cloudSyncService';
 
 export interface PermissionItem {
   key: keyof UserPermissions;
@@ -1337,6 +1338,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   required
                   value={settingsForm.companyCode || 'COMP-101'}
                   onChange={e => setSettingsForm({ ...settingsForm, companyCode: e.target.value.toUpperCase() })}
+                  onBlur={e => setSettingsForm({ ...settingsForm, companyCode: normalizeCompanyCode(e.target.value) })}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold font-mono uppercase tracking-wider text-blue-900"
                   placeholder="COMP-101"
                 />

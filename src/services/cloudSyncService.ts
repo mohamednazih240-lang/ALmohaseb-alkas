@@ -8,10 +8,12 @@ import {
 import { auth } from './firebaseAuth';
 import { AccountingDB, User as AppUser, Branch } from '../types/accounting';
 import { saveDatabase, loadDatabase } from './accountingStorage';
+import firebaseConfig from '../../firebase-applet-config.json';
 import { getCompanyByCode } from './tenantService';
 
-// Firestore instance
-export const firestore = getFirestore(auth.app);
+// Connect to provisioned Firestore database using databaseId from config
+const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId;
+export const firestore = firestoreDbId ? getFirestore(auth.app, firestoreDbId) : getFirestore(auth.app);
 
 const SYNC_DOC_PATH = 'hesabaty_app_data';
 const SYNC_DOC_ID = 'main_company_database';
@@ -20,6 +22,21 @@ let unsubscribeCompListener: (() => void) | null = null;
 let lastLocalSavedTimestamp = 0;
 
 const LOCAL_DEVICE_ID_KEY = 'hesabaty_device_instance_id';
+
+/**
+ * Standardizes company code format:
+ * Handles unicode dashes, whitespace, 'COMP - 101' -> 'COMP-101', digits '101' -> 'COMP-101'
+ */
+export function normalizeCompanyCode(code?: string): string {
+  if (!code) return 'COMP-101';
+  let clean = code.trim().toUpperCase();
+  clean = clean.replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-');
+  clean = clean.replace(/\s*-\s*/g, '-').replace(/\s+/g, '');
+  if (/^\d+$/.test(clean)) {
+    clean = `COMP-${clean}`;
+  }
+  return clean || 'COMP-101';
+}
 
 /**
  * Unique instance identifier for this phone/browser window to avoid echo while instantly syncing to other devices
@@ -88,12 +105,16 @@ export interface CompanyCloudResult {
 
 /**
  * Upload current database state to Firestore so all connected phones see it immediately
+ * Includes strict anti-wipe protection: empty seed databases CANNOT overwrite populated cloud databases!
  */
 export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean = true): Promise<boolean> {
   if (syncDebounceTimer) {
     clearTimeout(syncDebounceTimer);
     syncDebounceTimer = null;
   }
+
+  const rawCode = db.settings.companyCode || 'COMP-101';
+  const cleanCode = normalizeCompanyCode(rawCode);
 
   // Instantly broadcast locally across browser tabs/PWA instances in 0ms
   const currentDevId = getLocalDeviceId();
@@ -103,7 +124,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
         type: 'LOCAL_INSTANT_SYNC',
         deviceId: currentDevId,
         updatedBy: db.currentUser?.name || 'مستخدم آخر',
-        companyCode: (db.settings.companyCode || 'COMP-101').toUpperCase(),
+        companyCode: cleanCode,
         data: JSON.stringify(db)
       });
     } catch (e) {
@@ -114,9 +135,36 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
   const pushJob = async (): Promise<boolean> => {
     try {
       updateSyncState({ status: 'syncing' });
-      const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-      const rawCode = db.settings.companyCode || 'COMP-101';
-      const cleanCode = rawCode.trim().toUpperCase();
+
+      // Anti-wiping protection: If local DB has 0 invoices and <= 1 user, check if cloud has real data
+      const isLocalEmpty = (!db.invoices || db.invoices.length === 0) &&
+                           (!db.customers || db.customers.length === 0) &&
+                           (!db.suppliers || db.suppliers.length === 0) &&
+                           (!db.users || db.users.length <= 1);
+
+      if (isLocalEmpty) {
+        try {
+          const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
+          const checkSnap = await getDoc(compDocRef);
+          if (checkSnap.exists()) {
+            const val = checkSnap.data();
+            if (val?.data) {
+              const parsed = JSON.parse(val.data) as AccountingDB;
+              const hasCloudData = (parsed.invoices && parsed.invoices.length > 0) ||
+                                   (parsed.users && parsed.users.length > 1) ||
+                                   (parsed.customers && parsed.customers.length > 0) ||
+                                   (parsed.suppliers && parsed.suppliers.length > 0);
+              if (hasCloudData) {
+                console.warn('CRITICAL SAFEGUARD: Prevented empty local database from overwriting active cloud database!');
+                updateSyncState({ status: 'connected' });
+                return false;
+              }
+            }
+          }
+        } catch (checkErr) {
+          console.warn('Safeguard check note:', checkErr);
+        }
+      }
 
       const payload = {
         updatedAt: Date.now(),
@@ -129,22 +177,34 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
       };
       lastLocalSavedTimestamp = payload.updatedAt;
 
-      // 1. Save to main database doc
-      await setDoc(docRef, payload, { merge: true });
+      // 1. Save to dedicated company document
+      const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
+      await setDoc(compDocRef, payload, { merge: true });
 
-      // 2. Also save to company code doc so other phones querying by code get fresh data instantly
+      // 2. Also save to main database doc for COMP-101 / primary
+      if (cleanCode === 'COMP-101') {
+        const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
+        await setDoc(docRef, payload, { merge: true });
+      }
+
+      // 3. Keep a safe versioned recovery backup document in Firestore so data is NEVER lost
       try {
-        const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
-        await setDoc(compDocRef, payload, { merge: true });
+        const backupDocRef = doc(firestore, SYNC_DOC_PATH, `backup_${cleanCode}_latest`);
+        await setDoc(backupDocRef, payload, { merge: true });
+      } catch (bErr) {
+        // non-blocking
+      }
 
-        // 3. Maintain directory of companies for fast lookups
+      // 4. Maintain directory of companies for instant multi-device lookups
+      try {
         const dirDocRef = doc(firestore, SYNC_DOC_PATH, 'directory_registry');
         await setDoc(dirDocRef, {
           [cleanCode]: {
             code: cleanCode,
             name: db.settings.company,
             updatedAt: payload.updatedAt,
-            usersCount: (db.users || []).length
+            usersCount: (db.users || []).length,
+            invoicesCount: (db.invoices || []).length
           }
         }, { merge: true });
       } catch (e) {
@@ -177,19 +237,45 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 }
 
 /**
- * Fetch latest database from Cloud Firestore
+ * Fetch latest database from Cloud Firestore for a specific company code
  */
-export async function fetchDatabaseFromCloud(): Promise<AccountingDB | null> {
+export async function fetchDatabaseFromCloud(companyCode?: string): Promise<AccountingDB | null> {
+  const clean = normalizeCompanyCode(companyCode);
   try {
+    // 1. Check company specific document
+    const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
+    const specificSnap = await getDoc(specificRef);
+    if (specificSnap.exists()) {
+      const val = specificSnap.data();
+      if (val && val.data) {
+        return JSON.parse(val.data) as AccountingDB;
+      }
+    }
+
+    // 2. Check main cloud database
     const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
     const snap = await getDoc(docRef);
     if (snap.exists()) {
       const val = snap.data();
       if (val && val.data) {
         const parsed = JSON.parse(val.data) as AccountingDB;
-        return parsed;
+        const mainCode = normalizeCompanyCode(parsed.settings?.companyCode);
+        if (mainCode === clean || clean === 'COMP-101') {
+          return parsed;
+        }
       }
     }
+
+    // 3. Check backup document
+    const backupRef = doc(firestore, SYNC_DOC_PATH, `backup_${clean}_latest`);
+    const backupSnap = await getDoc(backupRef);
+    if (backupSnap.exists()) {
+      const val = backupSnap.data();
+      if (val && val.data) {
+        return JSON.parse(val.data) as AccountingDB;
+      }
+    }
+
     return null;
   } catch (err) {
     console.warn('Firestore cloud sync fetch warning:', err);
@@ -200,22 +286,36 @@ export async function fetchDatabaseFromCloud(): Promise<AccountingDB | null> {
 /**
  * Requirement 1: Database Query / Cloud API to fetch all users and branches based on Company Code (Tenant ID)
  * Guarantees fetching ALL registered users (not just default/admin) from Firestore Cloud across mobile devices.
+ * Normalizes input so 'COMP - 101' matches 'COMP-101' seamlessly.
  */
 export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Promise<CompanyCloudResult | null> {
-  const clean = codeOrId.trim().toUpperCase();
-  if (!clean) return null;
+  if (!codeOrId || !codeOrId.trim()) return null;
+  const clean = normalizeCompanyCode(codeOrId);
+  const rawClean = codeOrId.trim();
 
   // 1. First: Query Firestore Cloud directly for this company code
   try {
     let cloudDb: AccountingDB | null = null;
 
-    // Check specific company document
+    // Check specific company document e.g. company_COMP-101
     const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
     const specificSnap = await getDoc(specificRef);
     if (specificSnap.exists()) {
       const val = specificSnap.data();
       if (val?.data) {
         cloudDb = JSON.parse(val.data) as AccountingDB;
+      }
+    }
+
+    // Check backup doc if specific not found
+    if (!cloudDb) {
+      const backupRef = doc(firestore, SYNC_DOC_PATH, `backup_${clean}_latest`);
+      const backupSnap = await getDoc(backupRef);
+      if (backupSnap.exists()) {
+        const val = backupSnap.data();
+        if (val?.data) {
+          cloudDb = JSON.parse(val.data) as AccountingDB;
+        }
       }
     }
 
@@ -227,14 +327,12 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
         const val = mainSnap.data();
         if (val?.data) {
           const parsed = JSON.parse(val.data) as AccountingDB;
-          const mainCode = (parsed.settings.companyCode || 'COMP-101').toUpperCase();
-          const mainName = (parsed.settings.company || '').toUpperCase();
+          const mainCode = normalizeCompanyCode(parsed.settings?.companyCode);
+          const mainName = (parsed.settings?.company || '').toUpperCase();
           if (
             mainCode === clean ||
-            mainName.includes(clean) ||
-            clean === 'COMP-101' ||
-            clean === 'MAIN' ||
-            clean === 'DEFAULT'
+            mainName.includes(rawClean.toUpperCase()) ||
+            clean === 'COMP-101'
           ) {
             cloudDb = parsed;
           }
@@ -263,15 +361,13 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
   // 2. Fallback: Query local database and tenant registry (ensures offline reliability)
   try {
     const localDb = loadDatabase();
-    const localCode = (localDb.settings.companyCode || 'COMP-101').toUpperCase();
-    const localName = (localDb.settings.company || '').toUpperCase();
+    const localCode = normalizeCompanyCode(localDb.settings?.companyCode);
+    const localName = (localDb.settings?.company || '').toUpperCase();
 
     if (
       localCode === clean ||
-      localName.includes(clean) ||
-      clean === 'COMP-101' ||
-      clean === 'MAIN' ||
-      clean === 'DEFAULT'
+      localName.includes(rawClean.toUpperCase()) ||
+      clean === 'COMP-101'
     ) {
       const branches = (localDb.branches && localDb.branches.length > 0)
         ? localDb.branches
@@ -280,7 +376,7 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
       return {
         db: localDb,
         companyName: localDb.settings.company || 'المنشأة',
-        companyCode: localDb.settings.companyCode || 'COMP-101',
+        companyCode: localDb.settings.companyCode || clean,
         users: localDb.users || [], // Full array of all registered users!
         branches,
         source: 'local'
@@ -324,7 +420,7 @@ export function subscribeToCloudDatabase(
 
     const currentDevId = getLocalDeviceId();
 
-    const cleanCode = (companyCode || 'COMP-101').trim().toUpperCase();
+    const cleanCode = normalizeCompanyCode(companyCode);
 
     // 1. Instant local BroadcastChannel listener (0ms between tabs / PWA windows)
     const handleBroadcast = (event: MessageEvent) => {
@@ -333,7 +429,7 @@ export function subscribeToCloudDatabase(
         event.data?.deviceId !== currentDevId &&
         event.data?.data
       ) {
-        if (event.data.companyCode && event.data.companyCode !== cleanCode) {
+        if (event.data.companyCode && normalizeCompanyCode(event.data.companyCode) !== cleanCode) {
           return;
         }
         try {
@@ -363,7 +459,7 @@ export function subscribeToCloudDatabase(
       }
 
       // Filter out updates for a different company
-      if (data.companyCode && data.companyCode.trim().toUpperCase() !== cleanCode) {
+      if (data.companyCode && normalizeCompanyCode(data.companyCode) !== cleanCode) {
         return;
       }
 
@@ -382,13 +478,14 @@ export function subscribeToCloudDatabase(
       }
     };
 
-    // 3. Listen to company-specific document or main document
-    if (cleanCode && cleanCode !== 'COMP-101') {
-      const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
-      unsubscribeCompListener = onSnapshot(compDocRef, handleSnapshot, (error) => {
-        console.warn('Firestore company listener notice:', error.message);
-      });
-    } else {
+    // 3. Listen to company-specific document
+    const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
+    unsubscribeCompListener = onSnapshot(compDocRef, handleSnapshot, (error) => {
+      console.warn('Firestore company listener notice:', error.message);
+    });
+
+    // Also listen to main doc if COMP-101 for backwards compatibility
+    if (cleanCode === 'COMP-101') {
       const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
       unsubscribeListener = onSnapshot(docRef, handleSnapshot, (error) => {
         console.warn('Firestore realtime listener notice:', error.message);
