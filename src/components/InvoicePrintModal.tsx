@@ -33,14 +33,16 @@ interface InvoicePrintModalProps {
 
 export type PaperSize = 'A4' | 'A5' | 'thermal';
 
-// Helper to format currency numbers cleanly with NO unnecessary fractional decimals (.00)
+// Helper to format currency numbers cleanly with NO unnecessary fractional decimals (.00) and no floating point artifacts
 export const formatMoneyClean = (val: number | string | undefined): string => {
-  const num = Number(val) || 0;
-  // If it's an integer (no fractions), show without .00 (e.g. 580 instead of 580.00)
-  if (Math.abs(num - Math.round(num)) < 0.001) {
+  if (val === undefined || val === null || val === '') return '0';
+  const num = Number(val);
+  if (isNaN(num)) return String(val);
+  if (Math.abs(num - Math.round(num)) < 0.0001) {
     return Math.round(num).toString();
   }
-  return num.toFixed(2);
+  const fixed = num.toFixed(2);
+  return fixed.endsWith('.00') ? fixed.slice(0, -3) : fixed.endsWith('0') ? fixed.slice(0, -1) : fixed;
 };
 
 export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
@@ -69,56 +71,78 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     const prevStyle = document.getElementById('dynamic-paper-print-style');
     if (prevStyle) prevStyle.remove();
 
-    // 2. Inject exact dynamic @page rule and container rules calibrated to fit strictly on ONE PAGE
+    // 2. Inject exact dynamic @page rule and container rules calibrated to fit strictly on ONE PAGE without any row shading
     const styleEl = document.createElement('style');
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
       styleEl.innerHTML = `
-        @page { size: A4 portrait; margin: 4mm 5mm; }
+        @page { size: A4 portrait; margin: 6mm 8mm; }
         @media print {
           html, body {
-            width: 210mm !important;
-            height: 297mm !important;
+            width: 100% !important;
+            height: 100% !important;
+            max-height: 100% !important;
             margin: 0 !important;
             padding: 0 !important;
             overflow: hidden !important;
+            background: #ffffff !important;
           }
           #invoice-printable-content, .invoice-container {
             width: 100% !important;
-            max-width: 198mm !important;
-            max-height: 285mm !important;
+            max-width: 196mm !important;
+            max-height: 283mm !important;
             height: auto !important;
             margin: 0 auto !important;
             page-break-inside: avoid !important;
             page-break-after: avoid !important;
+            page-break-before: avoid !important;
             break-inside: avoid !important;
             break-after: avoid !important;
+            break-before: avoid !important;
             overflow: hidden !important;
+            background: #ffffff !important;
+          }
+          /* إلغاء أي تظليل نهائياً أثناء الطباعة */
+          table, th, td, tr, .info-box, .header, .invoice-header {
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            color: #000000 !important;
           }
         }
       `;
     } else if (paperSize === 'A5') {
       styleEl.innerHTML = `
-        @page { size: A5 portrait; margin: 3mm 4mm; }
+        @page { size: A5 portrait; margin: 4mm 5mm; }
         @media print {
           html, body {
-            width: 148mm !important;
-            height: 210mm !important;
+            width: 100% !important;
+            height: 100% !important;
+            max-height: 100% !important;
             margin: 0 !important;
             padding: 0 !important;
             overflow: hidden !important;
+            background: #ffffff !important;
           }
           #invoice-printable-content, .invoice-container {
             width: 100% !important;
             max-width: 139mm !important;
-            max-height: 202mm !important;
+            max-height: 200mm !important;
             height: auto !important;
             margin: 0 auto !important;
             page-break-inside: avoid !important;
             page-break-after: avoid !important;
+            page-break-before: avoid !important;
             break-inside: avoid !important;
             break-after: avoid !important;
+            break-before: avoid !important;
             overflow: hidden !important;
+            background: #ffffff !important;
+          }
+          /* إلغاء أي تظليل نهائياً أثناء الطباعة */
+          table, th, td, tr, .info-box, .header, .invoice-header {
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            color: #000000 !important;
           }
         }
       `;
@@ -249,8 +273,9 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
                     paperSize === 'A5' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
                   }`}
+                  title="مقاس A5 (نصف ورقة - 148×210 مم)"
                 >
-                  مقاس A5
+                  مقاس A5 (نصف ورقة)
                 </button>
                 <button
                   type="button"
@@ -258,8 +283,9 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
                     paperSize === 'A4' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
                   }`}
+                  title="مقاس A4 (ورقة كاملة - 210×297 مم)"
                 >
-                  مقاس A4
+                  مقاس A4 (ورقة كاملة)
                 </button>
                 <button
                   type="button"
@@ -267,6 +293,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
                     paperSize === 'thermal' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
                   }`}
+                  title="طباعة حراري (80 مم)"
                 >
                   حراري (80mm)
                 </button>
@@ -442,21 +469,21 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   <table className="items-table invoice-table">
                     <thead>
                       <tr>
-                        <th style={{ width: '38%' }}>اسم الصنف</th>
-                        <th style={{ width: '30%' }}>الوصف</th>
-                        <th style={{ width: '10%' }}>العدد</th>
-                        <th style={{ width: '10%' }}>السعر</th>
-                        <th style={{ width: '12%' }}>الإجمالي</th>
+                        <th style={{ width: '40%', textAlign: 'right' }}>اسم الصنف</th>
+                        <th style={{ width: '24%', textAlign: 'center' }}>الوصف / الوحدة</th>
+                        <th style={{ width: '10%', textAlign: 'center' }}>العدد</th>
+                        <th style={{ width: '12%', textAlign: 'center' }}>السعر</th>
+                        <th style={{ width: '14%', textAlign: 'center' }}>الإجمالي</th>
                       </tr>
                     </thead>
                     <tbody id="invoiceTable">
                       {invoice.items.map((it, idx) => (
                         <tr key={idx}>
-                          <td style={{ fontWeight: 'bold' }}>{it.productName}</td>
-                          <td style={{ color: '#333' }}>{it.notes || it.unit || '—'}</td>
-                          <td>{formatMoneyClean(it.qty)}</td>
-                          <td>{formatMoneyClean(it.unitPrice)}</td>
-                          <td style={{ fontWeight: 'bold' }}>{formatMoneyClean(it.total)}</td>
+                          <td style={{ fontWeight: 'bold', textAlign: 'right', wordBreak: 'break-word' }}>{it.productName}</td>
+                          <td style={{ color: '#333', textAlign: 'center', wordBreak: 'break-word' }}>{it.notes || it.unit || '—'}</td>
+                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>{formatMoneyClean(it.qty)}</td>
+                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>{formatMoneyClean(it.unitPrice)}</td>
+                          <td style={{ fontWeight: 'bold', textAlign: 'center', whiteSpace: 'nowrap' }}>{formatMoneyClean(it.total)}</td>
                         </tr>
                       ))}
                     </tbody>

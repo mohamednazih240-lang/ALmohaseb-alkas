@@ -54,10 +54,11 @@ export const formatCleanNumber = (val: number | string | undefined): string => {
   if (val === undefined || val === null || val === '') return '0';
   const num = Number(val);
   if (isNaN(num)) return String(val);
-  if (Math.abs(num - Math.round(num)) < 0.001) {
+  if (Math.abs(num - Math.round(num)) < 0.0001) {
     return Math.round(num).toString();
   }
-  return num.toFixed(2);
+  const fixed = num.toFixed(2);
+  return fixed.endsWith('.00') ? fixed.slice(0, -3) : fixed.endsWith('0') ? fixed.slice(0, -1) : fixed;
 };
 
 export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
@@ -87,52 +88,76 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
     const prevStyle = document.getElementById('dynamic-paper-print-style');
     if (prevStyle) prevStyle.remove();
 
-    // 2. Inject exact dynamic @page rule and single page container constraints
+    // 2. Inject exact dynamic @page rule and single page container constraints without any row shading
     const styleEl = document.createElement('style');
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
       styleEl.innerHTML = `
-        @page { size: A4 portrait; margin: 4mm 5mm; }
+        @page { size: A4 portrait; margin: 6mm 8mm; }
         @media print {
           html, body {
-            width: 210mm !important;
-            height: 297mm !important;
+            width: 100% !important;
+            height: 100% !important;
+            max-height: 100% !important;
             margin: 0 !important;
             padding: 0 !important;
             overflow: hidden !important;
+            background: #ffffff !important;
           }
           #universal-printable-content, .invoice-container {
             width: 100% !important;
-            max-width: 198mm !important;
-            max-height: 285mm !important;
+            max-width: 196mm !important;
+            max-height: 283mm !important;
             height: auto !important;
             margin: 0 auto !important;
             page-break-inside: avoid !important;
+            page-break-after: avoid !important;
+            page-break-before: avoid !important;
             break-inside: avoid !important;
+            break-after: avoid !important;
+            break-before: avoid !important;
             overflow: hidden !important;
+            background: #ffffff !important;
+          }
+          table, th, td, tr, .info-box, .header, .invoice-header {
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            color: #000000 !important;
           }
         }
       `;
     } else if (paperSize === 'A5') {
       styleEl.innerHTML = `
-        @page { size: A5 portrait; margin: 3mm 4mm; }
+        @page { size: A5 portrait; margin: 4mm 5mm; }
         @media print {
           html, body {
-            width: 148mm !important;
-            height: 210mm !important;
+            width: 100% !important;
+            height: 100% !important;
+            max-height: 100% !important;
             margin: 0 !important;
             padding: 0 !important;
             overflow: hidden !important;
+            background: #ffffff !important;
           }
           #universal-printable-content, .invoice-container {
             width: 100% !important;
             max-width: 139mm !important;
-            max-height: 202mm !important;
+            max-height: 200mm !important;
             height: auto !important;
             margin: 0 auto !important;
             page-break-inside: avoid !important;
+            page-break-after: avoid !important;
+            page-break-before: avoid !important;
             break-inside: avoid !important;
+            break-after: avoid !important;
+            break-before: avoid !important;
             overflow: hidden !important;
+            background: #ffffff !important;
+          }
+          table, th, td, tr, .info-box, .header, .invoice-header {
+            background: #ffffff !important;
+            background-color: #ffffff !important;
+            color: #000000 !important;
           }
         }
       `;
@@ -205,8 +230,9 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                 className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
                   paperSize === 'A5' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
                 }`}
+                title="مقاس A5 (نصف ورقة - 148×210 مم)"
               >
-                مقاس A5
+                مقاس A5 (نصف ورقة)
               </button>
               <button
                 type="button"
@@ -214,8 +240,9 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                 className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
                   paperSize === 'A4' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
                 }`}
+                title="مقاس A4 (ورقة كاملة - 210×297 مم)"
               >
-                مقاس A4
+                مقاس A4 (ورقة كاملة)
               </button>
               <button
                 type="button"
@@ -223,6 +250,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                 className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
                   paperSize === 'thermal' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
                 }`}
+                title="طباعة حراري (80 مم)"
               >
                 حراري (80mm)
               </button>
@@ -425,7 +453,9 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                   key={cIdx}
                                   style={{
                                     fontWeight: tr.isBold || cIdx === 0 ? 'bold' : 'normal',
-                                    textAlign: doc.tableHeaders[cIdx]?.align || 'center'
+                                    textAlign: doc.tableHeaders[cIdx]?.align || 'center',
+                                    whiteSpace: cIdx > 0 && typeof col === 'string' && /[\d]+/.test(col) ? 'nowrap' : 'normal',
+                                    wordBreak: 'break-word'
                                   }}
                                 >
                                   {col}
