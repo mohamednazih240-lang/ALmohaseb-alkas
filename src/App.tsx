@@ -9,7 +9,8 @@ import {
 import {
   AccountingDB,
   Invoice,
-  Product
+  Product,
+  Branch
 } from './types/accounting';
 import { Header } from './components/Header';
 import { Sidebar, PageId, canUserAccessPage } from './components/Sidebar';
@@ -38,6 +39,7 @@ import { ProcurementView } from './components/ProcurementView';
 import { BarcodePrintingView } from './components/BarcodePrintingView';
 import { LoginView } from './components/LoginView';
 import { GoogleDriveBackupModal } from './components/GoogleDriveBackupModal';
+import { BranchPinModal } from './components/BranchPinModal';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { getStoredAuthSession, logoutUser, AuthSession } from './services/firebaseAuth';
@@ -97,6 +99,28 @@ export default function App() {
     product: null
   });
 
+  // Branch PIN Security & Headquarters Isolation Modal
+  const [branchPinTarget, setBranchPinTarget] = useState<Branch | null>(null);
+
+  // Secure Branch Switch Handler: strictly enforces branch isolation with PIN verification
+  const handleRequestBranchSwitch = useCallback((targetBranchId: string) => {
+    if (targetBranchId === activeBranchId) return;
+
+    // Look up target branch
+    const targetBranch = (db.branches || []).find(b => b.id === targetBranchId);
+    if (!targetBranch) return;
+
+    // If switching back to the main headquarters branch, allow directly
+    if (targetBranch.isMain || targetBranch.id === 'br_main') {
+      setActiveBranchId(targetBranch.id);
+      return;
+    }
+
+    // "وعزل تام بين المقر الرائيسي والفروع ولا يمكن لمدير الفرع الرائيسي الدخول الي احدي الفروع الا بالرقم السري"
+    // Prompt for PIN when entering any subsidiary branch
+    setBranchPinTarget(targetBranch);
+  }, [activeBranchId, db.branches]);
+
   const handleEditInvoice = (inv: Invoice) => {
     setEditingInvoiceState(inv);
     if (inv.type === 'purchase' || inv.invoiceKind === 'purchase') {
@@ -114,6 +138,7 @@ export default function App() {
   useModalBackHandler(productModalState.isOpen, () => setProductModalState({ isOpen: false, product: null }), 'product_modal');
   useModalBackHandler(showDriveBackupModal, () => setShowDriveBackupModal(false), 'drive_backup_modal');
   useModalBackHandler(showLoginView, () => setShowLoginView(false), 'login_view_modal');
+  useModalBackHandler(!!branchPinTarget, () => setBranchPinTarget(null), 'branch_pin_modal');
 
   // Hydrate database from IndexedDB on startup (handles large databases up to gigabytes)
   useEffect(() => {
@@ -173,11 +198,13 @@ export default function App() {
   useEffect(() => {
     const currentCompanyCode = normalizeCompanyCode(db.settings.companyCode);
 
-    const unsubCloud = subscribeToCloudDatabase((remoteDb, updatedBy) => {
+    const unsubCloud = subscribeToCloudDatabase((remoteDb, updatedBy, actionDesc) => {
       // Visual feedback when an invoice, voucher, or report is synced from another device
       if (updatedBy) {
         setLiveSyncNotification({
-          message: `تم تسجيل حركة جديدة وتحديثها فورياً من جهاز «${updatedBy}»`,
+          message: actionDesc
+            ? `مزامنة فورية: ${actionDesc} من جهاز «${updatedBy}»`
+            : `تم تسجيل حركة وتحديثها فورياً من جهاز «${updatedBy}»`,
           author: updatedBy
         });
         setTimeout(() => setLiveSyncNotification(null), 4500);
@@ -189,6 +216,17 @@ export default function App() {
         const matchedUser = currentLocalUser
           ? remoteDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username)
           : null;
+
+        // If this user was deleted by the manager from the system:
+        if (storedSession && !matchedUser && currentLocalUser && currentLocalUser.role !== 'مدير') {
+          localStorage.removeItem('hesabaty_active_user');
+          setAuthSession(null);
+          setShowLoginView(true);
+          return {
+            ...remoteDb,
+            currentUser: remoteDb.users[0]
+          };
+        }
 
         // Apply updated role & permissions while keeping local login session
         const effectiveUser = matchedUser
@@ -396,7 +434,7 @@ export default function App() {
         currentUser={authSession?.user || db.currentUser || db.users[0]}
         branches={db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }]}
         activeBranchId={activeBranchId}
-        onSelectBranch={(bId) => setActiveBranchId(bId)}
+        onSelectBranch={handleRequestBranchSwitch}
         onOpenCreateBranch={() => navigateToPage('branches')}
         lowStockCount={summary.lowStockCount}
         onOpenQuickSearch={() => setShowQuickSearch(true)}
@@ -453,7 +491,7 @@ export default function App() {
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
               onOpenCashMoveModal={() => navigateToPage('treasury')}
               activeBranchId={activeBranchId}
-              onSelectBranch={(bId) => setActiveBranchId(bId)}
+              onSelectBranch={handleRequestBranchSwitch}
             />
           )}
 
@@ -537,6 +575,7 @@ export default function App() {
               onPreviewInvoice={setPreviewInvoice}
               onEditInvoice={handleEditInvoice}
               activeBranchId={activeBranchId}
+              onSelectBranch={handleRequestBranchSwitch}
             />
           )}
 
@@ -623,6 +662,7 @@ export default function App() {
               onUpdateDb={handleUpdateDb}
               onOpenProductModal={(p) => setProductModalState({ isOpen: true, product: p })}
               activeBranchId={activeBranchId}
+              onSelectBranch={handleRequestBranchSwitch}
               onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
               onEditInvoice={handleEditInvoice}
             />
@@ -646,6 +686,7 @@ export default function App() {
             <ReportsView
               db={db}
               activeBranchId={activeBranchId}
+              onSelectBranch={handleRequestBranchSwitch}
             />
           )}
 
@@ -736,6 +777,19 @@ export default function App() {
           />
         </div>
       )}
+
+      {/* Branch PIN Security & Headquarters Isolation Modal */}
+      <BranchPinModal
+        isOpen={!!branchPinTarget}
+        targetBranch={branchPinTarget}
+        onConfirm={() => {
+          if (branchPinTarget) {
+            setActiveBranchId(branchPinTarget.id);
+            setBranchPinTarget(null);
+          }
+        }}
+        onClose={() => setBranchPinTarget(null)}
+      />
 
       {/* Realtime Instant Live Movement Sync Toast Notification */}
       {liveSyncNotification && (

@@ -35,9 +35,10 @@ import { exportTableToCsv } from '../services/exportService';
 interface ReportsViewProps {
   db: AccountingDB;
   activeBranchId?: string;
+  onSelectBranch?: (branchId: string) => void;
 }
 
-export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId }) => {
+export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, onSelectBranch }) => {
   const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
   const [selectedBranchId, setSelectedBranchId] = useState<string>(activeBranchId || 'all');
 
@@ -371,7 +372,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId }) 
           <span className="text-xs font-bold text-slate-800">فرع إصدار التقرير:</span>
           <select
             value={selectedBranchId}
-            onChange={(e) => setSelectedBranchId(e.target.value)}
+            onChange={(e) => {
+              if (onSelectBranch && e.target.value !== 'all') {
+                onSelectBranch(e.target.value);
+              } else {
+                setSelectedBranchId(e.target.value);
+              }
+            }}
             className="bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-900 shadow-2xs focus:ring-2 focus:ring-black cursor-pointer"
           >
             <option value="all">🌐 كافة الفروع مجتمعة (تقرير مركزي شامل)</option>

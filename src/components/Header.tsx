@@ -136,7 +136,7 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             >
               {(branches || []).map(b => (
                 <option key={b.id} value={b.id}>
-                  {b.name} {b.isMain ? '(الرئيسي)' : ''}
+                  {b.isMain ? '🏢 ' : '🔒 '}{b.name} {b.isMain ? '(المقر الرئيسي)' : '(محمي برقم سري)'}
                 </option>
               ))}
               <option value="__add_new__">+ إنشاء فرع جديد...</option>
@@ -548,7 +548,7 @@ const HeaderComponent: React.FC<HeaderProps> = ({
               >
                 {(branches || []).map(b => (
                   <option key={b.id} value={b.id}>
-                    {b.name} {b.isMain ? '(الرئيسي)' : ''}
+                    {b.isMain ? '🏢 ' : '🔒 '}{b.name} {b.isMain ? '(المقر الرئيسي)' : '(محمي برقم سري)'}
                   </option>
                 ))}
                 <option value="__add_new__">+ إنشاء فرع جديد...</option>

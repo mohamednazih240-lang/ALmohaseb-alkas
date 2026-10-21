@@ -67,6 +67,7 @@ interface InventoryViewProps {
   onUpdateDb: (updated: AccountingDB) => void;
   onOpenProductModal: (p?: Product) => void;
   activeBranchId?: string;
+  onSelectBranch?: (branchId: string) => void;
   onPreviewInvoice?: (inv: Invoice) => void;
   onEditInvoice?: (inv: Invoice) => void;
 }
@@ -77,6 +78,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   onUpdateDb,
   onOpenProductModal,
   activeBranchId,
+  onSelectBranch,
   onPreviewInvoice,
   onEditInvoice
 }) => {
@@ -766,7 +768,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               </span>
               <select
                 value={selectedBranchId}
-                onChange={e => setSelectedBranchId(e.target.value)}
+                onChange={e => {
+                  if (onSelectBranch) {
+                    onSelectBranch(e.target.value);
+                  } else {
+                    setSelectedBranchId(e.target.value);
+                  }
+                }}
                 className="bg-white border border-blue-300 text-blue-900 font-bold text-xs rounded-lg px-3 py-1.5 outline-none shadow-2xs cursor-pointer"
               >
                 {branches.map(b => (

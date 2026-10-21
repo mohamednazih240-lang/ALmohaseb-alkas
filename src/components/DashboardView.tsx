@@ -155,8 +155,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <select
               value={targetBranch}
               onChange={(e) => {
-                setSelectedBranchId(e.target.value);
-                if (onSelectBranch) onSelectBranch(e.target.value);
+                if (onSelectBranch) {
+                  onSelectBranch(e.target.value);
+                } else {
+                  setSelectedBranchId(e.target.value);
+                }
               }}
               className="bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-900 shadow-2xs focus:ring-1 focus:ring-black cursor-pointer"
             >

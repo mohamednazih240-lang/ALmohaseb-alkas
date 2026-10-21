@@ -454,6 +454,7 @@ export interface Branch {
   address?: string;
   phone?: string;
   isMain?: boolean;
+  pin?: string; // الرقم السري للدخول إلى الفرع وحمايته من المقر الرئيسي (Branch Access PIN)
 }
 
 export interface User {

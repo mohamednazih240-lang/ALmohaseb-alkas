@@ -40,6 +40,7 @@ interface ProfitsViewProps {
   onPreviewInvoice?: (inv: Invoice) => void;
   onEditInvoice?: (inv: Invoice) => void;
   activeBranchId?: string;
+  onSelectBranch?: (branchId: string) => void;
 }
 
 export const ProfitsView: React.FC<ProfitsViewProps> = ({
@@ -47,7 +48,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   onUpdateDb,
   onPreviewInvoice,
   onEditInvoice,
-  activeBranchId
+  activeBranchId,
+  onSelectBranch
 }) => {
   const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
   const [selectedBranchId, setSelectedBranchId] = useState<string>(activeBranchId || 'all');
@@ -507,7 +509,13 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           <span className="font-bold text-slate-700">تحليل أرباح فرع:</span>
           <select
             value={selectedBranchId}
-            onChange={(e) => setSelectedBranchId(e.target.value)}
+            onChange={(e) => {
+              if (onSelectBranch && e.target.value !== 'all') {
+                onSelectBranch(e.target.value);
+              } else {
+                setSelectedBranchId(e.target.value);
+              }
+            }}
             className="bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-bold text-slate-900 shadow-2xs focus:ring-1 focus:ring-black cursor-pointer"
           >
             <option value="all">🌐 كافة الفروع مجتمعة (مجمّع)</option>

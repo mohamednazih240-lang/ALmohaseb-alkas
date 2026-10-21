@@ -118,6 +118,9 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 
   // Instantly broadcast locally across browser tabs/PWA instances in 0ms
   const currentDevId = getLocalDeviceId();
+  const latestAudit = db.audit && db.audit[0] ? db.audit[0] : null;
+  const actionLabel = latestAudit ? `${latestAudit.action}${latestAudit.detail ? ` (${latestAudit.detail})` : ''}` : 'تحديث البيانات';
+
   if (localBroadcastChannel) {
     try {
       localBroadcastChannel.postMessage({
@@ -125,6 +128,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
         deviceId: currentDevId,
         updatedBy: db.currentUser?.name || 'مستخدم آخر',
         companyCode: cleanCode,
+        actionDesc: actionLabel,
         data: JSON.stringify(db)
       });
     } catch (e) {
@@ -136,13 +140,15 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
     try {
       updateSyncState({ status: 'syncing' });
 
-      // Anti-wiping protection: If local DB has 0 invoices and <= 1 user, check if cloud has real data
-      const isLocalEmpty = (!db.invoices || db.invoices.length === 0) &&
-                           (!db.customers || db.customers.length === 0) &&
-                           (!db.suppliers || db.suppliers.length === 0) &&
-                           (!db.users || db.users.length <= 1);
+      // Anti-wiping protection: ONLY blocks an uninitialized client with 0 audit logs from overwriting cloud data.
+      // Manager deletions & modifications have audit logs (e.g. 'حذف فاتورة') and are NEVER blocked!
+      const isUninitializedClient = (!db.audit || db.audit.length === 0) &&
+                                   (!db.invoices || db.invoices.length === 0) &&
+                                   (!db.customers || db.customers.length === 0) &&
+                                   (!db.suppliers || db.suppliers.length === 0) &&
+                                   (!db.users || db.users.length <= 1);
 
-      if (isLocalEmpty) {
+      if (isUninitializedClient) {
         try {
           const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
           const checkSnap = await getDoc(compDocRef);
@@ -155,7 +161,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
                                    (parsed.customers && parsed.customers.length > 0) ||
                                    (parsed.suppliers && parsed.suppliers.length > 0);
               if (hasCloudData) {
-                console.warn('CRITICAL SAFEGUARD: Prevented empty local database from overwriting active cloud database!');
+                console.warn('CRITICAL SAFEGUARD: Prevented empty uninitialized client from overwriting active cloud database!');
                 updateSyncState({ status: 'connected' });
                 return false;
               }
@@ -173,6 +179,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
         companyCode: cleanCode,
         companyName: db.settings.company,
         deviceId: currentDevId,
+        actionDesc: actionLabel,
         data: JSON.stringify(db)
       };
       lastLocalSavedTimestamp = payload.updatedAt;
@@ -405,7 +412,7 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
  * Subscribe to realtime live updates across all phones
  */
 export function subscribeToCloudDatabase(
-  onRemoteUpdate: (updatedDb: AccountingDB, updatedBy: string) => void,
+  onRemoteUpdate: (updatedDb: AccountingDB, updatedBy: string, actionDesc?: string) => void,
   companyCode?: string
 ): () => void {
   try {
@@ -435,7 +442,7 @@ export function subscribeToCloudDatabase(
         try {
           const remoteDb = JSON.parse(event.data.data) as AccountingDB;
           if (remoteDb && Array.isArray(remoteDb.products) && remoteDb.settings) {
-            onRemoteUpdate(remoteDb, event.data.updatedBy || 'مستخدم آخر');
+            onRemoteUpdate(remoteDb, event.data.updatedBy || 'مستخدم آخر', event.data.actionDesc);
           }
         } catch (e) {
           console.error('Error handling local broadcast update:', e);
@@ -471,7 +478,7 @@ export function subscribeToCloudDatabase(
       try {
         const remoteDb = JSON.parse(data.data) as AccountingDB;
         if (remoteDb && Array.isArray(remoteDb.products) && remoteDb.settings) {
-          onRemoteUpdate(remoteDb, data.updatedBy || 'مستخدم آخر');
+          onRemoteUpdate(remoteDb, data.updatedBy || 'مستخدم آخر', data.actionDesc);
         }
       } catch (e) {
         console.error('Error parsing remote database update:', e);

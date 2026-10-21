@@ -309,6 +309,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   const [branchAddress, setBranchAddress] = useState('');
   const [branchPhone, setBranchPhone] = useState('');
   const [branchIsMain, setBranchIsMain] = useState(false);
+  const [branchPin, setBranchPin] = useState('1234');
 
   // Period form modal
   const [showPeriodModal, setShowPeriodModal] = useState(false);
@@ -478,6 +479,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     setBranchAddress('');
     setBranchPhone('');
     setBranchIsMain(false);
+    setBranchPin('1234');
     setShowBranchModal(true);
   };
 
@@ -488,6 +490,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     setBranchAddress(b.address || '');
     setBranchPhone(b.phone || '');
     setBranchIsMain(!!b.isMain);
+    setBranchPin(b.pin || '1234');
     setShowBranchModal(true);
   };
 
@@ -502,6 +505,8 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
       updated.branches.forEach(b => { b.isMain = false; });
     }
 
+    const cleanPin = branchPin.trim() || '1234';
+
     if (editingBranch) {
       const idx = updated.branches.findIndex(b => b.id === editingBranch.id);
       if (idx !== -1) {
@@ -511,9 +516,10 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
           code: branchCode.trim() || `BR-${Date.now().toString().slice(-3)}`,
           address: branchAddress.trim(),
           phone: branchPhone.trim(),
-          isMain: branchIsMain
+          isMain: branchIsMain,
+          pin: cleanPin
         };
-        logAudit(updated, 'تعديل فرع', branchName);
+        logAudit(updated, 'تعديل فرع ورقم سري', branchName);
       }
     } else {
       const newBranch: Branch = {
@@ -522,10 +528,11 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
         code: branchCode.trim() || `BR-${(updated.branches.length + 1).toString().padStart(2, '0')}`,
         address: branchAddress.trim(),
         phone: branchPhone.trim(),
-        isMain: branchIsMain || updated.branches.length === 0
+        isMain: branchIsMain || updated.branches.length === 0,
+        pin: cleanPin
       };
       updated.branches.push(newBranch);
-      logAudit(updated, 'إضافة فرع جديد للمحل', newBranch.name);
+      logAudit(updated, 'إضافة فرع جديد مع رقم سري للحماية', newBranch.name);
     }
 
     onUpdateDb(updated);
@@ -1000,6 +1007,15 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                     <div className="flex items-center justify-between">
                       <span className="text-slate-500">إجمالي المبيعات:</span>
                       <span className="font-bold text-emerald-700 font-mono">{formatMoney(branchSales, db.settings.currency)}</span>
+                    </div>
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-200/60">
+                      <span className="text-slate-600 font-bold flex items-center gap-1 text-[11px]">
+                        <Lock className="w-3 h-3 text-amber-600" />
+                        <span>رقم سري العزل (PIN):</span>
+                      </span>
+                      <span className="font-mono font-black text-amber-900 bg-amber-100/80 px-2 py-0.5 rounded border border-amber-300/80 text-[11px] tracking-wider">
+                        {b.pin || '1234'}
+                      </span>
                     </div>
                   </div>
 
@@ -1823,6 +1839,27 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   placeholder="شارع التحرير، القاهرة"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-amber-600" />
+                    <span>الرقم السري للفرع (PIN):</span>
+                  </span>
+                  <span className="text-[10px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded font-bold border border-amber-200">عزل المقر الرئيسي</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={branchPin}
+                  onChange={e => setBranchPin(e.target.value)}
+                  placeholder="مثال: 1234 أو كود سري"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-bold tracking-widest focus:bg-white focus:border-amber-500 outline-none text-slate-900"
+                />
+                <span className="text-[10.5px] text-slate-500 block mt-1">
+                  مطلوب لعزل الفرع: لا يمكن لمدير المقر الرئيسي أو أي مستخدم الدخول إلى هذا الفرع إلا بعد إدخال هذا الرقم السري.
+                </span>
               </div>
 
               <div className="pt-1">
