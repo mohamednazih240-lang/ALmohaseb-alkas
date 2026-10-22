@@ -25,7 +25,8 @@ import {
   Trash2,
   RefreshCw,
   Smartphone,
-  ShieldCheck
+  ShieldCheck,
+  Lock
 } from 'lucide-react';
 import { User as AppUser, AppSettings, AccountingDB, Branch } from '../types/accounting';
 import { AuthSession, auth, googleProvider } from '../services/firebaseAuth';
@@ -85,6 +86,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [isRefreshingUsers, setIsRefreshingUsers] = useState<boolean>(false);
   const [lastRefreshedTime, setLastRefreshedTime] = useState<string>('');
+
+  // Branch Selection & PIN Isolation states on Login Screen
+  const [selectedBranchId, setSelectedBranchId] = useState<string>('br_main');
+  const [unlockedBranchIds, setUnlockedBranchIds] = useState<string[]>(['br_main']);
+  const [branchPinModalTarget, setBranchPinModalTarget] = useState<Branch | null>(null);
+  const [branchPinInput, setBranchPinInput] = useState<string>('');
+  const [branchPinError, setBranchPinError] = useState<string>('');
+  const [showBranchPinEye, setShowBranchPinEye] = useState<boolean>(false);
 
   // 2. Google / Gmail Sign-In State
   const [manualEmail, setManualEmail] = useState<string>('');
@@ -309,10 +318,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
       pushDatabaseToCloud(targetDb, true).catch(() => {});
 
       const session: AuthSession = {
-        user: updatedUser,
+        user: { ...updatedUser, branchId: selectedBranchId },
         isGoogle: false,
         tenantId: tenant.id,
-        companyName: loadedCompany?.companyName || targetDb.settings.company || 'حساباتي'
+        companyName: loadedCompany?.companyName || targetDb.settings.company || 'حساباتي',
+        branchId: selectedBranchId
       };
 
       localStorage.setItem('hesabaty_active_user', JSON.stringify(session));
@@ -425,7 +435,71 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
   };
 
-  const selectedUserObj = loadedCompany?.users.find(u => u.id === selectedUserId);
+  const availableBranches: Branch[] = React.useMemo(() => {
+    if (loadedCompany?.branches && loadedCompany.branches.length > 0) return loadedCompany.branches;
+    if (loadedCompany?.db?.branches && loadedCompany.db.branches.length > 0) return loadedCompany.db.branches;
+    if (currentDb.branches && currentDb.branches.length > 0) return currentDb.branches;
+    return [{ id: 'br_main', name: 'المقر الرئيسي', code: 'BR-01', isMain: true, pin: '1234' }];
+  }, [loadedCompany?.branches, loadedCompany?.db?.branches, currentDb.branches]);
+
+  const branchUsers = React.useMemo(() => {
+    const allUsers = loadedCompany?.users || [];
+    return allUsers.filter(u => {
+      if (u.branchId) {
+        return u.branchId === selectedBranchId;
+      }
+      if (u.role === 'مدير') return true;
+      return selectedBranchId === 'br_main';
+    });
+  }, [loadedCompany?.users, selectedBranchId]);
+
+  // When selectedBranchId or branchUsers change, ensure selectedUserId points to a valid user in this branch
+  useEffect(() => {
+    if (branchUsers.length > 0) {
+      if (!branchUsers.some(u => u.id === selectedUserId)) {
+        setSelectedUserId(branchUsers[0].id);
+        setUserPassword('');
+      }
+    } else {
+      setSelectedUserId('');
+      setUserPassword('');
+    }
+  }, [selectedBranchId, branchUsers]);
+
+  const handleBranchClick = (b: Branch) => {
+    if (b.id === selectedBranchId) return;
+
+    // Main headquarters or already unlocked branch
+    if (b.isMain || b.id === 'br_main' || unlockedBranchIds.includes(b.id)) {
+      setSelectedBranchId(b.id);
+      return;
+    }
+
+    // Subsidiary branch requires PIN
+    setBranchPinModalTarget(b);
+    setBranchPinInput('');
+    setBranchPinError('');
+    setShowBranchPinEye(false);
+  };
+
+  const handleBranchPinSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!branchPinModalTarget) return;
+
+    const expectedPin = (branchPinModalTarget.pin || '1234').trim();
+    if (branchPinInput.trim() === expectedPin) {
+      setUnlockedBranchIds(prev => [...prev, branchPinModalTarget.id]);
+      setSelectedBranchId(branchPinModalTarget.id);
+      setBranchPinModalTarget(null);
+      setBranchPinInput('');
+      setBranchPinError('');
+      showToast(`تم فتح بيانات فرع «${branchPinModalTarget.name}» بنجاح`, 'success');
+    } else {
+      setBranchPinError('الرقم السري للفرع غير صحيح! تم منع الدخول لحماية بيانات الفرع.');
+    }
+  };
+
+  const selectedUserObj = (loadedCompany?.users || []).find(u => u.id === selectedUserId);
   const registeredTenants = getCompaniesList();
 
   return (
@@ -651,75 +725,144 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
               )}
 
-              {/* Requirement 1: User Selection (Dropdown & Interactive Cards) */}
+              {/* Branch Selector: المقر الرئيسي والفروع */}
+              {loadedCompany && availableBranches.length > 0 && (
+                <div className="space-y-2 bg-slate-900/80 p-3 rounded-2xl border border-slate-700/80">
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className="text-slate-200 flex items-center gap-1.5">
+                      <Building2 className="w-4 h-4 text-amber-400" />
+                      <span>اختر المقر الرئيسي أو الفرع للدخول:</span>
+                    </span>
+                    <span className="text-[10px] text-slate-400">
+                      ({availableBranches.length} فروع)
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {availableBranches.map(b => {
+                      const isSelected = selectedBranchId === b.id;
+                      const isUnlocked = b.isMain || b.id === 'br_main' || unlockedBranchIds.includes(b.id);
+
+                      return (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() => handleBranchClick(b)}
+                          className={`p-2.5 rounded-xl border text-right transition-all flex flex-col justify-between cursor-pointer select-none relative ${
+                            isSelected
+                              ? 'bg-amber-500/20 border-amber-400 ring-2 ring-amber-400/30'
+                              : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1.5">
+                            <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded font-bold ${
+                              isSelected ? 'bg-amber-500 text-slate-950' : 'bg-slate-900 text-slate-400'
+                            }`}>
+                              {b.code || 'BR'}
+                            </span>
+                            {isUnlocked ? (
+                              <span className="text-[9px] text-emerald-400 flex items-center gap-0.5 font-bold">
+                                <Check className="w-3 h-3" />
+                                <span>مفتوح</span>
+                              </span>
+                            ) : (
+                              <span className="text-[9px] text-amber-300 flex items-center gap-0.5 font-bold bg-amber-500/15 px-1.5 py-0.2 rounded border border-amber-500/30">
+                                <Lock className="w-2.5 h-2.5" />
+                                <span>PIN سري</span>
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="font-black text-xs text-white truncate">
+                            {b.name}
+                          </div>
+                          <span className="text-[9px] text-slate-400 mt-0.5">
+                            {b.isMain ? 'المقر الرئيسي' : 'فرع مستقل'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Requirement 1: User Selection (Filtered by Selected Branch) */}
               {loadedCompany && (
                 <div className="space-y-3">
                   <div>
                     <label className="text-xs text-slate-200 font-bold mb-1.5 flex items-center justify-between">
                       <span className="flex items-center gap-1">
                         <Users className="w-3.5 h-3.5 text-blue-400" />
-                        <span>اختر اسم المستخدم التابع للمنشأة:</span>
+                        <span>مستخدمو {availableBranches.find(b => b.id === selectedBranchId)?.name || 'الفرع'}:</span>
                       </span>
                       <span className="text-[10px] text-slate-400 font-normal">
-                        ({loadedCompany.users.length} مستخدم متاح)
+                        ({branchUsers.length} مستخدم متاح بهذا الفرع)
                       </span>
                     </label>
 
-                    {/* Standard Dropdown Select (matches user description) */}
-                    <select
-                      value={selectedUserId}
-                      onChange={e => {
-                        setSelectedUserId(e.target.value);
-                        setUserPassword('');
-                      }}
-                      className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-amber-400 outline-none transition cursor-pointer"
-                    >
-                      <option value="" disabled>-- اضغط لاختيار المستخدم --</option>
-                      {loadedCompany.users.map(u => (
-                        <option key={u.id} value={u.id}>
-                          {u.name} — [{u.role}] ({u.branchName || 'الفرع الرئيسي'}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
-                        </option>
-                      ))}
-                    </select>
+                    {branchUsers.length > 0 ? (
+                      /* Standard Dropdown Select */
+                      <select
+                        value={selectedUserId}
+                        onChange={e => {
+                          setSelectedUserId(e.target.value);
+                          setUserPassword('');
+                        }}
+                        className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-amber-400 outline-none transition cursor-pointer"
+                      >
+                        <option value="" disabled>-- اضغط لاختيار المستخدم --</option>
+                        {branchUsers.map(u => (
+                          <option key={u.id} value={u.id}>
+                            {u.name} — [{u.role}] ({u.branchName || (availableBranches.find(b => b.id === u.branchId)?.name) || 'المقر الرئيسي'}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs text-slate-400 text-center leading-relaxed">
+                        لا يوجد مستخدمون مخصصون لهذا الفرع حتى الآن. يمكنك تسجيل الدخول بحساب مدير النظام وتعيين موظفين للفرع من إعدادات المستخدمين.
+                      </div>
+                    )}
                   </div>
 
-                  {/* Interactive Visual Cards for Mobile Touch */}
-                  <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto pl-1">
-                    {loadedCompany.users.map(u => {
-                      const isSelected = selectedUserId === u.id;
-                      return (
-                        <div
-                          key={u.id}
-                          onClick={() => {
-                            setSelectedUserId(u.id);
-                            setUserPassword('');
-                          }}
-                          className={`p-2.5 rounded-xl cursor-pointer text-center transition-all space-y-1 select-none border ${
-                            isSelected
-                              ? 'bg-slate-700/90 border-amber-400 ring-2 ring-amber-400/20 shadow-md'
-                              : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
-                          }`}
-                        >
-                          <div className="w-8 h-8 mx-auto rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center">
-                            {getUserRoleIcon(u.role)}
-                          </div>
-                          <p className={`font-bold text-xs truncate ${isSelected ? 'text-amber-300' : 'text-white'}`}>
-                            {u.name}
-                          </p>
-                          <div className="flex items-center justify-center gap-1 flex-wrap">
-                            <span className="text-[9px] text-slate-300 bg-slate-900/80 px-1.5 py-0.2 rounded-full font-bold">
-                              {u.role}
-                            </span>
-                            {u.branchName && (
-                              <span className="text-[8px] text-slate-400 truncate max-w-[80px]">
-                                {u.branchName}
+                  {/* Interactive Visual Cards for Mobile Touch (Filtered by Branch) */}
+                  {branchUsers.length > 0 && (
+                    <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto pl-1">
+                      {branchUsers.map(u => {
+                        const isSelected = selectedUserId === u.id;
+                        return (
+                          <div
+                            key={u.id}
+                            onClick={() => {
+                              setSelectedUserId(u.id);
+                              setUserPassword('');
+                            }}
+                            className={`p-2.5 rounded-xl cursor-pointer text-center transition-all space-y-1 select-none border ${
+                              isSelected
+                                ? 'bg-slate-700/90 border-amber-400 ring-2 ring-amber-400/20 shadow-md'
+                                : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
+                            }`}
+                          >
+                            <div className="w-8 h-8 mx-auto rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center">
+                              {getUserRoleIcon(u.role)}
+                            </div>
+                            <p className={`font-bold text-xs truncate ${isSelected ? 'text-amber-300' : 'text-white'}`}>
+                              {u.name}
+                            </p>
+                            <div className="flex items-center justify-center gap-1 flex-wrap">
+                              <span className="text-[9px] text-slate-300 bg-slate-900/80 px-1.5 py-0.2 rounded-full font-bold">
+                                {u.role}
                               </span>
-                            )}
+                              {(u.branchName || availableBranches.find(b => b.id === u.branchId)?.name) && (
+                                <span className="text-[8px] text-slate-400 truncate max-w-[80px]">
+                                  {u.branchName || availableBranches.find(b => b.id === u.branchId)?.name}
+                                </span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  )}
 
                   {/* Password Verification & Submit Form */}
                   {selectedUserObj && (
@@ -976,6 +1119,112 @@ export const LoginView: React.FC<LoginViewProps> = ({
           )}
 
         </div>
+
+        {/* Modal: Branch Secret PIN Verification for Isolation */}
+        {branchPinModalTarget && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in duration-200">
+            <div className="bg-slate-900 border border-slate-700/90 rounded-2xl w-full max-w-sm shadow-2xl p-5 space-y-4 text-slate-100 animate-in zoom-in-95 duration-200">
+              {/* Header */}
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <div className="p-2 bg-amber-500/10 text-amber-400 rounded-xl border border-amber-500/20">
+                    <Lock className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-white">الرقم السري للفرع</h3>
+                    <p className="text-[10.5px] text-slate-400">حماية وعزل بيانات الفرع</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBranchPinModalTarget(null);
+                    setBranchPinError('');
+                  }}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Branch Badge */}
+              <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-blue-400" />
+                  <div>
+                    <span className="text-xs font-bold text-white block">{branchPinModalTarget.name}</span>
+                    <span className="text-[10px] text-slate-400 font-mono">كود: {branchPinModalTarget.code}</span>
+                  </div>
+                </div>
+                <span className="text-[10px] bg-amber-500/15 text-amber-300 font-bold px-2 py-0.5 rounded-full border border-amber-500/30">
+                  فرع محمي
+                </span>
+              </div>
+
+              <p className="text-[11px] text-amber-200/90 bg-amber-950/20 p-2 rounded-xl border border-amber-500/20 leading-relaxed">
+                لا يمكن الدخول إلى هذا الفرع أو استعراض مستخدميه إلا بإدخال الرقم السري الخاص به.
+              </p>
+
+              {branchPinError && (
+                <div className="p-2.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{branchPinError}</span>
+                </div>
+              )}
+
+              {/* PIN Input Form */}
+              <form onSubmit={handleBranchPinSubmit} className="space-y-3">
+                <div>
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-300 mb-1">
+                    <label>أدخل الرقم السري للفرع (PIN):</label>
+                    <span className="text-[10px] text-slate-500 font-mono">الافتراضي: 1234</span>
+                  </div>
+                  <div className="relative">
+                    <input
+                      type={showBranchPinEye ? 'text' : 'password'}
+                      autoFocus
+                      required
+                      value={branchPinInput}
+                      onChange={e => {
+                        setBranchPinInput(e.target.value);
+                        setBranchPinError('');
+                      }}
+                      placeholder="••••"
+                      className="w-full px-3.5 py-2.5 pl-10 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm font-mono font-bold tracking-widest focus:border-amber-400 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowBranchPinEye(!showBranchPinEye)}
+                      className="absolute left-3 top-3 text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      {showBranchPinEye ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBranchPinModalTarget(null);
+                      setBranchPinError('');
+                    }}
+                    className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-black transition shadow-md cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>تأكيد والدخول</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
 
         {/* Global Footer */}
         <p className="text-center text-[11px] text-slate-400 mt-3 font-medium">

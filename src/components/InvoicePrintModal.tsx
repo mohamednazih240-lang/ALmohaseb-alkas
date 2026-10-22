@@ -59,7 +59,24 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
   if (!invoice) return null;
 
   const isSale = invoice.type === 'sale';
-  const invoiceTypeTitle = isSale ? (settings.invoiceTitle || 'فاتورة مبيعات') : 'فاتورة مشتريات';
+  const customTitle = settings.invoiceTitle?.trim();
+  const isTaxTitle = !customTitle || customTitle.includes('ضريب') || customTitle.includes('فاتورة مبيعات') || customTitle.includes('فاتورة ضريبية');
+  const invoiceTypeTitle = isSale
+    ? (isTaxTitle ? 'بيان' : customTitle)
+    : 'بيان مشتريات';
+
+  // Helper to extract sequential number starting from 1
+  const formatInvoiceSerial = (rawNum: string | number | undefined): string => {
+    if (!rawNum) return '1';
+    const str = String(rawNum).trim();
+    const digits = str.replace(/\D/g, '');
+    if (digits) {
+      const parsed = parseInt(digits, 10);
+      return isNaN(parsed) || parsed === 0 ? '1' : String(parsed);
+    }
+    return str || '1';
+  };
+  const serialNo = formatInvoiceSerial(invoice.number);
 
   // Extract phone numbers into a list if multiple are provided
   const phoneList = settings.phone
@@ -439,9 +456,9 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   
                   <div className="info-item" style={{ textAlign: 'center' }}>
                     <p>
-                      <strong id="lblInvoiceType">{invoiceTypeTitle}</strong> -{' '}
-                      <strong style={{ fontSize: '1rem' }}>
-                        #<span id="lblSerialNo">{invoice.number}</span>
+                      <strong id="lblInvoiceType">{invoiceTypeTitle}</strong>{' '}
+                      <strong style={{ fontSize: '1.05rem' }}>
+                        رقم (<span id="lblSerialNo">{serialNo}</span>)
                       </strong>
                     </p>
                     <p>
@@ -454,12 +471,6 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                     <p>
                       <strong>التاريخ: </strong>
                       <span id="lblInvoiceDate">{invoice.date}</span>
-                    </p>
-                    <p>
-                      <strong>الوقت: </strong>
-                      <span id="lblInvoiceTime">
-                        {invoice.time || new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}
-                      </span>
                     </p>
                   </div>
                 </div>
@@ -527,28 +538,8 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
               {/* 5. تذييل الفاتورة والملاحظات */}
               <div className="invoice-footer-note">
                 <div id="settingFooterNotes">
-                  {settings.notes || 'شكراً لتعاملكم معنا'}
+                  {settings.notes || 'البضاعة المباعة ترد وتستبدل وفقاً لسياسة المحل'}
                 </div>
-                <div id="lblInvoiceCreatedBy" className="space-y-0.5 text-[9px] text-slate-600">
-                  {invoice.createdBy && (
-                    <div>
-                      أنشئت بواسطة: <strong className="text-slate-900">{invoice.createdBy}</strong>
-                      {invoice.createdAt ? ` (${new Date(invoice.createdAt).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' })} ${new Date(invoice.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : ''}
-                    </div>
-                  )}
-                  {invoice.updatedBy && (
-                    <div className="text-amber-800 font-bold">
-                      آخر تعديل بواسطة: <strong className="text-amber-950">{invoice.updatedBy}</strong>
-                      {invoice.updatedAt ? ` (${new Date(invoice.updatedAt).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' })} ${new Date(invoice.updatedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })})` : ''}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* حقوق الملكية الفكرية للمطور - معتمدة ومطلوبة على المطبوعات */}
-              <div className="invoice-developer-copyright">
-                <div className="dev-name">حقوق الملكيه الفكرية محفوظة ل مطور Mohamed Nazih</div>
-                <div className="dev-phone" dir="ltr">01029190615</div>
               </div>
             </div>
 

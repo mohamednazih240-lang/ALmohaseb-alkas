@@ -767,7 +767,9 @@ export default function App() {
               saveDatabase(targetDb);
               pushDatabaseToCloud(targetDb, true);
 
-              if (session.user.branchId) {
+              if (session.branchId) {
+                setActiveBranchId(session.branchId);
+              } else if (session.user.branchId) {
                 setActiveBranchId(session.user.branchId);
               }
               if (!canUserAccessPage(session.user, currentPage)) {

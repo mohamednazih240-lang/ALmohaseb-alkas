@@ -320,6 +320,29 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   // Settings form states
   const [settingsForm, setSettingsForm] = useState<AppSettings>({ ...db.settings });
 
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 2 * 1024 * 1024) {
+      alert('حجم الصورة كبير جداً، يرجى اختيار صورة أقل من 2 ميجابايت.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const base64 = ev.target?.result as string;
+      if (base64) {
+        setSettingsForm(prev => ({ ...prev, logo: base64 }));
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemoveLogo = () => {
+    setSettingsForm(prev => ({ ...prev, logo: '' }));
+  };
+
   // Audit integrity check results
   const [auditErrors, setAuditErrors] = useState<string[] | null>(null);
 
@@ -1331,22 +1354,84 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
             </div>
           </div>
 
-          <form onSubmit={handleSaveSettings} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs max-w-3xl space-y-4">
+          <form onSubmit={handleSaveSettings} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs max-w-3xl space-y-5">
+            {/* 1. رفع وتعديل لوجو المحل / المنشأة */}
+            <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-xs font-black text-slate-900 flex items-center gap-1.5">
+                    <Store className="w-4 h-4 text-amber-600" />
+                    <span>لوجو المحل والمنشأة (يظهر في منتصف ترويسة الفواتير والتقارير)</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    يتم وضعه تلقائياً في منتصف الترويسة بين اسم الشركة وأرقام الهاتف بدقة بالغة وبدون أي تشوه
+                  </p>
+                </div>
+                {settingsForm.logo && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveLogo}
+                    className="px-2.5 py-1 text-[11px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 cursor-pointer transition-all"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>حذف الشعار</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center gap-4 pt-1">
+                {/* Logo Preview Box */}
+                <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-xl border-2 border-dashed border-slate-300 bg-white flex items-center justify-center p-2 overflow-hidden shadow-2xs shrink-0">
+                  {settingsForm.logo ? (
+                    <img
+                      src={settingsForm.logo}
+                      alt="شعار المنشأة"
+                      className="max-w-full max-h-full object-contain"
+                    />
+                  ) : (
+                    <div className="text-center p-2 text-slate-400">
+                      <Store className="w-7 h-7 mx-auto mb-1 opacity-40" />
+                      <span className="text-[10px] font-bold block">لا يوجد شعار</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Upload Control */}
+                <div className="flex-1 space-y-2 text-right w-full">
+                  <label className="inline-flex items-center gap-2 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer transition-all shadow-xs">
+                    <Upload className="w-4 h-4 text-amber-400" />
+                    <span>{settingsForm.logo ? 'تغيير صورة الشعار' : 'رفع لوجو المحل من جهازك'}</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleLogoUpload}
+                      className="hidden"
+                    />
+                  </label>
+                  <p className="text-[10.5px] text-slate-500 leading-relaxed">
+                    الصيغ المدعومة: PNG, JPG, WebP, SVG. يُفضل استخدام صورة واضحة بخلفية شفافة أو بيضاء.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* 2. بيانات الترويسة والمنشأة */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">اسم المنشأة / الشركة</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">اسم المنشأة / الشركة (يمين الترويسة)</label>
                 <input
                   type="text"
                   required
                   value={settingsForm.company}
                   onChange={e => setSettingsForm({ ...settingsForm, company: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold"
+                  placeholder="مثال: مؤسسة النور للتجارة"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:bg-white focus:border-black outline-none"
                 />
               </div>
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
-                  <span>كود المنشأة السحابي (Company Code للدخول من الهواتف):</span>
+                  <span>كود المنشأة السحابي (Company Code):</span>
                   <span className="text-[10px] text-amber-700 font-bold bg-amber-50 px-2 py-0.5 rounded border border-amber-200">كود الدخول المتعدد</span>
                 </label>
                 <input
@@ -1355,28 +1440,43 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   value={settingsForm.companyCode || 'COMP-101'}
                   onChange={e => setSettingsForm({ ...settingsForm, companyCode: e.target.value.toUpperCase() })}
                   onBlur={e => setSettingsForm({ ...settingsForm, companyCode: normalizeCompanyCode(e.target.value) })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold font-mono uppercase tracking-wider text-blue-900"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold font-mono uppercase tracking-wider text-blue-900 focus:bg-white focus:border-black outline-none"
                   placeholder="COMP-101"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">رقم الهاتف للتواصل</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  أرقام هواتف التواصل (يسار الترويسة - يمكن فصل عدة أرقام بفاصلة /)
+                </label>
                 <input
                   type="text"
                   value={settingsForm.phone}
                   onChange={e => setSettingsForm({ ...settingsForm, phone: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono"
+                  placeholder="مثال: 01012345678 / 01198765432"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-black outline-none"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">العنوان والمقر الرئيسي</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">العنوان والمقر الرئيسي (يمين الترويسة)</label>
                 <input
                   type="text"
                   value={settingsForm.address}
                   onChange={e => setSettingsForm({ ...settingsForm, address: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs"
+                  placeholder="مثال: شارع الجمهورية، القاهرة"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:border-black outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">عنوان ترويسة الفاتورة (الافتراضي: بيان)</label>
+                <input
+                  type="text"
+                  value={settingsForm.invoiceTitle || 'بيان'}
+                  onChange={e => setSettingsForm({ ...settingsForm, invoiceTitle: e.target.value })}
+                  placeholder="بيان"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:bg-white focus:border-black outline-none"
                 />
               </div>
 
@@ -1386,17 +1486,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   type="text"
                   value={settingsForm.currency}
                   onChange={e => setSettingsForm({ ...settingsForm, currency: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">عنوان ترويسة الفاتورة</label>
-                <input
-                  type="text"
-                  value={settingsForm.invoiceTitle}
-                  onChange={e => setSettingsForm({ ...settingsForm, invoiceTitle: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold font-mono focus:bg-white focus:border-black outline-none"
                 />
               </div>
 
@@ -1406,7 +1496,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   type="number"
                   value={settingsForm.low}
                   onChange={e => setSettingsForm({ ...settingsForm, low: parseInt(e.target.value) || 5 })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-bold"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-bold focus:bg-white focus:border-black outline-none"
                 />
               </div>
 
@@ -1415,7 +1505,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                 <select
                   value={settingsForm.cost}
                   onChange={e => setSettingsForm({ ...settingsForm, cost: e.target.value as any })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:bg-white focus:border-black outline-none cursor-pointer"
                 >
                   <option value="average">المتوسط المرجح للتكلفة (Weighted Average Costing)</option>
                   <option value="last">آخر سعر شراء (Last Purchase Price)</option>
@@ -1427,7 +1517,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                 <select
                   value={settingsForm.tax}
                   onChange={e => setSettingsForm({ ...settingsForm, tax: e.target.value as any })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:bg-white focus:border-black outline-none cursor-pointer"
                 >
                   <option value="disabled">غير مفعلة (Disabled)</option>
                   <option value="enabled">مفعلة (Enabled 14%)</option>
@@ -1435,22 +1525,31 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
               </div>
             </div>
 
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">شروط وسياسة الاستبدال الافتراضية بالفواتير</label>
+            {/* 3. تذييل الفاتورة وسطر البضاعة المباعة ترد وتستبدل */}
+            <div className="bg-amber-50/50 border border-amber-200 p-4 rounded-2xl space-y-2">
+              <label className="block text-xs font-black text-amber-950 flex items-center justify-between">
+                <span>سطر البضاعة المباعة ترد وتستبدل وملاحظات تذييل الفاتورة:</span>
+                <span className="text-[10px] text-amber-800 bg-amber-100 px-2 py-0.5 rounded font-bold">تذييل الفاتورة المطبوعة</span>
+              </label>
               <textarea
-                rows={2}
+                rows={3}
                 value={settingsForm.notes}
                 onChange={e => setSettingsForm({ ...settingsForm, notes: e.target.value })}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs"
+                placeholder="اكتب هنا سطر البضاعة المباعة ترد وتستبدل والشروط التي ترغب في طباعتها في أسفل الفاتورة، مثال: البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لأصل الفاتورة والحالة الأصلية..."
+                className="w-full p-3 bg-white border border-amber-300 rounded-xl text-xs text-slate-900 focus:border-amber-600 outline-none leading-relaxed"
               />
+              <p className="text-[10.5px] text-amber-900">
+                هذا النص هو الذي يُطبع بدقة في أسفل كل فاتورة مبيعات ومعاينة الفاتورة بدون أي تدخل أو تعديل خارجي.
+              </p>
             </div>
 
             <div className="pt-2 flex justify-end">
               <button
                 type="submit"
-                className="px-6 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all shadow-xs"
+                className="px-6 py-2.5 bg-black hover:bg-slate-800 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center gap-1.5"
               >
-                حفظ الإعدادات
+                <Check className="w-4 h-4 text-emerald-400" />
+                <span>حفظ كافة إعدادات المنشأة والشعار والترويسة</span>
               </button>
             </div>
           </form>

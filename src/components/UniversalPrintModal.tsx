@@ -494,12 +494,6 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                       {doc.createdBy ? `المسؤول: ${doc.createdBy}` : ''}
                     </div>
                   </div>
-
-                  {/* حقوق الملكية الفكرية للمطور - معتمدة ومطلوبة على المطبوعات */}
-                  <div className="invoice-developer-copyright">
-                    <div className="dev-name">حقوق الملكيه الفكرية محفوظة ل مطور Mohamed Nazih</div>
-                    <div className="dev-phone" dir="ltr">01029190615</div>
-                  </div>
                 </div>
 
                 {/* حقوق الملكية الفكرية في شاشة المعاينة */}

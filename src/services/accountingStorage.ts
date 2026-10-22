@@ -177,7 +177,7 @@ export function defaultSettings(): AppSettings {
     phone: '',
     address: 'المقر الرئيسي',
     currency: 'ج.م',
-    invoiceTitle: 'فاتورة ضريبية مبسطة',
+    invoiceTitle: 'بيان',
     low: 5,
     cost: 'average',
     tax: 'disabled',
@@ -1269,6 +1269,33 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     updated.returns = updated.returns.filter(
       r => r.originalInvoiceId !== invoice.id && r.number !== invoice.number
     );
+  }
+
+  // 5.5. Remove any linked payment/receipt vouchers created for this invoice and their journals
+  const linkedVoucherIds = new Set<string>();
+  if (updated.vouchers) {
+    updated.vouchers = updated.vouchers.filter(v => {
+      const isLinked = (v as any).sourceId === invoice.id ||
+                       (v as any).referenceNumber === invoice.number ||
+                       (v as any).invoiceId === invoice.id ||
+                       (v.description && v.description.includes(invoice.number));
+      if (isLinked) {
+        linkedVoucherIds.add(v.id);
+        return false;
+      }
+      return true;
+    });
+
+    if (linkedVoucherIds.size > 0) {
+      // Remove journal entries belonging to the deleted vouchers
+      updated.journals = updated.journals.filter(
+        j => !linkedVoucherIds.has(j.sourceId || '') && !linkedVoucherIds.has(j.id)
+      );
+      // Remove treasury records belonging to the deleted vouchers
+      updated.treasury = updated.treasury.filter(
+        tr => !linkedVoucherIds.has(tr.sourceId || '') && !linkedVoucherIds.has(tr.id)
+      );
+    }
   }
 
   // 6. Remove the invoice itself
