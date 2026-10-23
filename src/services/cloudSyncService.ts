@@ -7,7 +7,7 @@ import {
 } from 'firebase/firestore';
 import { auth } from './firebaseAuth';
 import { AccountingDB, User as AppUser, Branch } from '../types/accounting';
-import { saveDatabase, loadDatabase } from './accountingStorage';
+import { saveDatabase, loadDatabase, ensurePrimaryBranches } from './accountingStorage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { getCompanyByCode } from './tenantService';
 
@@ -268,7 +268,7 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
         const parsed = JSON.parse(val.data) as AccountingDB;
         const mainCode = normalizeCompanyCode(parsed.settings?.companyCode);
         if (mainCode === clean || clean === 'COMP-101') {
-          return parsed;
+          return ensurePrimaryBranches(parsed);
         }
       }
     }
@@ -279,7 +279,7 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
     if (backupSnap.exists()) {
       const val = backupSnap.data();
       if (val && val.data) {
-        return JSON.parse(val.data) as AccountingDB;
+        return ensurePrimaryBranches(JSON.parse(val.data) as AccountingDB);
       }
     }
 
@@ -348,16 +348,13 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
     }
 
     if (cloudDb && Array.isArray(cloudDb.users) && cloudDb.users.length > 0) {
-      const branches = (cloudDb.branches && cloudDb.branches.length > 0)
-        ? cloudDb.branches
-        : [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
-
+      const ensuredCloud = ensurePrimaryBranches(cloudDb);
       return {
-        db: cloudDb,
-        companyName: cloudDb.settings.company || 'المنشأة',
-        companyCode: cloudDb.settings.companyCode || clean,
-        users: cloudDb.users, // Full array of all registered users!
-        branches,
+        db: ensuredCloud,
+        companyName: ensuredCloud.settings.company || 'المنشأة',
+        companyCode: ensuredCloud.settings.companyCode || clean,
+        users: ensuredCloud.users, // Full array of all registered users!
+        branches: ensuredCloud.branches || [],
         source: 'cloud'
       };
     }
@@ -376,16 +373,13 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
       localName.includes(rawClean.toUpperCase()) ||
       clean === 'COMP-101'
     ) {
-      const branches = (localDb.branches && localDb.branches.length > 0)
-        ? localDb.branches
-        : [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
-
+      const ensuredLocal = ensurePrimaryBranches(localDb);
       return {
-        db: localDb,
-        companyName: localDb.settings.company || 'المنشأة',
-        companyCode: localDb.settings.companyCode || clean,
-        users: localDb.users || [], // Full array of all registered users!
-        branches,
+        db: ensuredLocal,
+        companyName: ensuredLocal.settings.company || 'المنشأة',
+        companyCode: ensuredLocal.settings.companyCode || clean,
+        users: ensuredLocal.users || [], // Full array of all registered users!
+        branches: ensuredLocal.branches || [],
         source: 'local'
       };
     }
@@ -476,8 +470,9 @@ export function subscribeToCloudDatabase(
       }
 
       try {
-        const remoteDb = JSON.parse(data.data) as AccountingDB;
+        let remoteDb = JSON.parse(data.data) as AccountingDB;
         if (remoteDb && Array.isArray(remoteDb.products) && remoteDb.settings) {
+          remoteDb = ensurePrimaryBranches(remoteDb);
           onRemoteUpdate(remoteDb, data.updatedBy || 'مستخدم آخر', data.actionDesc);
         }
       } catch (e) {

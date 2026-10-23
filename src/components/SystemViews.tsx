@@ -271,7 +271,9 @@ import {
   cleanAllDemoTransactions,
   defaultSettings,
   logAudit,
-  formatMoney
+  formatMoney,
+  isBranchMawan,
+  getBranchExpectedPin
 } from '../services/accountingStorage';
 import { updateCompany, getActiveTenantId } from '../services/tenantService';
 
@@ -502,7 +504,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     setBranchAddress('');
     setBranchPhone('');
     setBranchIsMain(false);
-    setBranchPin('1234');
+    setBranchPin('');
     setShowBranchModal(true);
   };
 
@@ -513,7 +515,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     setBranchAddress(b.address || '');
     setBranchPhone(b.phone || '');
     setBranchIsMain(!!b.isMain);
-    setBranchPin(b.pin || '1234');
+    setBranchPin(getBranchExpectedPin(b));
     setShowBranchModal(true);
   };
 
@@ -524,11 +526,8 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     if (!updated.branches) updated.branches = [];
 
-    if (branchIsMain) {
-      updated.branches.forEach(b => { b.isMain = false; });
-    }
-
-    const cleanPin = branchPin.trim() || '1234';
+    const isTargetMawan = (editingBranch && isBranchMawan(editingBranch)) || branchName.includes('الموان') || branchCode === 'BR-02';
+    const cleanPin = branchPin.trim() || (isTargetMawan ? '1272000' : '1234');
 
     if (editingBranch) {
       const idx = updated.branches.findIndex(b => b.id === editingBranch.id);
@@ -1037,7 +1036,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                         <span>رقم سري العزل (PIN):</span>
                       </span>
                       <span className="font-mono font-black text-amber-900 bg-amber-100/80 px-2 py-0.5 rounded border border-amber-300/80 text-[11px] tracking-wider">
-                        {b.pin || '1234'}
+                        {getBranchExpectedPin(b)}
                       </span>
                     </div>
                   </div>
@@ -1953,7 +1952,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   required
                   value={branchPin}
                   onChange={e => setBranchPin(e.target.value)}
-                  placeholder="مثال: 1234 أو كود سري"
+                  placeholder="أدخل الرقم السري للفرع..."
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-bold tracking-widest focus:bg-white focus:border-amber-500 outline-none text-slate-900"
                 />
                 <span className="text-[10.5px] text-slate-500 block mt-1">

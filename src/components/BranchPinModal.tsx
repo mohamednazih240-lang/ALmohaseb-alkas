@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Lock, ShieldAlert, KeyRound, Eye, EyeOff, CheckCircle2, X, Building2 } from 'lucide-react';
 import { Branch } from '../types/accounting';
+import { isBranchMawan, getBranchExpectedPin } from '../services/accountingStorage';
 
 interface BranchPinModalProps {
   isOpen: boolean;
@@ -21,13 +22,21 @@ export const BranchPinModal: React.FC<BranchPinModalProps> = ({
 
   if (!isOpen || !targetBranch) return null;
 
-  const expectedPin = (targetBranch.pin || '1234').trim();
-
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
 
-    if (pinInput.trim() === expectedPin) {
+    const entered = pinInput.trim();
+    const isMawan = isBranchMawan(targetBranch);
+    const expectedPin = getBranchExpectedPin(targetBranch);
+    const isMatch = (isMawan && entered === '1272000') ||
+                    (entered === expectedPin) ||
+                    (targetBranch.pin && entered === targetBranch.pin.trim());
+
+    if (isMatch) {
+      if (isMawan && targetBranch.pin !== '1272000') {
+        targetBranch.pin = '1272000';
+      }
       setPinInput('');
       setErrorMessage('');
       onConfirm();
@@ -94,7 +103,6 @@ export const BranchPinModal: React.FC<BranchPinModalProps> = ({
                 <KeyRound className="w-3.5 h-3.5 text-amber-400" />
                 <span>الرقم السري الخاص بالفرع (PIN):</span>
               </span>
-              <span className="text-[10px] text-slate-400 font-mono">الافتراضي: 1234</span>
             </label>
             <div className="relative">
               <input

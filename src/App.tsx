@@ -4,7 +4,8 @@ import {
   saveDatabase,
   loadTenantDatabase,
   calculateFinancialSummary,
-  loadFromIndexedDB
+  loadFromIndexedDB,
+  ensurePrimaryBranches
 } from './services/accountingStorage';
 import {
   AccountingDB,
@@ -110,14 +111,8 @@ export default function App() {
     const targetBranch = (db.branches || []).find(b => b.id === targetBranchId);
     if (!targetBranch) return;
 
-    // If switching back to the main headquarters branch, allow directly
-    if (targetBranch.isMain || targetBranch.id === 'br_main') {
-      setActiveBranchId(targetBranch.id);
-      return;
-    }
-
-    // "وعزل تام بين المقر الرائيسي والفروع ولا يمكن لمدير الفرع الرائيسي الدخول الي احدي الفروع الا بالرقم السري"
-    // Prompt for PIN when entering any subsidiary branch
+    // "وعزل تام بين الفروع ولا يمكن الدخول الي اي فرع الا بالرقم السري"
+    // Prompt for PIN when entering any branch
     setBranchPinTarget(targetBranch);
   }, [activeBranchId, db.branches]);
 
@@ -145,13 +140,14 @@ export default function App() {
     // 1. Hydrate from IndexedDB on startup
     loadFromIndexedDB().then(idbData => {
       if (idbData && idbData.invoices && idbData.settings) {
-        if (!idbData.products || idbData.products.length < 1000) {
-          const merged = mergeCatalogIntoDb(idbData);
-          setDb(merged.db);
-          saveDatabase(merged.db);
-        } else {
-          setDb(idbData);
+        let readyDb = idbData;
+        if (!readyDb.products || readyDb.products.length < 1000) {
+          const merged = mergeCatalogIntoDb(readyDb);
+          readyDb = merged.db;
         }
+        readyDb = ensurePrimaryBranches(readyDb);
+        setDb(readyDb);
+        saveDatabase(readyDb);
       }
     });
 
@@ -166,17 +162,19 @@ export default function App() {
 
           if (localHasData && !cloudHasData) {
             console.log('Preserving local invoices and accounts, syncing to cloud...');
-            pushDatabaseToCloud(prevDb, true);
-            return prevDb;
+            const ensuredPrev = ensurePrimaryBranches(prevDb);
+            pushDatabaseToCloud(ensuredPrev, true);
+            return ensuredPrev;
           }
 
           const storedSession = getStoredAuthSession();
           const currentLocalUser = storedSession?.user || prevDb.currentUser;
           const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
           const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
+          const ensuredCloud = ensurePrimaryBranches(cloudDb);
           const merged: AccountingDB = {
-            ...cloudDb,
-            currentUser: effectiveUser || cloudDb.currentUser || cloudDb.users[0]
+            ...ensuredCloud,
+            currentUser: effectiveUser || ensuredCloud.currentUser || ensuredCloud.users[0]
           };
           saveDatabase(merged);
           return merged;

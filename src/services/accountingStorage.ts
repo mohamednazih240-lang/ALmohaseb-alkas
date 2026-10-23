@@ -26,6 +26,7 @@ import {
   AppSettings,
   PaymentMethod,
   User,
+  Branch,
   BranchProductData
 } from '../types/accounting';
 import {
@@ -192,6 +193,154 @@ export function defaultSettings(): AppSettings {
   };
 }
 
+export function defaultBranches(): Branch[] {
+  return [
+    { id: 'br_main', name: 'فرع الأخوة', code: 'BR-01', isMain: true, pin: '1234' },
+    { id: 'br_mawan', name: 'فرع الموان', code: 'BR-02', isMain: true, pin: '1272000' }
+  ];
+}
+
+export function isBranchMawan(b: Branch | null | undefined): boolean {
+  if (!b) return false;
+  return (
+    b.id === 'br_mawan' ||
+    (b.name && b.name.includes('الموان')) ||
+    b.code === 'BR-02'
+  );
+}
+
+export function isBranchEkhwa(b: Branch | null | undefined): boolean {
+  if (!b) return false;
+  return (
+    b.id === 'br_main' ||
+    (b.name && (b.name.includes('الأخوة') || b.name.includes('الرئيسي'))) ||
+    b.code === 'BR-01'
+  );
+}
+
+export function getBranchExpectedPin(b: Branch | null | undefined): string {
+  if (!b) return '';
+  if (isBranchMawan(b)) {
+    if (b.pin && b.pin.trim() !== '' && b.pin.trim() !== '1234') {
+      return b.pin.trim();
+    }
+    return '1272000';
+  }
+  return (b.pin || '1234').trim();
+}
+
+/**
+ * Ensures the two primary branches exist and are isolated:
+ * - "فرع الأخوة" (BR-01): keeps existing data, movements, and products
+ * - "فرع الموان" (BR-02): secret PIN 1272000, has all products, completely isolated
+ */
+export function ensurePrimaryBranches(db: AccountingDB): AccountingDB {
+  if (!db) return db;
+
+  if (!db.branches || db.branches.length === 0) {
+    db.branches = defaultBranches();
+  }
+
+  // 1. فرع الأخوة (maintains all existing data)
+  let ekhwa = db.branches.find(b => isBranchEkhwa(b));
+  if (ekhwa) {
+    ekhwa.id = 'br_main';
+    ekhwa.name = 'فرع الأخوة';
+    ekhwa.code = 'BR-01';
+    ekhwa.isMain = true;
+    if (!ekhwa.pin) ekhwa.pin = '1234';
+  } else {
+    ekhwa = {
+      id: 'br_main',
+      name: 'فرع الأخوة',
+      code: 'BR-01',
+      isMain: true,
+      pin: '1234'
+    };
+    db.branches.unshift(ekhwa);
+  }
+
+  // 2. فرع الموان (الرقم السري المعتمد: 1272000)
+  let mawan = db.branches.find(b => isBranchMawan(b));
+  if (mawan) {
+    mawan.id = 'br_mawan';
+    mawan.name = 'فرع الموان';
+    mawan.code = 'BR-02';
+    mawan.isMain = true;
+    if (!mawan.pin || mawan.pin === '1234') {
+      mawan.pin = '1272000';
+    }
+  } else {
+    mawan = {
+      id: 'br_mawan',
+      name: 'فرع الموان',
+      code: 'BR-02',
+      isMain: true,
+      pin: '1272000'
+    };
+    db.branches.push(mawan);
+  }
+
+  // De-duplicate branches by standardized ID
+  const seenIds = new Set<string>();
+  db.branches = db.branches.filter(b => {
+    if (seenIds.has(b.id)) return false;
+    seenIds.add(b.id);
+    return true;
+  });
+
+  // 3. Ensure users for each branch
+  if (!db.users) db.users = [];
+
+  // Update existing users in br_main to display 'فرع الأخوة'
+  db.users.forEach(u => {
+    if (!u.branchId || u.branchId === 'br_main') {
+      u.branchId = 'br_main';
+      if (!u.branchName || u.branchName.includes('الرئيسي')) {
+        u.branchName = 'فرع الأخوة';
+      }
+    }
+  });
+
+  // Ensure dedicated user accounts for 'فرع الموان'
+  const hasMawanUser = db.users.some(u => u.branchId === 'br_mawan');
+  if (!hasMawanUser) {
+    db.users.push({
+      id: 'usr_mawan_cashier',
+      name: 'كاشير فرع الموان',
+      username: 'mawan',
+      password: '123',
+      role: 'كاشير',
+      branchId: 'br_mawan',
+      branchName: 'فرع الموان',
+      active: true
+    });
+    db.users.push({
+      id: 'usr_mawan_admin',
+      name: 'مدير فرع الموان',
+      username: 'mawan_admin',
+      password: '123',
+      role: 'مدير',
+      branchId: 'br_mawan',
+      branchName: 'فرع الموان',
+      active: true
+    });
+  }
+
+  // 4. Ensure warehouse for فرع الموان
+  if (!db.warehouses) db.warehouses = [];
+  if (!db.warehouses.some(w => w.id === 'wh_mawan')) {
+    db.warehouses.push({
+      id: 'wh_mawan',
+      name: 'مخزن فرع الموان',
+      location: 'فرع الموان',
+      isDefault: false
+    });
+  }
+
+  return db;
+}
+
 /**
  * Cleans the system completely from any test/demo movements, invoices, reports, products, customers, and suppliers
  */
@@ -286,7 +435,7 @@ export function createSeedData(
     { id: `usr_${Date.now().toString(36)}`, name: adminName, username: adminUsername, role: 'مدير' as const, active: true }
   ];
 
-  return {
+  return ensurePrimaryBranches({
     version: 6,
     settings,
     users,
@@ -317,11 +466,9 @@ export function createSeedData(
     bankReconciliations: [],
     goodsReceivedNotes: [],
     dailyClosings: [],
-    branches: [
-      { id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }
-    ],
+    branches: defaultBranches(),
     audit
-  };
+  });
 }
 
 /**
@@ -341,8 +488,9 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
           try {
             const legacyDb = JSON.parse(legacyRaw);
             if (legacyDb && Array.isArray(legacyDb.accounts)) {
-              saveTenantDatabase(tenantId, legacyDb);
-              return legacyDb;
+              const ensured = ensurePrimaryBranches(legacyDb);
+              saveTenantDatabase(tenantId, ensured);
+              return ensured;
             }
           } catch (e) {}
         }
@@ -358,7 +506,7 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
       return initial;
     }
 
-    const parsed = JSON.parse(raw);
+    let parsed = JSON.parse(raw);
     if (!parsed || parsed.version < 6 || !Array.isArray(parsed.products) || !Array.isArray(parsed.accounts)) {
       const initial = createSeedData(
         tenant?.name,
@@ -376,11 +524,9 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
     if (!parsed.bankReconciliations) parsed.bankReconciliations = [];
     if (!parsed.goodsReceivedNotes) parsed.goodsReceivedNotes = [];
     if (!parsed.dailyClosings) parsed.dailyClosings = [];
-    if (!parsed.branches || parsed.branches.length === 0) {
-      parsed.branches = [
-        { id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }
-      ];
-    }
+    
+    // Ensure the two primary branches (الأخوة and الموان) exist with PINs and user accounts
+    parsed = ensurePrimaryBranches(parsed);
     if (!parsed.settings.nextGRN) parsed.settings.nextGRN = 7001;
 
     // Guarantee default accounts exist
@@ -394,8 +540,9 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
     // Ensure catalog of 1001 products is populated
     if (parsed.products.length < 1000) {
       const merged = mergeCatalogIntoDb(parsed);
-      saveTenantDatabase(tenantId, merged.db);
-      return merged.db;
+      const readyDb = ensurePrimaryBranches(merged.db);
+      saveTenantDatabase(tenantId, readyDb);
+      return readyDb;
     }
 
     return parsed;
@@ -1055,11 +1202,11 @@ export function getProductForBranch(product: Product, branchId?: string): Produc
     return {
       ...product,
       currentQty: bData.currentQty ?? 0,
-      buyPrice: bData.buyPrice ?? 0,
-      sellPrice: bData.sellPrice ?? 0,
-      wholesalePrice: bData.wholesalePrice ?? 0,
-      minStock: bData.minStock ?? 5,
-      avgCost: bData.avgCost ?? (bData.buyPrice || 0),
+      buyPrice: bData.buyPrice !== undefined && bData.buyPrice > 0 ? bData.buyPrice : (product.buyPrice || 0),
+      sellPrice: bData.sellPrice !== undefined && bData.sellPrice > 0 ? bData.sellPrice : (product.sellPrice || 0),
+      wholesalePrice: bData.wholesalePrice !== undefined && bData.wholesalePrice > 0 ? bData.wholesalePrice : (product.wholesalePrice || 0),
+      minStock: bData.minStock ?? (product.minStock || 5),
+      avgCost: bData.avgCost ?? (bData.buyPrice || product.avgCost || product.buyPrice || 0),
       branchQty: bData.currentQty ?? 0,
     };
   }
@@ -1072,16 +1219,16 @@ export function getProductForBranch(product: Product, branchId?: string): Produc
     };
   }
 
-  // For any other branch without entered data:
-  // "لكن بدون اعداد و اسعار ويتم ادخالهم حسب الفرع ولا يؤثرو علي اي فروع اخره"
+  // For any other branch without custom entered data yet:
+  // "ويكون كل فرع فيهم به كل الاصناف ويكون منعزل عن الفرع الاخر في كل شي مهما كان من فواتير ومستخدمين وتقارير وسندات ومخزون وخزينه والخ"
   return {
     ...product,
     currentQty: 0,
-    buyPrice: 0,
-    sellPrice: 0,
-    wholesalePrice: 0,
-    minStock: 5,
-    avgCost: 0,
+    buyPrice: product.buyPrice || 0,
+    sellPrice: product.sellPrice || 0,
+    wholesalePrice: product.wholesalePrice || 0,
+    minStock: product.minStock || 5,
+    avgCost: product.avgCost || product.buyPrice || 0,
     branchQty: 0,
   };
 }

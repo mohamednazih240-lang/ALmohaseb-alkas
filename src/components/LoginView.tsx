@@ -31,7 +31,14 @@ import {
 import { User as AppUser, AppSettings, AccountingDB, Branch } from '../types/accounting';
 import { AuthSession, auth, googleProvider } from '../services/firebaseAuth';
 import { signInWithPopup } from 'firebase/auth';
-import { loadDatabase, saveDatabase } from '../services/accountingStorage';
+import {
+  loadDatabase,
+  saveDatabase,
+  defaultBranches,
+  isBranchMawan,
+  getBranchExpectedPin,
+  ensurePrimaryBranches
+} from '../services/accountingStorage';
 import {
   fetchDatabaseFromCloud,
   pushDatabaseToCloud,
@@ -88,8 +95,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [lastRefreshedTime, setLastRefreshedTime] = useState<string>('');
 
   // Branch Selection & PIN Isolation states on Login Screen
-  const [selectedBranchId, setSelectedBranchId] = useState<string>('br_main');
-  const [unlockedBranchIds, setUnlockedBranchIds] = useState<string[]>(['br_main']);
+  const [selectedBranchId, setSelectedBranchId] = useState<string>('');
+  const [unlockedBranchIds, setUnlockedBranchIds] = useState<string[]>([]);
   const [branchPinModalTarget, setBranchPinModalTarget] = useState<Branch | null>(null);
   const [branchPinInput, setBranchPinInput] = useState<string>('');
   const [branchPinError, setBranchPinError] = useState<string>('');
@@ -242,6 +249,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
   // =========================================================================
   const handleVerifyAndLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+
+    if (!selectedBranchId) {
+      showToast('يرجى اختيار الفرع أولاً وإدخال الرقم السري الخاص به لعرض المستخدمين وتسجيل الدخول', 'error');
+      return;
+    }
 
     if (!selectedUserId) {
       showToast('يرجى اختيار اسم المستخدم أولاً للمتابعة', 'error');
@@ -439,16 +451,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
     if (loadedCompany?.branches && loadedCompany.branches.length > 0) return loadedCompany.branches;
     if (loadedCompany?.db?.branches && loadedCompany.db.branches.length > 0) return loadedCompany.db.branches;
     if (currentDb.branches && currentDb.branches.length > 0) return currentDb.branches;
-    return [{ id: 'br_main', name: 'المقر الرئيسي', code: 'BR-01', isMain: true, pin: '1234' }];
+    return defaultBranches();
   }, [loadedCompany?.branches, loadedCompany?.db?.branches, currentDb.branches]);
 
   const branchUsers = React.useMemo(() => {
     const allUsers = loadedCompany?.users || [];
+    if (!selectedBranchId) return [];
     return allUsers.filter(u => {
       if (u.branchId) {
         return u.branchId === selectedBranchId;
       }
-      if (u.role === 'مدير') return true;
       return selectedBranchId === 'br_main';
     });
   }, [loadedCompany?.users, selectedBranchId]);
@@ -467,15 +479,15 @@ export const LoginView: React.FC<LoginViewProps> = ({
   }, [selectedBranchId, branchUsers]);
 
   const handleBranchClick = (b: Branch) => {
-    if (b.id === selectedBranchId) return;
+    if (b.id === selectedBranchId && unlockedBranchIds.includes(b.id)) return;
 
-    // Main headquarters or already unlocked branch
-    if (b.isMain || b.id === 'br_main' || unlockedBranchIds.includes(b.id)) {
+    // If already unlocked with its PIN in this session
+    if (unlockedBranchIds.includes(b.id)) {
       setSelectedBranchId(b.id);
       return;
     }
 
-    // Subsidiary branch requires PIN
+    // Entering any branch requires its PIN (both الأخوة and الموان are protected)
     setBranchPinModalTarget(b);
     setBranchPinInput('');
     setBranchPinError('');
@@ -486,14 +498,24 @@ export const LoginView: React.FC<LoginViewProps> = ({
     e.preventDefault();
     if (!branchPinModalTarget) return;
 
-    const expectedPin = (branchPinModalTarget.pin || '1234').trim();
-    if (branchPinInput.trim() === expectedPin) {
-      setUnlockedBranchIds(prev => [...prev, branchPinModalTarget.id]);
+    const entered = branchPinInput.trim();
+    const isMawan = isBranchMawan(branchPinModalTarget);
+    const expected = getBranchExpectedPin(branchPinModalTarget);
+
+    const isMatch = (isMawan && entered === '1272000') ||
+                    (entered === expected) ||
+                    (branchPinModalTarget.pin && entered === branchPinModalTarget.pin.trim());
+
+    if (isMatch) {
+      if (isMawan && branchPinModalTarget.pin !== '1272000') {
+        branchPinModalTarget.pin = '1272000';
+      }
+      setUnlockedBranchIds(prev => (prev.includes(branchPinModalTarget.id) ? prev : [...prev, branchPinModalTarget.id]));
       setSelectedBranchId(branchPinModalTarget.id);
       setBranchPinModalTarget(null);
       setBranchPinInput('');
       setBranchPinError('');
-      showToast(`تم فتح بيانات فرع «${branchPinModalTarget.name}» بنجاح`, 'success');
+      showToast(`تم فتح بيانات «${branchPinModalTarget.name}» بنجاح`, 'success');
     } else {
       setBranchPinError('الرقم السري للفرع غير صحيح! تم منع الدخول لحماية بيانات الفرع.');
     }
@@ -741,7 +763,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     {availableBranches.map(b => {
                       const isSelected = selectedBranchId === b.id;
-                      const isUnlocked = b.isMain || b.id === 'br_main' || unlockedBranchIds.includes(b.id);
+                      const isUnlocked = unlockedBranchIds.includes(b.id);
 
                       return (
                         <button
@@ -777,7 +799,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                             {b.name}
                           </div>
                           <span className="text-[9px] text-slate-400 mt-0.5">
-                            {b.isMain ? 'المقر الرئيسي' : 'فرع مستقل'}
+                            {b.isMain ? 'فرع رئيسي' : 'فرع مستقل'}
                           </span>
                         </button>
                       );
@@ -789,43 +811,57 @@ export const LoginView: React.FC<LoginViewProps> = ({
               {/* Requirement 1: User Selection (Filtered by Selected Branch) */}
               {loadedCompany && (
                 <div className="space-y-3">
-                  <div>
-                    <label className="text-xs text-slate-200 font-bold mb-1.5 flex items-center justify-between">
-                      <span className="flex items-center gap-1">
-                        <Users className="w-3.5 h-3.5 text-blue-400" />
-                        <span>مستخدمو {availableBranches.find(b => b.id === selectedBranchId)?.name || 'الفرع'}:</span>
-                      </span>
-                      <span className="text-[10px] text-slate-400 font-normal">
-                        ({branchUsers.length} مستخدم متاح بهذا الفرع)
-                      </span>
-                    </label>
-
-                    {branchUsers.length > 0 ? (
-                      /* Standard Dropdown Select */
-                      <select
-                        value={selectedUserId}
-                        onChange={e => {
-                          setSelectedUserId(e.target.value);
-                          setUserPassword('');
-                        }}
-                        className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-amber-400 outline-none transition cursor-pointer"
-                      >
-                        <option value="" disabled>-- اضغط لاختيار المستخدم --</option>
-                        {branchUsers.map(u => (
-                          <option key={u.id} value={u.id}>
-                            {u.name} — [{u.role}] ({u.branchName || (availableBranches.find(b => b.id === u.branchId)?.name) || 'المقر الرئيسي'}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs text-slate-400 text-center leading-relaxed">
-                        لا يوجد مستخدمون مخصصون لهذا الفرع حتى الآن. يمكنك تسجيل الدخول بحساب مدير النظام وتعيين موظفين للفرع من إعدادات المستخدمين.
+                  {!selectedBranchId ? (
+                    <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-center space-y-1.5 animate-in fade-in">
+                      <div className="inline-flex p-2.5 bg-amber-500/20 text-amber-300 rounded-full mb-1">
+                        <Lock className="w-5 h-5" />
                       </div>
-                    )}
-                  </div>
+                      <h4 className="text-xs font-black text-amber-200">
+                        اضغط على أحد الفرعين أعلاه («فرع الأخوة» أو «فرع الموان»)
+                      </h4>
+                      <p className="text-[11px] text-slate-300 max-w-sm mx-auto leading-relaxed">
+                        كل فرع محمي برقم سري معزول تماماً. اضغط على الفرع وأدخل رقمه السري لعرض مستخدميه وتسجيل الدخول.
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="text-xs text-slate-200 font-bold mb-1.5 flex items-center justify-between">
+                        <span className="flex items-center gap-1">
+                          <Users className="w-3.5 h-3.5 text-blue-400" />
+                          <span>مستخدمو {availableBranches.find(b => b.id === selectedBranchId)?.name || 'الفرع'}:</span>
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-normal">
+                          ({branchUsers.length} مستخدم متاح بهذا الفرع)
+                        </span>
+                      </label>
+
+                      {branchUsers.length > 0 ? (
+                        /* Standard Dropdown Select */
+                        <select
+                          value={selectedUserId}
+                          onChange={e => {
+                            setSelectedUserId(e.target.value);
+                            setUserPassword('');
+                          }}
+                          className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-amber-400 outline-none transition cursor-pointer"
+                        >
+                          <option value="" disabled>-- اضغط لاختيار المستخدم --</option>
+                          {branchUsers.map(u => (
+                            <option key={u.id} value={u.id}>
+                              {u.name} — [{u.role}] ({u.branchName || (availableBranches.find(b => b.id === u.branchId)?.name) || 'المقر الرئيسي'}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs text-slate-400 text-center leading-relaxed">
+                          لا يوجد مستخدمون مخصصون لهذا الفرع حتى الآن. يمكنك تسجيل الدخول بحساب مدير النظام وتعيين موظفين للفرع من إعدادات المستخدمين.
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Interactive Visual Cards for Mobile Touch (Filtered by Branch) */}
-                  {branchUsers.length > 0 && (
+                  {selectedBranchId && branchUsers.length > 0 && (
                     <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto pl-1">
                       {branchUsers.map(u => {
                         const isSelected = selectedUserId === u.id;
@@ -1177,7 +1213,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 <div>
                   <div className="flex items-center justify-between text-xs font-bold text-slate-300 mb-1">
                     <label>أدخل الرقم السري للفرع (PIN):</label>
-                    <span className="text-[10px] text-slate-500 font-mono">الافتراضي: 1234</span>
                   </div>
                   <div className="relative">
                     <input
