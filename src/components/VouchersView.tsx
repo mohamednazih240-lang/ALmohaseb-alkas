@@ -213,6 +213,12 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   };
 
   const handleDeleteVoucher = (v: Voucher) => {
+    const isManager = db.currentUser?.role === 'مدير';
+    if (!isManager) {
+      alert('عذراً، لا يمكن حذف أي سند مالي إلا من قِبل المدير العام فقط.');
+      return;
+    }
+
     if (!confirm(`هل أنت متأكد من حذف ${isReceipt ? 'سند القبض' : 'سند الصرف'} "${v.number}" وعكس القيود المالية؟`)) {
       return;
     }

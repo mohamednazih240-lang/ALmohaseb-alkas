@@ -537,6 +537,7 @@ export interface UserPermissions {
 export interface AppSettings {
   company: string;
   companyCode?: string; // كود الشركة الفريد لتسجيل الدخول والمزامنة المتعددة (Tenant Code)
+  companyPin?: string; // الرقم السري للدخول إلى الشركة (قابل للتعديل من قبل المدير)
   phone: string;
   address: string;
   currency: string;

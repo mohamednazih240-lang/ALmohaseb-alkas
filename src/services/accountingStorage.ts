@@ -221,124 +221,202 @@ export function isBranchEkhwa(b: Branch | null | undefined): boolean {
 export function getBranchExpectedPin(b: Branch | null | undefined): string {
   if (!b) return '';
   if (isBranchMawan(b)) {
-    if (b.pin && b.pin.trim() !== '' && b.pin.trim() !== '1234') {
+    if (b.pin && b.pin.trim() !== '' && b.pin.trim() !== '1234' && b.pin.trim() !== '1272000') {
       return b.pin.trim();
     }
-    return '1272000';
+    return '2919';
   }
   return (b.pin || '1234').trim();
 }
 
 /**
- * Ensures the two primary branches exist and are isolated:
- * - "فرع الأخوة" (BR-01): keeps existing data, movements, and products
- * - "فرع الموان" (BR-02): secret PIN 1272000, has all products, completely isolated
+ * Helper to determine if an identifier belongs to شركة الموان
  */
-export function ensurePrimaryBranches(db: AccountingDB): AccountingDB {
+export function isCompanyMawan(identifier?: string | null): boolean {
+  if (!identifier) return false;
+  const clean = identifier.trim().toLowerCase();
+  return clean === 'comp_mawan' ||
+         clean === 'comp-102' ||
+         clean === '102' ||
+         clean.includes('mawan') ||
+         clean.includes('الموان');
+}
+
+/**
+ * Sanitizes and enforces 100% strict isolation for a company database:
+ * - شركة الأخوة: contains ONLY الأخوة users, warehouse, and branches. Never shows Mawan users!
+ * - شركة الموان: contains ONLY الموان users, warehouse, and branches. Never shows الأخوة users!
+ * - Manager can edit company PIN in settings (defaults: 1234 for الأخوة, 2919 for الموان).
+ */
+export function sanitizeCompanyDatabase(db: AccountingDB, identifier?: string): AccountingDB {
   if (!db) return db;
 
-  if (!db.branches || db.branches.length === 0) {
-    db.branches = defaultBranches();
-  }
+  const codeOrId = identifier || db.settings.companyCode || db.settings.company || '';
+  const isMawan = isCompanyMawan(codeOrId);
 
-  // 1. فرع الأخوة (maintains all existing data)
-  let ekhwa = db.branches.find(b => isBranchEkhwa(b));
-  if (ekhwa) {
-    ekhwa.id = 'br_main';
-    ekhwa.name = 'فرع الأخوة';
-    ekhwa.code = 'BR-01';
-    ekhwa.isMain = true;
-    if (!ekhwa.pin) ekhwa.pin = '1234';
-  } else {
-    ekhwa = {
-      id: 'br_main',
-      name: 'فرع الأخوة',
-      code: 'BR-01',
-      isMain: true,
-      pin: '1234'
-    };
-    db.branches.unshift(ekhwa);
-  }
-
-  // 2. فرع الموان (الرقم السري المعتمد: 1272000)
-  let mawan = db.branches.find(b => isBranchMawan(b));
-  if (mawan) {
-    mawan.id = 'br_mawan';
-    mawan.name = 'فرع الموان';
-    mawan.code = 'BR-02';
-    mawan.isMain = true;
-    if (!mawan.pin || mawan.pin === '1234') {
-      mawan.pin = '1272000';
+  if (isMawan) {
+    // ==========================================
+    // 🏢 شركة الموان (COMP-102) - PIN: 2919
+    // ==========================================
+    db.settings.company = 'شركة الموان';
+    db.settings.companyCode = 'COMP-102';
+    if (!db.settings.companyPin || db.settings.companyPin === '1234' || db.settings.companyPin === '1272000') {
+      db.settings.companyPin = '2919';
     }
+
+    // Strictly Mawan users ONLY
+    if (!db.users) db.users = [];
+    db.users = db.users.filter(u => 
+      u.username === 'mawan' || 
+      u.username === 'mawan_admin' || 
+      u.name.includes('الموان') || 
+      u.branchId === 'br_mawan'
+    );
+
+    // Ensure manager and cashier exist for الموان
+    if (!db.users.some(u => u.username === 'mawan_admin')) {
+      db.users.push({
+        id: 'usr_mawan_admin',
+        name: 'مدير شركة الموان',
+        username: 'mawan_admin',
+        password: '123',
+        role: 'مدير',
+        branchId: 'br_mawan',
+        branchName: 'شركة الموان',
+        active: true
+      });
+    }
+
+    if (!db.users.some(u => u.username === 'mawan')) {
+      db.users.push({
+        id: 'usr_mawan_cashier',
+        name: 'كاشير شركة الموان',
+        username: 'mawan',
+        password: '123',
+        role: 'كاشير',
+        branchId: 'br_mawan',
+        branchName: 'شركة الموان',
+        active: true
+      });
+    }
+
+    // Branches for الموان
+    db.branches = [
+      {
+        id: 'br_mawan',
+        name: 'المقر الرئيسي - شركة الموان',
+        code: 'BR-01',
+        isMain: true,
+        pin: db.settings.companyPin || '2919'
+      }
+    ];
+
+    // Warehouses for الموان
+    if (!db.warehouses || db.warehouses.length === 0 || !db.warehouses.some(w => w.id === 'wh_mawan')) {
+      db.warehouses = [
+        {
+          id: 'wh_mawan',
+          name: 'مخزن شركة الموان الرئيسي',
+          location: 'المقر الرئيسي',
+          isDefault: true
+        }
+      ];
+    }
+
+    // Default currentUser for الموان
+    if (!db.currentUser || !db.users.some(u => u.id === db.currentUser.id)) {
+      db.currentUser = db.users[0];
+    }
+
   } else {
-    mawan = {
-      id: 'br_mawan',
-      name: 'فرع الموان',
-      code: 'BR-02',
-      isMain: true,
-      pin: '1272000'
-    };
-    db.branches.push(mawan);
-  }
+    // ==========================================
+    // 🏢 شركة الأخوة (COMP-101) - PIN: 1234
+    // ==========================================
+    if (!db.settings.company || db.settings.company === 'الشركة التجارية للتوزيع' || db.settings.company.includes('الأخوة')) {
+      db.settings.company = 'شركة الأخوة';
+    }
+    db.settings.companyCode = 'COMP-101';
+    if (!db.settings.companyPin) {
+      db.settings.companyPin = '1234';
+    }
 
-  // De-duplicate branches by standardized ID
-  const seenIds = new Set<string>();
-  db.branches = db.branches.filter(b => {
-    if (seenIds.has(b.id)) return false;
-    seenIds.add(b.id);
-    return true;
-  });
+    // Strictly الأخوة users ONLY: Filter out any Mawan users!
+    if (!db.users) db.users = [];
+    db.users = db.users.filter(u => 
+      u.username !== 'mawan' && 
+      u.username !== 'mawan_admin' && 
+      !u.name.includes('الموان') && 
+      u.branchId !== 'br_mawan'
+    );
 
-  // 3. Ensure users for each branch
-  if (!db.users) db.users = [];
+    // Ensure manager exists for الأخوة
+    if (!db.users.some(u => u.role === 'مدير')) {
+      db.users.unshift({
+        id: 'usr_admin',
+        name: 'مدير شركة الأخوة',
+        username: 'admin',
+        password: '123',
+        role: 'مدير',
+        branchId: 'br_main',
+        branchName: 'شركة الأخوة',
+        active: true
+      });
+    }
 
-  // Update existing users in br_main to display 'فرع الأخوة'
-  db.users.forEach(u => {
-    if (!u.branchId || u.branchId === 'br_main') {
-      u.branchId = 'br_main';
-      if (!u.branchName || u.branchName.includes('الرئيسي')) {
-        u.branchName = 'فرع الأخوة';
+    // Branches for الأخوة (exclude Mawan)
+    if (!db.branches || db.branches.length === 0) {
+      db.branches = [
+        {
+          id: 'br_main',
+          name: 'المقر الرئيسي - فرع الأخوة',
+          code: 'BR-01',
+          isMain: true,
+          pin: db.settings.companyPin || '1234'
+        }
+      ];
+    } else {
+      db.branches = db.branches.filter(b => !isBranchMawan(b));
+      if (db.branches.length === 0) {
+        db.branches = [
+          {
+            id: 'br_main',
+            name: 'المقر الرئيسي - فرع الأخوة',
+            code: 'BR-01',
+            isMain: true,
+            pin: db.settings.companyPin || '1234'
+          }
+        ];
       }
     }
-  });
 
-  // Ensure dedicated user accounts for 'فرع الموان'
-  const hasMawanUser = db.users.some(u => u.branchId === 'br_mawan');
-  if (!hasMawanUser) {
-    db.users.push({
-      id: 'usr_mawan_cashier',
-      name: 'كاشير فرع الموان',
-      username: 'mawan',
-      password: '123',
-      role: 'كاشير',
-      branchId: 'br_mawan',
-      branchName: 'فرع الموان',
-      active: true
-    });
-    db.users.push({
-      id: 'usr_mawan_admin',
-      name: 'مدير فرع الموان',
-      username: 'mawan_admin',
-      password: '123',
-      role: 'مدير',
-      branchId: 'br_mawan',
-      branchName: 'فرع الموان',
-      active: true
-    });
-  }
+    // Warehouses for الأخوة
+    if (!db.warehouses || db.warehouses.length === 0) {
+      db.warehouses = [
+        {
+          id: 'wh_main',
+          name: 'مخزن شركة الأخوة الرئيسي',
+          location: 'المقر الرئيسي',
+          isDefault: true
+        }
+      ];
+    } else {
+      db.warehouses = db.warehouses.filter(w => w.id !== 'wh_mawan');
+    }
 
-  // 4. Ensure warehouse for فرع الموان
-  if (!db.warehouses) db.warehouses = [];
-  if (!db.warehouses.some(w => w.id === 'wh_mawan')) {
-    db.warehouses.push({
-      id: 'wh_mawan',
-      name: 'مخزن فرع الموان',
-      location: 'فرع الموان',
-      isDefault: false
-    });
+    // Default currentUser for الأخوة
+    if (!db.currentUser || !db.users.some(u => u.id === db.currentUser.id)) {
+      db.currentUser = db.users[0];
+    }
   }
 
   return db;
+}
+
+/**
+ * Ensures strict company sanitization across the applet
+ */
+export function ensurePrimaryBranches(db: AccountingDB): AccountingDB {
+  return sanitizeCompanyDatabase(db);
 }
 
 /**
@@ -475,45 +553,47 @@ export function createSeedData(
  * Loads accounting database for a specific tenant / company (100% data isolation)
  */
 export function loadTenantDatabase(tenantId: string): AccountingDB {
-  const tenant = getCompanyTenant(tenantId);
-  const storageKey = getTenantStorageKey(tenantId);
+  const isMawan = isCompanyMawan(tenantId);
+  const normalizedTenantId = isMawan ? 'comp_mawan' : (tenantId === 'comp_primary' ? 'comp_ekhwa' : tenantId);
+  const tenant = getCompanyTenant(normalizedTenantId);
+  const storageKey = getTenantStorageKey(normalizedTenantId);
 
   try {
-    const raw = localStorage.getItem(storageKey);
-    if (!raw) {
-      // Check if this tenant is the default company and we have legacy data to migrate
-      if (tenantId === 'comp_primary' || tenantId.startsWith('comp_migrated')) {
-        const legacyRaw = localStorage.getItem(STORAGE_KEY);
-        if (legacyRaw) {
-          try {
-            const legacyDb = JSON.parse(legacyRaw);
-            if (legacyDb && Array.isArray(legacyDb.accounts)) {
-              const ensured = ensurePrimaryBranches(legacyDb);
-              saveTenantDatabase(tenantId, ensured);
-              return ensured;
-            }
-          } catch (e) {}
-        }
-      }
+    let raw = localStorage.getItem(storageKey);
 
+    // If loading comp_ekhwa and not found in its key, check legacy keys to preserve all existing work!
+    if (!raw && !isMawan) {
+      const legacyRaw = localStorage.getItem('hesabaty_tenant_db_comp_primary') || localStorage.getItem(STORAGE_KEY);
+      if (legacyRaw) {
+        raw = legacyRaw;
+      }
+    }
+
+    if (!raw) {
       // Initialize fresh, isolated seed data for this specific company
-      const initial = createSeedData(
-        tenant?.name || 'المنشأة الجديدة',
+      const companyName = isMawan ? 'شركة الموان' : (tenant?.name || 'شركة الأخوة');
+      const adminName = isMawan ? 'مدير شركة الموان' : 'مدير شركة الأخوة';
+      const adminUsername = isMawan ? 'mawan_admin' : 'admin';
+
+      let initial = createSeedData(
+        companyName,
         tenant?.currency || 'ج.م',
-        tenant ? { name: tenant.adminName, username: tenant.adminUsername } : undefined
+        { name: adminName, username: adminUsername }
       );
-      saveTenantDatabase(tenantId, initial);
+      initial = sanitizeCompanyDatabase(initial, normalizedTenantId);
+      saveTenantDatabase(normalizedTenantId, initial);
       return initial;
     }
 
     let parsed = JSON.parse(raw);
     if (!parsed || parsed.version < 6 || !Array.isArray(parsed.products) || !Array.isArray(parsed.accounts)) {
-      const initial = createSeedData(
-        tenant?.name,
-        tenant?.currency,
-        tenant ? { name: tenant.adminName, username: tenant.adminUsername } : undefined
-      );
-      saveTenantDatabase(tenantId, initial);
+      const companyName = isMawan ? 'شركة الموان' : (tenant?.name || 'شركة الأخوة');
+      const adminName = isMawan ? 'مدير شركة الموان' : 'مدير شركة الأخوة';
+      const adminUsername = isMawan ? 'mawan_admin' : 'admin';
+
+      let initial = createSeedData(companyName, tenant?.currency, { name: adminName, username: adminUsername });
+      initial = sanitizeCompanyDatabase(initial, normalizedTenantId);
+      saveTenantDatabase(normalizedTenantId, initial);
       return initial;
     }
 
@@ -524,9 +604,9 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
     if (!parsed.bankReconciliations) parsed.bankReconciliations = [];
     if (!parsed.goodsReceivedNotes) parsed.goodsReceivedNotes = [];
     if (!parsed.dailyClosings) parsed.dailyClosings = [];
-    
-    // Ensure the two primary branches (الأخوة and الموان) exist with PINs and user accounts
-    parsed = ensurePrimaryBranches(parsed);
+
+    // Strictly sanitize by company: users, PINs, branches, and warehouses
+    parsed = sanitizeCompanyDatabase(parsed, normalizedTenantId);
     if (!parsed.settings.nextGRN) parsed.settings.nextGRN = 7001;
 
     // Guarantee default accounts exist
@@ -540,20 +620,18 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
     // Ensure catalog of 1001 products is populated
     if (parsed.products.length < 1000) {
       const merged = mergeCatalogIntoDb(parsed);
-      const readyDb = ensurePrimaryBranches(merged.db);
-      saveTenantDatabase(tenantId, readyDb);
+      const readyDb = sanitizeCompanyDatabase(merged.db, normalizedTenantId);
+      saveTenantDatabase(normalizedTenantId, readyDb);
       return readyDb;
     }
 
+    // Save back sanitized database
+    saveTenantDatabase(normalizedTenantId, parsed);
     return parsed;
   } catch (err) {
     console.error(`Failed to load tenant database for ${tenantId}:`, err);
-    const initial = createSeedData(
-      tenant?.name,
-      tenant?.currency,
-      tenant ? { name: tenant.adminName, username: tenant.adminUsername } : undefined
-    );
-    saveTenantDatabase(tenantId, initial);
+    const initial = sanitizeCompanyDatabase(createSeedData(tenant?.name, tenant?.currency), normalizedTenantId);
+    saveTenantDatabase(normalizedTenantId, initial);
     return initial;
   }
 }

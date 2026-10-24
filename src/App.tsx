@@ -5,7 +5,8 @@ import {
   loadTenantDatabase,
   calculateFinancialSummary,
   loadFromIndexedDB,
-  ensurePrimaryBranches
+  isCompanyMawan,
+  sanitizeCompanyDatabase
 } from './services/accountingStorage';
 import {
   AccountingDB,
@@ -13,6 +14,19 @@ import {
   Product,
   Branch
 } from './types/accounting';
+import {
+  getCompaniesList,
+  setActiveTenantId,
+  getCompanyTenant,
+  getActiveTenantId,
+  EKHWA_TENANT_ID,
+  EKHWA_CODE,
+  EKHWA_DEFAULT_PIN,
+  MAWAN_TENANT_ID,
+  MAWAN_CODE,
+  MAWAN_DEFAULT_PIN
+} from './services/tenantService';
+import { Lock, Eye, EyeOff, AlertCircle, Building2, Check, X } from 'lucide-react';
 import { Header } from './components/Header';
 import { Sidebar, PageId, canUserAccessPage } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
@@ -44,7 +58,6 @@ import { BranchPinModal } from './components/BranchPinModal';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { getStoredAuthSession, logoutUser, AuthSession } from './services/firebaseAuth';
-import { getActiveTenantId } from './services/tenantService';
 import { mergeCatalogIntoDb } from './data/defaultCatalog1001';
 import {
   subscribeToCloudDatabase,
@@ -145,7 +158,7 @@ export default function App() {
           const merged = mergeCatalogIntoDb(readyDb);
           readyDb = merged.db;
         }
-        readyDb = ensurePrimaryBranches(readyDb);
+        readyDb = sanitizeCompanyDatabase(readyDb);
         setDb(readyDb);
         saveDatabase(readyDb);
       }
@@ -162,7 +175,7 @@ export default function App() {
 
           if (localHasData && !cloudHasData) {
             console.log('Preserving local invoices and accounts, syncing to cloud...');
-            const ensuredPrev = ensurePrimaryBranches(prevDb);
+            const ensuredPrev = sanitizeCompanyDatabase(prevDb);
             pushDatabaseToCloud(ensuredPrev, true);
             return ensuredPrev;
           }
@@ -171,7 +184,7 @@ export default function App() {
           const currentLocalUser = storedSession?.user || prevDb.currentUser;
           const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
           const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
-          const ensuredCloud = ensurePrimaryBranches(cloudDb);
+          const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
           const merged: AccountingDB = {
             ...ensuredCloud,
             currentUser: effectiveUser || ensuredCloud.currentUser || ensuredCloud.users[0]

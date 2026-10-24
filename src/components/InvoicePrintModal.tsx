@@ -36,13 +36,14 @@ export type PaperSize = 'A4' | 'A5' | 'thermal';
 // Helper to format currency numbers cleanly with NO unnecessary fractional decimals (.00) and no floating point artifacts
 export const formatMoneyClean = (val: number | string | undefined): string => {
   if (val === undefined || val === null || val === '') return '0';
-  const num = Number(val);
+  const num = typeof val === 'string' ? parseFloat(val) : val;
   if (isNaN(num)) return String(val);
-  if (Math.abs(num - Math.round(num)) < 0.0001) {
-    return Math.round(num).toString();
+  if (Math.abs(num - Math.round(num)) < 0.005) {
+    return Math.round(num).toLocaleString('en-US');
   }
   const fixed = num.toFixed(2);
-  return fixed.endsWith('.00') ? fixed.slice(0, -3) : fixed.endsWith('0') ? fixed.slice(0, -1) : fixed;
+  const clean = fixed.endsWith('.00') ? fixed.slice(0, -3) : fixed.endsWith('0') ? fixed.slice(0, -1) : fixed;
+  return Number(clean).toLocaleString('en-US');
 };
 
 export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
@@ -88,83 +89,112 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     const prevStyle = document.getElementById('dynamic-paper-print-style');
     if (prevStyle) prevStyle.remove();
 
-    // 2. Inject exact dynamic @page rule and container rules calibrated to fit strictly on ONE PAGE without any row shading
+    // 2. Inject exact dynamic @page rule and container rules calibrated to fit strictly without cutting borders or rows
     const styleEl = document.createElement('style');
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
       styleEl.innerHTML = `
-        @page { size: A4 portrait; margin: 6mm 8mm; }
+        @page { size: A4 portrait; margin: 8mm 10mm; }
         @media print {
           html, body {
             width: 100% !important;
-            height: 100% !important;
-            max-height: 100% !important;
+            height: auto !important;
             margin: 0 !important;
             padding: 0 !important;
-            overflow: hidden !important;
+            overflow: visible !important;
             background: #ffffff !important;
           }
           #invoice-printable-content, .invoice-container {
             width: 100% !important;
-            max-width: 196mm !important;
-            max-height: 283mm !important;
+            max-width: 190mm !important;
             height: auto !important;
             margin: 0 auto !important;
+            padding: 6mm 8mm !important;
+            border: 2px solid #000000 !important;
+            box-sizing: border-box !important;
             page-break-inside: avoid !important;
-            page-break-after: avoid !important;
-            page-break-before: avoid !important;
             break-inside: avoid !important;
-            break-after: avoid !important;
-            break-before: avoid !important;
-            overflow: hidden !important;
+            overflow: visible !important;
             background: #ffffff !important;
           }
-          /* إلغاء أي تظليل نهائياً أثناء الطباعة */
+          tr, td, th {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+          /* خلفية بيضاء نقية 100% بدون أي تظليل */
           table, th, td, tr, .info-box, .header, .invoice-header {
             background: #ffffff !important;
             background-color: #ffffff !important;
             color: #000000 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
           }
         }
       `;
     } else if (paperSize === 'A5') {
       styleEl.innerHTML = `
-        @page { size: A5 portrait; margin: 4mm 5mm; }
+        @page { size: A5 portrait; margin: 6mm 7mm; }
         @media print {
           html, body {
             width: 100% !important;
-            height: 100% !important;
-            max-height: 100% !important;
+            height: auto !important;
             margin: 0 !important;
             padding: 0 !important;
-            overflow: hidden !important;
+            overflow: visible !important;
             background: #ffffff !important;
           }
           #invoice-printable-content, .invoice-container {
             width: 100% !important;
-            max-width: 139mm !important;
-            max-height: 200mm !important;
+            max-width: 135mm !important;
             height: auto !important;
             margin: 0 auto !important;
+            padding: 4mm 5mm !important;
+            border: 1.5px solid #000000 !important;
+            box-sizing: border-box !important;
             page-break-inside: avoid !important;
-            page-break-after: avoid !important;
-            page-break-before: avoid !important;
             break-inside: avoid !important;
-            break-after: avoid !important;
-            break-before: avoid !important;
-            overflow: hidden !important;
+            overflow: visible !important;
             background: #ffffff !important;
           }
-          /* إلغاء أي تظليل نهائياً أثناء الطباعة */
+          tr, td, th {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
           table, th, td, tr, .info-box, .header, .invoice-header {
             background: #ffffff !important;
             background-color: #ffffff !important;
             color: #000000 !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
           }
         }
       `;
     } else {
-      styleEl.innerHTML = `@page { size: 80mm auto; margin: 0; }`;
+      styleEl.innerHTML = `
+        @page { size: 80mm auto; margin: 0; }
+        @media print {
+          html, body {
+            width: 80mm !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            background: #ffffff !important;
+          }
+          #invoice-printable-content, .invoice-container {
+            width: 76mm !important;
+            max-width: 76mm !important;
+            margin: 0 auto !important;
+            padding: 3mm 2mm !important;
+            border: 1px dashed #000000 !important;
+            box-sizing: border-box !important;
+            overflow: visible !important;
+            background: #ffffff !important;
+          }
+          tr, td, th {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+        }
+      `;
     }
     document.head.appendChild(styleEl);
 

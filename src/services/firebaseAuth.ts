@@ -41,6 +41,7 @@ export interface AuthSession {
   tenantId?: string;
   companyName?: string;
   branchId?: string;
+  loginTime?: number;
 }
 
 // In-memory token cache for Google Workspace APIs per skill guidelines

@@ -78,12 +78,12 @@ export const SalesView: React.FC<SalesViewProps> = ({
     }
   }, [initialEditingInvoice]);
 
-  // Permissions checks
+  // Permissions checks: Only general manager can delete invoices per strict security rule
   const userPerms = db.currentUser?.permissions;
   const isManager = db.currentUser?.role === 'مدير';
   const canCreateSales = userPerms ? userPerms.canCreateSales !== false : true;
   const canEditSales = userPerms ? userPerms.canEditSales !== false : true;
-  const canDeleteSales = userPerms ? userPerms.canDeleteSales !== false : isManager;
+  const canDeleteSales = isManager;
   const canPrintSales = userPerms ? userPerms.canPrintSales !== false : true;
 
   // Print modal state for batch & single invoice

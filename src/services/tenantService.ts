@@ -17,8 +17,87 @@ export interface CompanyTenant {
   googleEmail?: string;
 }
 
+export const EKHWA_TENANT_ID = 'comp_ekhwa';
+export const EKHWA_CODE = 'COMP-101';
+export const EKHWA_DEFAULT_PIN = '1234';
+
+export const MAWAN_TENANT_ID = 'comp_mawan';
+export const MAWAN_CODE = 'COMP-102';
+export const MAWAN_DEFAULT_PIN = '2919';
+
 const TENANTS_REGISTRY_KEY = 'hesabaty_companies_registry';
 const ACTIVE_TENANT_KEY = 'hesabaty_active_tenant_id';
+
+/**
+ * Ensures the two primary independent companies (الأخوة and الموان) exist in the registry with their secret PINs
+ */
+export function ensurePrimaryCompanies(existingList: CompanyTenant[]): CompanyTenant[] {
+  const list = [...existingList];
+
+  // 1. شركة الأخوة (COMP-101) - Secret PIN: 1234
+  let ekhwa = list.find(c => c.id === EKHWA_TENANT_ID || c.code === EKHWA_CODE || c.name.includes('الأخوة') || c.id === 'comp_primary');
+  if (ekhwa) {
+    ekhwa.id = EKHWA_TENANT_ID;
+    ekhwa.code = EKHWA_CODE;
+    if (!ekhwa.name || !ekhwa.name.includes('الأخوة')) ekhwa.name = 'شركة الأخوة';
+    if (!ekhwa.password) ekhwa.password = EKHWA_DEFAULT_PIN;
+  } else {
+    ekhwa = {
+      id: EKHWA_TENANT_ID,
+      code: EKHWA_CODE,
+      name: 'شركة الأخوة',
+      activityType: 'تجارة وتوزيع عام',
+      adminName: 'مدير شركة الأخوة',
+      adminUsername: 'admin',
+      password: EKHWA_DEFAULT_PIN,
+      currency: 'ج.م',
+      phone: '',
+      address: 'المقر الرئيسي',
+      createdAt: new Date().toISOString()
+    };
+    list.unshift(ekhwa);
+  }
+
+  // 2. شركة الموان (COMP-102) - Secret PIN: 2919 (editable by manager)
+  let mawan = list.find(c => c.id === MAWAN_TENANT_ID || c.code === MAWAN_CODE || c.name.includes('الموان'));
+  if (mawan) {
+    mawan.id = MAWAN_TENANT_ID;
+    mawan.code = MAWAN_CODE;
+    if (!mawan.name || !mawan.name.includes('الموان')) mawan.name = 'شركة الموان';
+    // If PIN was previously default or 1272000, update to user-specified 2919 unless customized
+    if (!mawan.password || mawan.password === '1272000' || mawan.password === '1234') {
+      mawan.password = MAWAN_DEFAULT_PIN;
+    }
+  } else {
+    mawan = {
+      id: MAWAN_TENANT_ID,
+      code: MAWAN_CODE,
+      name: 'شركة الموان',
+      activityType: 'تجارة ومواد بناء وتوريدات',
+      adminName: 'مدير شركة الموان',
+      adminUsername: 'mawan_admin',
+      password: MAWAN_DEFAULT_PIN,
+      currency: 'ج.م',
+      phone: '',
+      address: 'المقر الرئيسي',
+      createdAt: new Date().toISOString()
+    };
+    list.push(mawan);
+  }
+
+  // De-duplicate by normalized code or ID
+  const seenCodes = new Set<string>();
+  const cleanList: CompanyTenant[] = [];
+  for (const c of list) {
+    const key = (c.code || c.id).toUpperCase();
+    if (!seenCodes.has(key)) {
+      seenCodes.add(key);
+      cleanList.push(c);
+    }
+  }
+
+  return cleanList;
+}
 
 /**
  * Returns list of all company tenants registered on this device/browser
@@ -26,12 +105,19 @@ const ACTIVE_TENANT_KEY = 'hesabaty_active_tenant_id';
 export function getCompaniesList(): CompanyTenant[] {
   try {
     const raw = localStorage.getItem(TENANTS_REGISTRY_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    let list: CompanyTenant[] = [];
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) list = parsed;
+    }
+    const ensured = ensurePrimaryCompanies(list);
+    if (ensured.length !== list.length || JSON.stringify(ensured) !== raw) {
+      saveCompaniesList(ensured);
+    }
+    return ensured;
   } catch (err) {
     console.error('Error loading companies registry:', err);
-    return [];
+    return ensurePrimaryCompanies([]);
   }
 }
 

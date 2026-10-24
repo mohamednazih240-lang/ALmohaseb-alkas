@@ -200,6 +200,12 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   };
 
   const handleDeleteReturn = (ret: ReturnInvoice) => {
+    const isManager = db.currentUser?.role === 'مدير';
+    if (!isManager) {
+      alert('عذراً، لا يمكن حذف أي حركة أو سند مرتجع إلا من قِبل المدير العام فقط.');
+      return;
+    }
+
     if (!confirm(`هل أنت متأكد من حذف المرتجع "${ret.number}" وعكس آثاره؟`)) return;
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
@@ -443,13 +449,15 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
                   </button>
 
                   <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handleDeleteReturn(r)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
-                      title="حذف المرتجع وعكس القيود والمخزن"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    {db.currentUser?.role === 'مدير' && (
+                      <button
+                        onClick={() => handleDeleteReturn(r)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                        title="حذف المرتجع وعكس القيود والمخزن (صلاحية المدير العام)"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

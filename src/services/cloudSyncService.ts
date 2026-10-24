@@ -7,7 +7,7 @@ import {
 } from 'firebase/firestore';
 import { auth } from './firebaseAuth';
 import { AccountingDB, User as AppUser, Branch } from '../types/accounting';
-import { saveDatabase, loadDatabase, ensurePrimaryBranches } from './accountingStorage';
+import { saveDatabase, loadDatabase, ensurePrimaryBranches, sanitizeCompanyDatabase, isCompanyMawan, loadTenantDatabase } from './accountingStorage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { getCompanyByCode } from './tenantService';
 
@@ -268,7 +268,7 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
         const parsed = JSON.parse(val.data) as AccountingDB;
         const mainCode = normalizeCompanyCode(parsed.settings?.companyCode);
         if (mainCode === clean || clean === 'COMP-101') {
-          return ensurePrimaryBranches(parsed);
+          return sanitizeCompanyDatabase(parsed, clean);
         }
       }
     }
@@ -279,7 +279,7 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
     if (backupSnap.exists()) {
       const val = backupSnap.data();
       if (val && val.data) {
-        return ensurePrimaryBranches(JSON.parse(val.data) as AccountingDB);
+        return sanitizeCompanyDatabase(JSON.parse(val.data) as AccountingDB, clean);
       }
     }
 
@@ -348,12 +348,12 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
     }
 
     if (cloudDb && Array.isArray(cloudDb.users) && cloudDb.users.length > 0) {
-      const ensuredCloud = ensurePrimaryBranches(cloudDb);
+      const ensuredCloud = sanitizeCompanyDatabase(cloudDb, clean);
       return {
         db: ensuredCloud,
-        companyName: ensuredCloud.settings.company || 'المنشأة',
+        companyName: ensuredCloud.settings.company || (isCompanyMawan(clean) ? 'شركة الموان' : 'شركة الأخوة'),
         companyCode: ensuredCloud.settings.companyCode || clean,
-        users: ensuredCloud.users, // Full array of all registered users!
+        users: ensuredCloud.users, // Full array of all registered users for this company!
         branches: ensuredCloud.branches || [],
         source: 'cloud'
       };
@@ -362,39 +362,20 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
     console.warn('Cloud query warning for company code:', err);
   }
 
-  // 2. Fallback: Query local database and tenant registry (ensures offline reliability)
+  // 2. Fallback: Query local tenant database directly (never cross-contaminates users!)
   try {
-    const localDb = loadDatabase();
-    const localCode = normalizeCompanyCode(localDb.settings?.companyCode);
-    const localName = (localDb.settings?.company || '').toUpperCase();
+    const targetTenantId = isCompanyMawan(clean) ? 'comp_mawan' : 'comp_ekhwa';
+    const localDb = loadTenantDatabase(targetTenantId);
+    const ensuredLocal = sanitizeCompanyDatabase(localDb, clean);
 
-    if (
-      localCode === clean ||
-      localName.includes(rawClean.toUpperCase()) ||
-      clean === 'COMP-101'
-    ) {
-      const ensuredLocal = ensurePrimaryBranches(localDb);
-      return {
-        db: ensuredLocal,
-        companyName: ensuredLocal.settings.company || 'المنشأة',
-        companyCode: ensuredLocal.settings.companyCode || clean,
-        users: ensuredLocal.users || [], // Full array of all registered users!
-        branches: ensuredLocal.branches || [],
-        source: 'local'
-      };
-    }
-
-    const tenant = getCompanyByCode(codeOrId);
-    if (tenant) {
-      return {
-        db: localDb,
-        companyName: tenant.name,
-        companyCode: tenant.code || clean,
-        users: localDb.users || [],
-        branches: localDb.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }],
-        source: 'local'
-      };
-    }
+    return {
+      db: ensuredLocal,
+      companyName: ensuredLocal.settings.company || (isCompanyMawan(clean) ? 'شركة الموان' : 'شركة الأخوة'),
+      companyCode: ensuredLocal.settings.companyCode || clean,
+      users: ensuredLocal.users || [], // Full array of all registered users for this company!
+      branches: ensuredLocal.branches || [],
+      source: 'local'
+    };
   } catch (err) {
     console.warn('Local fallback error for company code:', err);
   }

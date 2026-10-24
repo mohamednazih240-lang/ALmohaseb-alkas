@@ -666,11 +666,13 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     updated.settings = { ...settingsForm };
     logAudit(updated, 'تحديث إعدادات المنشأة', updated.settings.company);
 
-    // Sync active tenant name and currency in company registry
+    // Sync active tenant name, PIN, code, and currency in company registry
     const activeId = getActiveTenantId();
     if (activeId) {
       updateCompany(activeId, {
         name: updated.settings.company,
+        code: updated.settings.companyCode,
+        password: updated.settings.companyPin,
         currency: updated.settings.currency,
         phone: updated.settings.phone,
         address: updated.settings.address
@@ -678,7 +680,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     }
 
     onUpdateDb(updated);
-    alert('تم حفظ إعدادات النظام بنجاح.');
+    alert('تم حفظ إعدادات النظام والرقم السري للشركة بنجاح.');
   };
 
   return (
@@ -1442,6 +1444,24 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold font-mono uppercase tracking-wider text-blue-900 focus:bg-white focus:border-black outline-none"
                   placeholder="COMP-101"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center justify-between">
+                  <span>الرقم السري للدخول إلى الشركة (Company PIN):</span>
+                  <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">خاص بالمدير</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={settingsForm.companyPin !== undefined ? settingsForm.companyPin : (settingsForm.company?.includes('الموان') ? '2919' : '1234')}
+                  onChange={e => setSettingsForm({ ...settingsForm, companyPin: e.target.value.trim() })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono font-bold tracking-widest text-slate-900 focus:bg-white focus:border-black outline-none"
+                  placeholder="••••"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  الرقم السري المطلوب للوصول والدخول إلى بيانات هذه الشركة عند تسجيل الدخول أو التبديل (يمكنك تعديله كمدير في أي وقت).
+                </p>
               </div>
 
               <div>

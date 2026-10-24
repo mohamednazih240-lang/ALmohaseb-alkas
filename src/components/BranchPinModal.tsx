@@ -29,13 +29,13 @@ export const BranchPinModal: React.FC<BranchPinModalProps> = ({
     const entered = pinInput.trim();
     const isMawan = isBranchMawan(targetBranch);
     const expectedPin = getBranchExpectedPin(targetBranch);
-    const isMatch = (isMawan && entered === '1272000') ||
+    const isMatch = (isMawan && entered === '2919') ||
                     (entered === expectedPin) ||
                     (targetBranch.pin && entered === targetBranch.pin.trim());
 
     if (isMatch) {
-      if (isMawan && targetBranch.pin !== '1272000') {
-        targetBranch.pin = '1272000';
+      if (isMawan && targetBranch.pin !== '2919') {
+        targetBranch.pin = '2919';
       }
       setPinInput('');
       setErrorMessage('');

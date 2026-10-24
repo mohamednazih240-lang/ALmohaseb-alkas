@@ -58,7 +58,8 @@ const HeaderComponent: React.FC<HeaderProps> = ({
   onOpenDriveBackup,
   onOpenLogin,
   onLogout,
-  onManualSync
+  onManualSync,
+  onSwitchCompany
 }) => {
   const [showQuickDropdown, setShowQuickDropdown] = useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
@@ -119,28 +120,15 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Branch Switcher: Desktop Full Selector */}
-          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold shadow-2xs shrink-0">
-            <Building2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-            <select
-              value={activeBranchId}
-              onChange={(e) => {
-                if (e.target.value === '__add_new__') {
-                  onOpenCreateBranch();
-                } else {
-                  onSelectBranch(e.target.value);
-                }
-              }}
-              className="bg-transparent text-slate-800 text-xs font-bold outline-none cursor-pointer max-w-[120px] sm:max-w-[150px] truncate"
-              title="اختيار فرع المحل للعمليات والفواتير"
-            >
-              {(branches || []).map(b => (
-                <option key={b.id} value={b.id}>
-                  {b.isMain ? '🏢 ' : '🔒 '}{b.name} {b.isMain ? '(المقر الرئيسي)' : '(محمي برقم سري)'}
-                </option>
-              ))}
-              <option value="__add_new__">+ إنشاء فرع جديد...</option>
-            </select>
+          {/* Company Badge */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 text-white rounded-xl text-xs font-bold shadow-2xs shrink-0 border border-slate-700">
+            <Building2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="font-black truncate max-w-[120px] sm:max-w-[160px]">
+              {settings.company || (settings.companyCode === 'COMP-102' ? 'شركة الموان' : 'شركة الأخوة')}
+            </span>
+            <span className="text-[9.5px] font-mono bg-amber-500 text-slate-950 px-1.5 py-0.2 rounded font-bold">
+              {settings.companyCode || 'COMP-101'}
+            </span>
           </div>
         </div>
 

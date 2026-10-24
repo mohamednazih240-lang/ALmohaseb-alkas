@@ -290,9 +290,8 @@ table.items-table th,
     margin: 0 !important; 
     color: #000000 !important;
     width: 100% !important;
-    height: 100% !important;
-    max-height: 100% !important;
-    overflow: hidden !important;
+    height: auto !important;
+    overflow: visible !important;
   }
 
   /* إخفاء عناصر واجهة التطبيق والتحكم */
@@ -422,21 +421,19 @@ table.items-table th,
     break-after: avoid !important;
     break-inside: avoid !important;
     break-before: avoid !important;
-    overflow: hidden !important;
+    overflow: visible !important;
   }
 
   /* طباعة A4: صفحة واحدة نقية ومضبوطة بالهوامش والأبعاد القياسية */
   body[data-paper-size="A4"] .invoice-container {
     width: 100% !important;
-    max-width: 196mm !important;
-    min-height: auto !important;
-    max-height: 283mm !important;
+    max-width: 190mm !important;
     height: auto !important;
     padding: 5mm 6mm !important;
     margin: 0 auto !important;
     border: 1.5px solid #000000 !important;
     box-shadow: none !important;
-    overflow: hidden !important;
+    overflow: visible !important;
   }
   body[data-paper-size="A4"] .invoice-table th,
   body[data-paper-size="A4"] .invoice-table td,
@@ -458,15 +455,13 @@ table.items-table th,
   /* طباعة A5: مقاس A5 القياسي بنصف ورقة A4 (148×210 mm) صفحة واحدة نقية ومضبوطة */
   body[data-paper-size="A5"] .invoice-container {
     width: 100% !important;
-    max-width: 139mm !important;
-    min-height: auto !important;
-    max-height: 200mm !important;
+    max-width: 135mm !important;
     height: auto !important;
     padding: 3mm 4mm !important;
     margin: 0 auto !important;
     border: 1.2px solid #000000 !important;
     box-shadow: none !important;
-    overflow: hidden !important;
+    overflow: visible !important;
   }
   body[data-paper-size="A5"] .invoice-table th,
   body[data-paper-size="A5"] .invoice-table td,

@@ -37,7 +37,9 @@ import {
   defaultBranches,
   isBranchMawan,
   getBranchExpectedPin,
-  ensurePrimaryBranches
+  ensurePrimaryBranches,
+  isCompanyMawan,
+  loadTenantDatabase
 } from '../services/accountingStorage';
 import {
   fetchDatabaseFromCloud,
@@ -46,7 +48,17 @@ import {
   normalizeCompanyCode,
   CompanyCloudResult
 } from '../services/cloudSyncService';
-import { getCompaniesList, registerCompany, getCompanyByCode, setActiveTenantId } from '../services/tenantService';
+import {
+  getCompaniesList,
+  registerCompany,
+  getCompanyByCode,
+  setActiveTenantId,
+  CompanyTenant,
+  EKHWA_CODE,
+  MAWAN_CODE,
+  EKHWA_DEFAULT_PIN,
+  MAWAN_DEFAULT_PIN
+} from '../services/tenantService';
 
 interface LoginViewProps {
   settings: AppSettings;
@@ -94,13 +106,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [isRefreshingUsers, setIsRefreshingUsers] = useState<boolean>(false);
   const [lastRefreshedTime, setLastRefreshedTime] = useState<string>('');
 
-  // Branch Selection & PIN Isolation states on Login Screen
-  const [selectedBranchId, setSelectedBranchId] = useState<string>('');
-  const [unlockedBranchIds, setUnlockedBranchIds] = useState<string[]>([]);
-  const [branchPinModalTarget, setBranchPinModalTarget] = useState<Branch | null>(null);
-  const [branchPinInput, setBranchPinInput] = useState<string>('');
-  const [branchPinError, setBranchPinError] = useState<string>('');
-  const [showBranchPinEye, setShowBranchPinEye] = useState<boolean>(false);
+  // Company Selection & PIN Protection states on Login Screen
+  const [unlockedCompanyCodes, setUnlockedCompanyCodes] = useState<string[]>(() => {
+    try {
+      const raw = sessionStorage.getItem('hesabaty_unlocked_companies');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [companyPinModalTarget, setCompanyPinModalTarget] = useState<CompanyTenant | null>(null);
+  const [companyPinInput, setCompanyPinInput] = useState<string>('');
+  const [companyPinError, setCompanyPinError] = useState<string>('');
+  const [showCompanyPinEye, setShowCompanyPinEye] = useState<boolean>(false);
+  const [showOtherCodeInput, setShowOtherCodeInput] = useState<boolean>(false);
 
   // 2. Google / Gmail Sign-In State
   const [manualEmail, setManualEmail] = useState<string>('');
@@ -250,8 +269,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const handleVerifyAndLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
 
-    if (!selectedBranchId) {
-      showToast('يرجى اختيار الفرع أولاً وإدخال الرقم السري الخاص به لعرض المستخدمين وتسجيل الدخول', 'error');
+    const activeCompCode = normalizeCompanyCode(loadedCompany?.companyCode || companyCodeInput || defaultCode);
+    const isMawan = isCompanyMawan(activeCompCode);
+
+    if (!unlockedCompanyCodes.includes(activeCompCode)) {
+      showToast('يرجى اختيار الشركة وإدخال رقمها السري أولاً لعرض مستخدميها وتسجيل الدخول', 'error');
       return;
     }
 
@@ -314,27 +336,22 @@ export const LoginView: React.FC<LoginViewProps> = ({
       }
       targetDb.currentUser = updatedUser;
 
-      // Register or switch company tenant
-      const activeCompCode = normalizeCompanyCode(targetDb.settings.companyCode || loadedCompany?.companyCode);
-      const tenant = registerCompany({
-        name: targetDb.settings.company || loadedCompany?.companyName || 'منشأة حساباتي',
-        code: activeCompCode,
-        adminName: updatedUser.name,
-        adminUsername: updatedUser.username,
-        currency: targetDb.settings.currency || 'ج.م'
-      });
-      setActiveTenantId(tenant.id);
+      // Set active company tenant
+      const tenantId = isMawan ? 'comp_mawan' : 'comp_ekhwa';
+      const companyName = isMawan ? 'شركة الموان' : (targetDb.settings.company || 'شركة الأخوة');
+      const branchId = targetDb.branches?.[0]?.id || (isMawan ? 'br_mawan' : 'br_main');
+      setActiveTenantId(tenantId);
 
       // Save locally and push to cloud
       saveDatabase(targetDb);
       pushDatabaseToCloud(targetDb, true).catch(() => {});
 
       const session: AuthSession = {
-        user: { ...updatedUser, branchId: selectedBranchId },
+        user: { ...updatedUser, branchId },
         isGoogle: false,
-        tenantId: tenant.id,
-        companyName: loadedCompany?.companyName || targetDb.settings.company || 'حساباتي',
-        branchId: selectedBranchId
+        tenantId,
+        companyName,
+        branchId
       };
 
       localStorage.setItem('hesabaty_active_user', JSON.stringify(session));
@@ -447,81 +464,68 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
   };
 
-  const availableBranches: Branch[] = React.useMemo(() => {
-    if (loadedCompany?.branches && loadedCompany.branches.length > 0) return loadedCompany.branches;
-    if (loadedCompany?.db?.branches && loadedCompany.db.branches.length > 0) return loadedCompany.db.branches;
-    if (currentDb.branches && currentDb.branches.length > 0) return currentDb.branches;
-    return defaultBranches();
-  }, [loadedCompany?.branches, loadedCompany?.db?.branches, currentDb.branches]);
+  const companyUsers = React.useMemo(() => {
+    return loadedCompany?.users || [];
+  }, [loadedCompany?.users]);
 
-  const branchUsers = React.useMemo(() => {
-    const allUsers = loadedCompany?.users || [];
-    if (!selectedBranchId) return [];
-    return allUsers.filter(u => {
-      if (u.branchId) {
-        return u.branchId === selectedBranchId;
-      }
-      return selectedBranchId === 'br_main';
-    });
-  }, [loadedCompany?.users, selectedBranchId]);
-
-  // When selectedBranchId or branchUsers change, ensure selectedUserId points to a valid user in this branch
+  // When companyUsers change, ensure selectedUserId points to a valid user in this company
   useEffect(() => {
-    if (branchUsers.length > 0) {
-      if (!branchUsers.some(u => u.id === selectedUserId)) {
-        setSelectedUserId(branchUsers[0].id);
+    if (companyUsers.length > 0) {
+      if (!companyUsers.some(u => u.id === selectedUserId)) {
+        setSelectedUserId(companyUsers[0].id);
         setUserPassword('');
       }
     } else {
       setSelectedUserId('');
       setUserPassword('');
     }
-  }, [selectedBranchId, branchUsers]);
+  }, [companyUsers]);
 
-  const handleBranchClick = (b: Branch) => {
-    if (b.id === selectedBranchId && unlockedBranchIds.includes(b.id)) return;
-
-    // If already unlocked with its PIN in this session
-    if (unlockedBranchIds.includes(b.id)) {
-      setSelectedBranchId(b.id);
+  const handleCompanyCardClick = (comp: CompanyTenant) => {
+    const normCode = normalizeCompanyCode(comp.code || comp.id);
+    if (unlockedCompanyCodes.includes(normCode)) {
+      setCompanyCodeInput(normCode);
+      fetchAndSyncCompanyUsers(normCode, false);
       return;
     }
 
-    // Entering any branch requires its PIN (both الأخوة and الموان are protected)
-    setBranchPinModalTarget(b);
-    setBranchPinInput('');
-    setBranchPinError('');
-    setShowBranchPinEye(false);
+    // Require secret PIN
+    setCompanyPinModalTarget(comp);
+    setCompanyPinInput('');
+    setCompanyPinError('');
+    setShowCompanyPinEye(false);
   };
 
-  const handleBranchPinSubmit = (e: React.FormEvent) => {
+  const handleCompanyPinSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!branchPinModalTarget) return;
+    if (!companyPinModalTarget) return;
 
-    const entered = branchPinInput.trim();
-    const isMawan = isBranchMawan(branchPinModalTarget);
-    const expected = getBranchExpectedPin(branchPinModalTarget);
+    const entered = companyPinInput.trim();
+    const normCode = normalizeCompanyCode(companyPinModalTarget.code || companyPinModalTarget.id);
+    const isMawan = isCompanyMawan(normCode);
 
-    const isMatch = (isMawan && entered === '1272000') ||
-                    (entered === expected) ||
-                    (branchPinModalTarget.pin && entered === branchPinModalTarget.pin.trim());
+    // Expected PIN from company record, or default (1234 for ekhwa, 2919 for mawan)
+    const expected = (companyPinModalTarget.password || (isMawan ? '2919' : '1234')).trim();
 
-    if (isMatch) {
-      if (isMawan && branchPinModalTarget.pin !== '1272000') {
-        branchPinModalTarget.pin = '1272000';
-      }
-      setUnlockedBranchIds(prev => (prev.includes(branchPinModalTarget.id) ? prev : [...prev, branchPinModalTarget.id]));
-      setSelectedBranchId(branchPinModalTarget.id);
-      setBranchPinModalTarget(null);
-      setBranchPinInput('');
-      setBranchPinError('');
-      showToast(`تم فتح بيانات «${branchPinModalTarget.name}» بنجاح`, 'success');
+    if (entered === expected) {
+      const updatedCodes = unlockedCompanyCodes.includes(normCode) ? unlockedCompanyCodes : [...unlockedCompanyCodes, normCode];
+      setUnlockedCompanyCodes(updatedCodes);
+      try {
+        sessionStorage.setItem('hesabaty_unlocked_companies', JSON.stringify(updatedCodes));
+      } catch (e) {}
+
+      setCompanyCodeInput(normCode);
+      setCompanyPinModalTarget(null);
+      setCompanyPinInput('');
+      setCompanyPinError('');
+      showToast(`تم فتح شركة «${companyPinModalTarget.name}» بنجاح`, 'success');
+      fetchAndSyncCompanyUsers(normCode, false);
     } else {
-      setBranchPinError('الرقم السري للفرع غير صحيح! تم منع الدخول لحماية بيانات الفرع.');
+      setCompanyPinError('الرقم السري للشركة غير صحيح! تم منع الدخول لحماية بيانات الشركة.');
     }
   };
 
-  const selectedUserObj = (loadedCompany?.users || []).find(u => u.id === selectedUserId);
+  const selectedUserObj = companyUsers.find(u => u.id === selectedUserId);
   const registeredTenants = getCompaniesList();
 
   return (
@@ -644,13 +648,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
           {activeTab === 'companyCode' && (
             <div className="space-y-4 animate-in fade-in duration-200">
 
-              {/* Company Code Input & Quick Lookup */}
-              <div className="space-y-1.5 bg-slate-900/60 p-3 rounded-2xl border border-slate-700/80">
+              {/* Primary Independent Companies Selector Cards */}
+              <div className="space-y-2 bg-slate-900/80 p-3 rounded-2xl border border-slate-700/80">
                 <div className="flex items-center justify-between text-xs font-bold">
-                  <label className="text-slate-200 flex items-center gap-1.5">
-                    <Store className="w-4 h-4 text-amber-400" />
-                    <span>كود الشركة / المنشأة (Company Code):</span>
-                  </label>
+                  <span className="text-slate-200 flex items-center gap-1.5">
+                    <Building2 className="w-4 h-4 text-amber-400" />
+                    <span>اختر الشركة للدخول (مستقلة بالكامل):</span>
+                  </span>
                   {loadedCompany && (
                     <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 font-bold flex items-center gap-1">
                       <Cloud className="w-3 h-3 text-emerald-400" />
@@ -659,67 +663,89 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   )}
                 </div>
 
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={companyCodeInput}
-                    onChange={e => setCompanyCodeInput(e.target.value.toUpperCase())}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        fetchAndSyncCompanyUsers(companyCodeInput, false);
-                      }
-                    }}
-                    placeholder="مثال: COMP-101"
-                    className="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-mono font-bold focus:border-amber-400 outline-none uppercase tracking-wider"
-                  />
+                <div className="grid grid-cols-2 gap-2.5">
+                  {registeredTenants.slice(0, 2).map(comp => {
+                    const normCode = normalizeCompanyCode(comp.code || comp.id);
+                    const isSelected = normalizeCompanyCode(companyCodeInput) === normCode;
+                    const isUnlocked = unlockedCompanyCodes.includes(normCode);
 
-                  <button
-                    type="button"
-                    onClick={() => fetchAndSyncCompanyUsers(companyCodeInput, false)}
-                    disabled={isRefreshingUsers}
-                    className="px-3.5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer flex items-center gap-1.5 shrink-0 shadow-xs"
-                    title="بحث وجلب بيانات المنشأة من السحابة"
-                  >
-                    {isRefreshingUsers ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5" />
-                    )}
-                    <span>جلب</span>
-                  </button>
+                    return (
+                      <button
+                        key={comp.id}
+                        type="button"
+                        onClick={() => handleCompanyCardClick(comp)}
+                        className={`p-3 rounded-2xl border text-right transition-all flex flex-col justify-between cursor-pointer select-none relative ${
+                          isSelected
+                            ? 'bg-amber-500/20 border-amber-400 ring-2 ring-amber-400/30'
+                            : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-black ${
+                            isSelected ? 'bg-amber-500 text-slate-950' : 'bg-slate-900 text-slate-400'
+                          }`}>
+                            {comp.code || normCode}
+                          </span>
+                          {isUnlocked ? (
+                            <span className="text-[9.5px] text-emerald-400 flex items-center gap-0.5 font-bold">
+                              <Check className="w-3 h-3" />
+                              <span>مفتوحة</span>
+                            </span>
+                          ) : (
+                            <span className="text-[9px] text-amber-300 flex items-center gap-0.5 font-bold bg-amber-500/15 px-1.5 py-0.5 rounded border border-amber-500/30">
+                              <Lock className="w-2.5 h-2.5" />
+                              <span>PIN سري</span>
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="font-black text-sm text-white truncate">
+                          {comp.name}
+                        </div>
+                        <span className="text-[10px] text-slate-400 mt-1">
+                          {isUnlocked ? 'المستخدمون متاحون' : 'انقر لإدخال الرقم السري'}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
 
-                {/* Company Registered Quick Chips - De-duplicated by normalized code */}
-                {registeredTenants.length > 0 && (
-                  <div className="flex items-center gap-1.5 flex-wrap pt-1">
-                    <span className="text-[10px] text-slate-400 font-medium">المنشآت المسجلة:</span>
-                    {Array.from(new Map(registeredTenants.map(t => [normalizeCompanyCode(t.code || t.id), t])).values()).slice(0, 4).map(t => {
-                      const normCode = normalizeCompanyCode(t.code || t.id);
-                      const isSelected = normalizeCompanyCode(companyCodeInput) === normCode;
-                      return (
-                        <button
-                          key={t.id}
-                          type="button"
-                          onClick={() => {
-                            setCompanyCodeInput(normCode);
-                            fetchAndSyncCompanyUsers(normCode, false);
-                          }}
-                          className={`text-[9.5px] px-2 py-0.5 rounded-lg border font-mono transition cursor-pointer ${
-                            isSelected
-                              ? 'bg-amber-500 text-slate-950 border-amber-500 font-bold'
-                              : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
-                          }`}
-                        >
-                          {normCode} ({t.name})
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
+                {/* Other Company Code Option */}
+                <div className="pt-1">
+                  {!showOtherCodeInput ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowOtherCodeInput(true)}
+                      className="text-[10px] text-slate-400 hover:text-amber-300 transition cursor-pointer flex items-center gap-1 font-bold"
+                    >
+                      <PlusCircle className="w-3 h-3" />
+                      <span>دخول بكود شركة أخرى...</span>
+                    </button>
+                  ) : (
+                    <div className="flex gap-2 pt-1 animate-in fade-in">
+                      <input
+                        type="text"
+                        value={companyCodeInput}
+                        onChange={e => setCompanyCodeInput(e.target.value.toUpperCase())}
+                        placeholder="كود الشركة: مثال COMP-103"
+                        className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-mono font-bold outline-none uppercase"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const norm = normalizeCompanyCode(companyCodeInput);
+                          fetchAndSyncCompanyUsers(norm, false);
+                        }}
+                        className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer"
+                      >
+                        جلب
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
 
-              {/* Requirement 3: Live Cloud Sync / Refresh Button */}
+              {/* Live Cloud Sync / Active Company Summary */}
               {loadedCompany && (
                 <div className="flex items-center justify-between gap-2 bg-blue-950/40 p-2.5 rounded-xl border border-blue-500/30 text-xs">
                   <div className="min-w-0">
@@ -730,7 +756,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       </span>
                     </div>
                     <span className="text-[10px] text-slate-400 block mt-0.5">
-                      {loadedCompany.users.length} مستخدمين مسجلين • آخر تحديث: {lastRefreshedTime || 'الآن'}
+                      {companyUsers.length} مستخدمين مسجلين • آخر تحديث: {lastRefreshedTime || 'الآن'}
                     </span>
                   </div>
 
@@ -747,80 +773,19 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
               )}
 
-              {/* Branch Selector: المقر الرئيسي والفروع */}
-              {loadedCompany && availableBranches.length > 0 && (
-                <div className="space-y-2 bg-slate-900/80 p-3 rounded-2xl border border-slate-700/80">
-                  <div className="flex items-center justify-between text-xs font-bold">
-                    <span className="text-slate-200 flex items-center gap-1.5">
-                      <Building2 className="w-4 h-4 text-amber-400" />
-                      <span>اختر المقر الرئيسي أو الفرع للدخول:</span>
-                    </span>
-                    <span className="text-[10px] text-slate-400">
-                      ({availableBranches.length} فروع)
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {availableBranches.map(b => {
-                      const isSelected = selectedBranchId === b.id;
-                      const isUnlocked = unlockedBranchIds.includes(b.id);
-
-                      return (
-                        <button
-                          key={b.id}
-                          type="button"
-                          onClick={() => handleBranchClick(b)}
-                          className={`p-2.5 rounded-xl border text-right transition-all flex flex-col justify-between cursor-pointer select-none relative ${
-                            isSelected
-                              ? 'bg-amber-500/20 border-amber-400 ring-2 ring-amber-400/30'
-                              : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between mb-1.5">
-                            <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded font-bold ${
-                              isSelected ? 'bg-amber-500 text-slate-950' : 'bg-slate-900 text-slate-400'
-                            }`}>
-                              {b.code || 'BR'}
-                            </span>
-                            {isUnlocked ? (
-                              <span className="text-[9px] text-emerald-400 flex items-center gap-0.5 font-bold">
-                                <Check className="w-3 h-3" />
-                                <span>مفتوح</span>
-                              </span>
-                            ) : (
-                              <span className="text-[9px] text-amber-300 flex items-center gap-0.5 font-bold bg-amber-500/15 px-1.5 py-0.2 rounded border border-amber-500/30">
-                                <Lock className="w-2.5 h-2.5" />
-                                <span>PIN سري</span>
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="font-black text-xs text-white truncate">
-                            {b.name}
-                          </div>
-                          <span className="text-[9px] text-slate-400 mt-0.5">
-                            {b.isMain ? 'فرع رئيسي' : 'فرع مستقل'}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Requirement 1: User Selection (Filtered by Selected Branch) */}
+              {/* User Selection (Filtered Strictly by Selected Company) */}
               {loadedCompany && (
                 <div className="space-y-3">
-                  {!selectedBranchId ? (
-                    <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-center space-y-1.5 animate-in fade-in">
-                      <div className="inline-flex p-2.5 bg-amber-500/20 text-amber-300 rounded-full mb-1">
+                  {!unlockedCompanyCodes.includes(normalizeCompanyCode(companyCodeInput)) ? (
+                    <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-center space-y-2 animate-in fade-in">
+                      <div className="inline-flex p-3 bg-amber-500/20 text-amber-300 rounded-full mb-1">
                         <Lock className="w-5 h-5" />
                       </div>
                       <h4 className="text-xs font-black text-amber-200">
-                        اضغط على أحد الفرعين أعلاه («فرع الأخوة» أو «فرع الموان»)
+                        اضغط على شركة «الأخوة» أو شركة «الموان» أعلاه
                       </h4>
                       <p className="text-[11px] text-slate-300 max-w-sm mx-auto leading-relaxed">
-                        كل فرع محمي برقم سري معزول تماماً. اضغط على الفرع وأدخل رقمه السري لعرض مستخدميه وتسجيل الدخول.
+                        كل شركة مستقلة بذاتها ومحمية برقم سري معزول تماماً. اضغط على الشركة وأدخل رقمها السري لعرض مستخدميها والعمل عليها.
                       </p>
                     </div>
                   ) : (
@@ -828,14 +793,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       <label className="text-xs text-slate-200 font-bold mb-1.5 flex items-center justify-between">
                         <span className="flex items-center gap-1">
                           <Users className="w-3.5 h-3.5 text-blue-400" />
-                          <span>مستخدمو {availableBranches.find(b => b.id === selectedBranchId)?.name || 'الفرع'}:</span>
+                          <span>مستخدمو {loadedCompany.companyName}:</span>
                         </span>
                         <span className="text-[10px] text-slate-400 font-normal">
-                          ({branchUsers.length} مستخدم متاح بهذا الفرع)
+                          ({companyUsers.length} مستخدم متاح بهذه الشركة)
                         </span>
                       </label>
 
-                      {branchUsers.length > 0 ? (
+                      {companyUsers.length > 0 ? (
                         /* Standard Dropdown Select */
                         <select
                           value={selectedUserId}
@@ -846,24 +811,24 @@ export const LoginView: React.FC<LoginViewProps> = ({
                           className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-amber-400 outline-none transition cursor-pointer"
                         >
                           <option value="" disabled>-- اضغط لاختيار المستخدم --</option>
-                          {branchUsers.map(u => (
+                          {companyUsers.map(u => (
                             <option key={u.id} value={u.id}>
-                              {u.name} — [{u.role}] ({u.branchName || (availableBranches.find(b => b.id === u.branchId)?.name) || 'المقر الرئيسي'}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
+                              {u.name} — [{u.role}] ({loadedCompany.companyName}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
                             </option>
                           ))}
                         </select>
                       ) : (
                         <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs text-slate-400 text-center leading-relaxed">
-                          لا يوجد مستخدمون مخصصون لهذا الفرع حتى الآن. يمكنك تسجيل الدخول بحساب مدير النظام وتعيين موظفين للفرع من إعدادات المستخدمين.
+                          لا يوجد مستخدمون مخصصون لهذه الشركة حتى الآن.
                         </div>
                       )}
                     </div>
                   )}
 
-                  {/* Interactive Visual Cards for Mobile Touch (Filtered by Branch) */}
-                  {selectedBranchId && branchUsers.length > 0 && (
+                  {/* Interactive Visual Cards for Mobile Touch (Filtered strictly by Company) */}
+                  {unlockedCompanyCodes.includes(normalizeCompanyCode(companyCodeInput)) && companyUsers.length > 0 && (
                     <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto pl-1">
-                      {branchUsers.map(u => {
+                      {companyUsers.map(u => {
                         const isSelected = selectedUserId === u.id;
                         return (
                           <div
@@ -888,11 +853,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
                               <span className="text-[9px] text-slate-300 bg-slate-900/80 px-1.5 py-0.2 rounded-full font-bold">
                                 {u.role}
                               </span>
-                              {(u.branchName || availableBranches.find(b => b.id === u.branchId)?.name) && (
-                                <span className="text-[8px] text-slate-400 truncate max-w-[80px]">
-                                  {u.branchName || availableBranches.find(b => b.id === u.branchId)?.name}
-                                </span>
-                              )}
+                              <span className="text-[8px] text-slate-400 truncate max-w-[80px]">
+                                {loadedCompany.companyName}
+                              </span>
                             </div>
                           </div>
                         );
@@ -1156,8 +1119,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
         </div>
 
-        {/* Modal: Branch Secret PIN Verification for Isolation */}
-        {branchPinModalTarget && (
+        {/* Modal: Company Secret PIN Verification for Isolation */}
+        {companyPinModalTarget && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in duration-200">
             <div className="bg-slate-900 border border-slate-700/90 rounded-2xl w-full max-w-sm shadow-2xl p-5 space-y-4 text-slate-100 animate-in zoom-in-95 duration-200">
               {/* Header */}
@@ -1167,15 +1130,15 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     <Lock className="w-5 h-5" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-black text-white">الرقم السري للفرع</h3>
-                    <p className="text-[10.5px] text-slate-400">حماية وعزل بيانات الفرع</p>
+                    <h3 className="text-sm font-black text-white">الرقم السري للشركة</h3>
+                    <p className="text-[10.5px] text-slate-400">حماية وعزل بيانات الشركة ومستخدميها</p>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => {
-                    setBranchPinModalTarget(null);
-                    setBranchPinError('');
+                    setCompanyPinModalTarget(null);
+                    setCompanyPinError('');
                   }}
                   className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition cursor-pointer"
                 >
@@ -1183,56 +1146,56 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </button>
               </div>
 
-              {/* Branch Badge */}
+              {/* Company Badge */}
               <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Building2 className="w-4 h-4 text-blue-400" />
                   <div>
-                    <span className="text-xs font-bold text-white block">{branchPinModalTarget.name}</span>
-                    <span className="text-[10px] text-slate-400 font-mono">كود: {branchPinModalTarget.code}</span>
+                    <span className="text-xs font-bold text-white block">{companyPinModalTarget.name}</span>
+                    <span className="text-[10px] text-slate-400 font-mono">كود: {companyPinModalTarget.code}</span>
                   </div>
                 </div>
                 <span className="text-[10px] bg-amber-500/15 text-amber-300 font-bold px-2 py-0.5 rounded-full border border-amber-500/30">
-                  فرع محمي
+                  شركة معزولة
                 </span>
               </div>
 
               <p className="text-[11px] text-amber-200/90 bg-amber-950/20 p-2 rounded-xl border border-amber-500/20 leading-relaxed">
-                لا يمكن الدخول إلى هذا الفرع أو استعراض مستخدميه إلا بإدخال الرقم السري الخاص به.
+                لا يمكن الدخول إلى بيانات هذه الشركة أو استعراض مستخدميها إلا بإدخال الرقم السري الخاص بها.
               </p>
 
-              {branchPinError && (
+              {companyPinError && (
                 <div className="p-2.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>{branchPinError}</span>
+                  <span>{companyPinError}</span>
                 </div>
               )}
 
               {/* PIN Input Form */}
-              <form onSubmit={handleBranchPinSubmit} className="space-y-3">
+              <form onSubmit={handleCompanyPinSubmit} className="space-y-3">
                 <div>
                   <div className="flex items-center justify-between text-xs font-bold text-slate-300 mb-1">
-                    <label>أدخل الرقم السري للفرع (PIN):</label>
+                    <label>أدخل الرقم السري للشركة (PIN):</label>
                   </div>
                   <div className="relative">
                     <input
-                      type={showBranchPinEye ? 'text' : 'password'}
+                      type={showCompanyPinEye ? 'text' : 'password'}
                       autoFocus
                       required
-                      value={branchPinInput}
+                      value={companyPinInput}
                       onChange={e => {
-                        setBranchPinInput(e.target.value);
-                        setBranchPinError('');
+                        setCompanyPinInput(e.target.value);
+                        setCompanyPinError('');
                       }}
                       placeholder="••••"
                       className="w-full px-3.5 py-2.5 pl-10 bg-slate-950 border border-slate-700 rounded-xl text-white text-sm font-mono font-bold tracking-widest focus:border-amber-400 outline-none"
                     />
                     <button
                       type="button"
-                      onClick={() => setShowBranchPinEye(!showBranchPinEye)}
+                      onClick={() => setShowCompanyPinEye(!showCompanyPinEye)}
                       className="absolute left-3 top-3 text-slate-400 hover:text-white cursor-pointer"
                     >
-                      {showBranchPinEye ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {showCompanyPinEye ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
                 </div>
@@ -1241,8 +1204,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setBranchPinModalTarget(null);
-                      setBranchPinError('');
+                      setCompanyPinModalTarget(null);
+                      setCompanyPinError('');
                     }}
                     className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition cursor-pointer"
                   >
