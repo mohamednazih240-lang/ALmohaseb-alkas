@@ -98,11 +98,45 @@ export const LoginView: React.FC<LoginViewProps> = ({
   // Active Login Mode Tab: 'companyCode' (default for multi-device & employees) | 'google' | 'register'
   const [activeTab, setActiveTab] = useState<'companyCode' | 'google' | 'register'>('companyCode');
 
+  // Device Remembering Profile (الهاتف المعتمد للمستخدم والمنشأة)
+  const [deviceProfile, setDeviceProfile] = useState<{
+    companyCode: string;
+    companyName: string;
+    userId: string;
+    userName: string;
+    userRole: string;
+  } | null>(() => {
+    try {
+      const raw = localStorage.getItem('hesabaty_device_profile');
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
+
   // 1. Company Code / Multi-Device State
   const defaultCode = currentDb.settings.companyCode || 'COMP-101';
-  const [companyCodeInput, setCompanyCodeInput] = useState<string>(defaultCode);
+  const [companyCodeInput, setCompanyCodeInput] = useState<string>(() => {
+    try {
+      const devRaw = localStorage.getItem('hesabaty_device_profile');
+      if (devRaw) {
+        const dev = JSON.parse(devRaw);
+        if (dev.companyCode) return normalizeCompanyCode(dev.companyCode);
+      }
+    } catch {}
+    return defaultCode;
+  });
   const [loadedCompany, setLoadedCompany] = useState<CompanyAccountData | null>(null);
-  const [selectedUserId, setSelectedUserId] = useState<string>('');
+  const [selectedUserId, setSelectedUserId] = useState<string>(() => {
+    try {
+      const devRaw = localStorage.getItem('hesabaty_device_profile');
+      if (devRaw) {
+        const dev = JSON.parse(devRaw);
+        if (dev.userId) return dev.userId;
+      }
+    } catch {}
+    return '';
+  });
   const [userPassword, setUserPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [isRefreshingUsers, setIsRefreshingUsers] = useState<boolean>(false);
@@ -111,8 +145,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
   // Company Selection & PIN Protection states on Login Screen
   const [unlockedCompanyCodes, setUnlockedCompanyCodes] = useState<string[]>(() => {
     try {
-      const raw = sessionStorage.getItem('hesabaty_unlocked_companies');
-      return raw ? JSON.parse(raw) : [];
+      const raw = localStorage.getItem('hesabaty_unlocked_companies') || sessionStorage.getItem('hesabaty_unlocked_companies');
+      const list: string[] = raw ? JSON.parse(raw) : [];
+      const devRaw = localStorage.getItem('hesabaty_device_profile');
+      if (devRaw) {
+        const dev = JSON.parse(devRaw);
+        if (dev.companyCode && !list.includes(dev.companyCode)) {
+          list.push(dev.companyCode);
+        }
+      }
+      return list;
     } catch {
       return [];
     }
@@ -208,10 +250,19 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
         setLoadedCompany(compData);
 
-        // Keep previously selected user if still present, otherwise select first user
+        // Keep previously selected user if still present, otherwise prefer device profile user, otherwise select first user
         setSelectedUserId(prevId => {
-          const exists = compData.users.find(u => u.id === prevId);
-          return exists ? prevId : compData.users[0]?.id || '';
+          if (prevId && compData.users.some(u => u.id === prevId)) return prevId;
+          try {
+            const devRaw = localStorage.getItem('hesabaty_device_profile');
+            if (devRaw) {
+              const dev = JSON.parse(devRaw);
+              if (dev.userId && compData.users.some(u => u.id === dev.userId)) {
+                return dev.userId;
+              }
+            }
+          } catch {}
+          return compData.users[0]?.id || '';
         });
 
         const now = new Date();
@@ -358,6 +409,26 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
       localStorage.setItem('hesabaty_active_user', JSON.stringify(session));
 
+      // Persist this phone/device identity so it is recognized automatically
+      const newDevProfile = {
+        companyCode: activeCompCode,
+        companyName,
+        userId: updatedUser.id,
+        userName: updatedUser.name,
+        userRole: updatedUser.role,
+        lastLogin: new Date().toISOString()
+      };
+      setDeviceProfile(newDevProfile);
+      localStorage.setItem('hesabaty_device_profile', JSON.stringify(newDevProfile));
+
+      // Persist unlocked company on this device across reloads
+      try {
+        const stored = localStorage.getItem('hesabaty_unlocked_companies');
+        const list: string[] = stored ? JSON.parse(stored) : [];
+        if (!list.includes(activeCompCode)) list.push(activeCompCode);
+        localStorage.setItem('hesabaty_unlocked_companies', JSON.stringify(list));
+      } catch (e) {}
+
       showToast(`مرحباً بك يا ${updatedUser.name}! تم التحقق وتسجيل الدخول بنجاح...`, 'success');
 
       setTimeout(() => {
@@ -474,7 +545,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
   useEffect(() => {
     if (companyUsers.length > 0) {
       if (!companyUsers.some(u => u.id === selectedUserId)) {
-        setSelectedUserId(companyUsers[0].id);
+        const devUserId = deviceProfile?.userId;
+        if (devUserId && companyUsers.some(u => u.id === devUserId)) {
+          setSelectedUserId(devUserId);
+        } else {
+          setSelectedUserId(companyUsers[0].id);
+        }
         setUserPassword('');
       }
     } else {
@@ -841,6 +917,31 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   {/* User Selection */}
                   {loadedCompany && (
                     <div className="space-y-3">
+                      {/* Recognized Phone / Device Banner */}
+                      {deviceProfile && deviceProfile.companyCode === normalizeCompanyCode(companyCodeInput) && (
+                        <div className="bg-gradient-to-r from-emerald-950/80 via-slate-900 to-slate-900 p-3 rounded-2xl border border-emerald-500/40 flex items-center justify-between text-xs animate-in fade-in shadow-xs">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center shrink-0">
+                              <Smartphone className="w-4 h-4" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-[9.5px] text-emerald-300 font-black bg-emerald-500/20 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                                  هذا الهاتف مسجل باسم
+                                </span>
+                                <strong className="text-white text-xs font-black truncate">{deviceProfile.userName}</strong>
+                                <span className="text-[10px] text-amber-300 bg-amber-500/20 px-1.5 py-0.2 rounded font-bold">
+                                  [{deviceProfile.userRole}]
+                                </span>
+                              </div>
+                              <span className="text-[10.5px] text-slate-300 block mt-0.5 truncate">
+                                المنشأة: {deviceProfile.companyName || loadedCompany.companyName}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       <div>
                         <label className="text-xs text-slate-200 font-bold mb-1.5 flex items-center justify-between">
                           <span className="flex items-center gap-1">
@@ -862,11 +963,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
                             className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-amber-400 outline-none transition cursor-pointer"
                           >
                             <option value="" disabled>-- اضغط لاختيار المستخدم --</option>
-                            {companyUsers.map(u => (
-                              <option key={u.id} value={u.id}>
-                                {u.name} — [{u.role}] ({loadedCompany.companyName}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
-                              </option>
-                            ))}
+                            {companyUsers.map(u => {
+                              const isThisDevice = deviceProfile?.userId === u.id;
+                              return (
+                                <option key={u.id} value={u.id}>
+                                  {isThisDevice ? '📱 (هذا الجهاز) ' : ''}{u.name} — [{u.role}] ({loadedCompany.companyName}) {u.password ? '• محمي برقم سري' : '• بدون كلمة مرور'}
+                                </option>
+                              );
+                            })}
                           </select>
                         ) : (
                           <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs text-slate-400 text-center leading-relaxed">
@@ -880,6 +984,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                         <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto pl-1">
                           {companyUsers.map(u => {
                             const isSelected = selectedUserId === u.id;
+                            const isThisDevice = deviceProfile?.userId === u.id;
                             return (
                               <div
                                 key={u.id}
@@ -887,12 +992,18 @@ export const LoginView: React.FC<LoginViewProps> = ({
                                   setSelectedUserId(u.id);
                                   setUserPassword('');
                                 }}
-                                className={`p-2.5 rounded-xl cursor-pointer text-center transition-all space-y-1 select-none border ${
+                                className={`p-2.5 rounded-xl cursor-pointer text-center transition-all space-y-1 select-none border relative ${
                                   isSelected
                                     ? 'bg-slate-700/90 border-amber-400 ring-2 ring-amber-400/20 shadow-md'
                                     : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
                                 }`}
                               >
+                                {isThisDevice && (
+                                  <span className="absolute top-1.5 right-1.5 text-[8.5px] font-black bg-emerald-500 text-slate-950 px-1.5 py-0.2 rounded-full flex items-center gap-0.5 shadow-xs">
+                                    <Smartphone className="w-2.5 h-2.5" />
+                                    <span>هاتفي</span>
+                                  </span>
+                                )}
                                 <div className="w-8 h-8 mx-auto rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center">
                                   {getUserRoleIcon(u.role)}
                                 </div>

@@ -264,41 +264,62 @@ export function sanitizeCompanyDatabase(db: AccountingDB, identifier?: string): 
       db.settings.companyPin = '2919';
     }
 
-    // Strictly Mawan users ONLY
     if (!db.users) db.users = [];
-    db.users = db.users.filter(u => 
-      u.username === 'mawan' || 
-      u.username === 'mawan_admin' || 
-      u.name.includes('الموان') || 
-      u.branchId === 'br_mawan'
-    );
 
-    // Ensure manager and cashier exist for الموان
-    if (!db.users.some(u => u.username === 'mawan_admin')) {
-      db.users.push({
-        id: 'usr_mawan_admin',
-        name: 'مدير شركة الموان',
-        username: 'mawan_admin',
-        password: '123',
-        role: 'مدير',
-        branchId: 'br_mawan',
-        branchName: 'شركة الموان',
-        active: true
-      });
+    // Filter out dummy/stray users if real users exist
+    db.users = db.users.filter(u => u.username !== 'mawan' && u.username !== 'mawan_admin');
+
+    // Clean up names for real users in Mawan
+    for (const u of db.users) {
+      if (u.username === 'mohamed nazih' || u.username === 'mohamednazih') {
+        u.name = 'محمد نزيه';
+        u.role = 'مدير';
+        u.branchId = 'br_mawan';
+      } else if (u.username === 'ahmed nazih' || u.username === 'ahmednazih') {
+        u.name = 'أحمد نزيه';
+        u.role = 'مدير';
+        u.branchId = 'br_mawan';
+      }
     }
 
-    if (!db.users.some(u => u.username === 'mawan')) {
-      db.users.push({
-        id: 'usr_mawan_cashier',
-        name: 'كاشير شركة الموان',
-        username: 'mawan',
-        password: '123',
-        role: 'كاشير',
-        branchId: 'br_mawan',
-        branchName: 'شركة الموان',
-        active: true
-      });
+    // Deduplicate by username or id
+    const seenMawanUsers = new Set<string>();
+    const cleanMawanUsers: User[] = [];
+    for (const u of db.users) {
+      const key = (u.username || u.id).toLowerCase();
+      if (!seenMawanUsers.has(key)) {
+        seenMawanUsers.add(key);
+        cleanMawanUsers.push(u);
+      }
     }
+
+    // If completely empty, provide the actual managers of Mawan
+    if (cleanMawanUsers.length === 0) {
+      cleanMawanUsers.push(
+        {
+          id: 'usr_mvnj47xi',
+          name: 'محمد نزيه',
+          username: 'mohamed nazih',
+          password: '1272',
+          role: 'مدير',
+          branchId: 'br_mawan',
+          branchName: 'المقر الرئيسي - شركة الموان',
+          active: true
+        },
+        {
+          id: 'usr_mvnj6i7d_vhlqh',
+          name: 'أحمد نزيه',
+          username: 'ahmed nazih',
+          password: '1234',
+          role: 'مدير',
+          branchId: 'br_mawan',
+          branchName: 'المقر الرئيسي - شركة الموان',
+          active: true
+        }
+      );
+    }
+
+    db.users = cleanMawanUsers;
 
     // Branches for الموان
     db.branches = [
@@ -340,18 +361,33 @@ export function sanitizeCompanyDatabase(db: AccountingDB, identifier?: string): 
       db.settings.companyPin = '1234';
     }
 
-    // Strictly الأخوة users ONLY: Filter out any Mawan users!
     if (!db.users) db.users = [];
+
+    // Strictly الأخوة users ONLY: Filter out any Mawan users!
     db.users = db.users.filter(u => 
       u.username !== 'mawan' && 
       u.username !== 'mawan_admin' && 
+      u.username !== 'mohamed nazih' &&
+      u.username !== 'ahmed nazih' &&
       !u.name.includes('الموان') && 
+      u.id !== 'usr_mvnj47xi' &&
+      u.id !== 'usr_mvnj6i7d_vhlqh' &&
       u.branchId !== 'br_mawan'
     );
 
-    // Ensure manager exists for الأخوة
-    if (!db.users.some(u => u.role === 'مدير')) {
-      db.users.unshift({
+    // Deduplicate الأخوة users
+    const seenEkhwaUsers = new Set<string>();
+    const cleanEkhwaUsers: User[] = [];
+    for (const u of db.users) {
+      const key = (u.username || u.id).toLowerCase();
+      if (!seenEkhwaUsers.has(key)) {
+        seenEkhwaUsers.add(key);
+        cleanEkhwaUsers.push(u);
+      }
+    }
+
+    if (cleanEkhwaUsers.length === 0) {
+      cleanEkhwaUsers.push({
         id: 'usr_admin',
         name: 'مدير شركة الأخوة',
         username: 'admin',
@@ -362,6 +398,8 @@ export function sanitizeCompanyDatabase(db: AccountingDB, identifier?: string): 
         active: true
       });
     }
+
+    db.users = cleanEkhwaUsers;
 
     // Branches for الأخوة (exclude Mawan)
     if (!db.branches || db.branches.length === 0) {
