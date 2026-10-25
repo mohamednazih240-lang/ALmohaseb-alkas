@@ -1,0 +1,42 @@
+{
+  "entities": {
+    "HesabatyAppData": {
+      "title": "HesabatyAppData",
+      "description": "Enterprise multi-tenant accounting and company database document",
+      "type": "object",
+      "properties": {
+        "companyCode": {
+          "type": "string",
+          "description": "Company tenant code such as COMP-101 or COMP-102"
+        },
+        "companyName": {
+          "type": "string",
+          "description": "Display name of the company or establishment"
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Timestamp of the last transaction or change"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "User name or role who executed the change"
+        },
+        "data": {
+          "type": "string",
+          "description": "Serialized database payload including accounts, invoices, and users"
+        },
+        "deviceId": {
+          "type": "string",
+          "description": "Originating device or browser instance ID"
+        }
+      },
+      "required": ["companyCode", "data", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/hesabaty_app_data/{docId}": {
+      "schema": "HesabatyAppData",
+      "description": "Collection storing isolated company database snapshots and real-time tenant documents"
+    }
+  }
+}

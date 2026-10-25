@@ -1,5 +1,6 @@
 import {
   getFirestore,
+  initializeFirestore,
   doc,
   setDoc,
   getDoc,
@@ -11,9 +12,38 @@ import { saveDatabase, loadDatabase, ensurePrimaryBranches, sanitizeCompanyDatab
 import firebaseConfig from '../../firebase-applet-config.json';
 import { getCompanyByCode } from './tenantService';
 
-// Connect to provisioned Firestore database using databaseId from config
+// Connect to provisioned Firestore database with auto-detect long polling for resilient connections
 const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId;
-export const firestore = firestoreDbId ? getFirestore(auth.app, firestoreDbId) : getFirestore(auth.app);
+export const firestore = (() => {
+  try {
+    return initializeFirestore(
+      auth.app,
+      {
+        experimentalAutoDetectLongPolling: true
+      },
+      firestoreDbId || undefined
+    );
+  } catch (e) {
+    return firestoreDbId ? getFirestore(auth.app, firestoreDbId) : getFirestore(auth.app);
+  }
+})();
+
+/**
+ * Safe promise wrapper with timeout to prevent hanging on cold starts or network drops
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number = 3500): Promise<T | null> {
+  let timer: any;
+  const timeoutPromise = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  return Promise.race([
+    promise.then((res) => {
+      clearTimeout(timer);
+      return res;
+    }),
+    timeoutPromise
+  ]);
+}
 
 const SYNC_DOC_PATH = 'hesabaty_app_data';
 const SYNC_DOC_ID = 'main_company_database';
@@ -251,8 +281,8 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
   try {
     // 1. Check company specific document
     const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
-    const specificSnap = await getDoc(specificRef);
-    if (specificSnap.exists()) {
+    const specificSnap = await withTimeout(getDoc(specificRef), 3500);
+    if (specificSnap && specificSnap.exists()) {
       const val = specificSnap.data();
       if (val && val.data) {
         return JSON.parse(val.data) as AccountingDB;
@@ -261,8 +291,8 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
 
     // 2. Check main cloud database
     const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-    const snap = await getDoc(docRef);
-    if (snap.exists()) {
+    const snap = await withTimeout(getDoc(docRef), 3000);
+    if (snap && snap.exists()) {
       const val = snap.data();
       if (val && val.data) {
         const parsed = JSON.parse(val.data) as AccountingDB;
@@ -275,8 +305,8 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
 
     // 3. Check backup document
     const backupRef = doc(firestore, SYNC_DOC_PATH, `backup_${clean}_latest`);
-    const backupSnap = await getDoc(backupRef);
-    if (backupSnap.exists()) {
+    const backupSnap = await withTimeout(getDoc(backupRef), 3000);
+    if (backupSnap && backupSnap.exists()) {
       const val = backupSnap.data();
       if (val && val.data) {
         return sanitizeCompanyDatabase(JSON.parse(val.data) as AccountingDB, clean);
@@ -306,8 +336,8 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
 
     // Check specific company document e.g. company_COMP-101
     const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
-    const specificSnap = await getDoc(specificRef);
-    if (specificSnap.exists()) {
+    const specificSnap = await withTimeout(getDoc(specificRef), 3500);
+    if (specificSnap && specificSnap.exists()) {
       const val = specificSnap.data();
       if (val?.data) {
         cloudDb = JSON.parse(val.data) as AccountingDB;
@@ -317,8 +347,8 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
     // Check backup doc if specific not found
     if (!cloudDb) {
       const backupRef = doc(firestore, SYNC_DOC_PATH, `backup_${clean}_latest`);
-      const backupSnap = await getDoc(backupRef);
-      if (backupSnap.exists()) {
+      const backupSnap = await withTimeout(getDoc(backupRef), 3000);
+      if (backupSnap && backupSnap.exists()) {
         const val = backupSnap.data();
         if (val?.data) {
           cloudDb = JSON.parse(val.data) as AccountingDB;
@@ -329,8 +359,8 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
     // Check main cloud database
     if (!cloudDb) {
       const mainRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-      const mainSnap = await getDoc(mainRef);
-      if (mainSnap.exists()) {
+      const mainSnap = await withTimeout(getDoc(mainRef), 3000);
+      if (mainSnap && mainSnap.exists()) {
         const val = mainSnap.data();
         if (val?.data) {
           const parsed = JSON.parse(val.data) as AccountingDB;
