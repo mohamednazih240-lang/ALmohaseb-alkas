@@ -23,7 +23,9 @@ import {
   generateId,
   getTodayDate,
   createVoucherJournal,
-  logAudit
+  logAudit,
+  isDuplicateVoucherNumber,
+  getNextUniqueVoucherNumber
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { VoucherPrintModal } from './VoucherPrintModal';
@@ -157,10 +159,8 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     }
 
     const nextSettingKey = isReceipt ? 'nextReceipt' : 'nextPayment';
-    const vNumber = isReceipt
-      ? `REC-${String(updated.settings.nextReceipt).padStart(6, '0')}`
-      : `PAY-${String(updated.settings.nextPayment).padStart(6, '0')}`;
-    updated.settings[nextSettingKey] += 1;
+    const { number: vNumber, nextSeq } = getNextUniqueVoucherNumber(updated, type);
+    updated.settings[nextSettingKey] = nextSeq + 1;
 
     const vId = generateId(isReceipt ? 'rec' : 'pay');
 

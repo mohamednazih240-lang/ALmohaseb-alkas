@@ -52,7 +52,11 @@ import {
   createInvoiceJournal,
   logAudit,
   getProductForBranch,
-  updateProductBranchData
+  updateProductBranchData,
+  isDuplicateInvoiceNumber,
+  getNextUniqueInvoiceNumber,
+  isDuplicateParty,
+  getNextUniquePartyCode
 } from '../services/accountingStorage';
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
@@ -348,17 +352,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       const found = partyList.find(p => p.id === editingInvoice.partyId);
       if (found) setSelectedParty(found);
     } else {
-      // New invoice sequence
-      const prefix = mode === 'sale' ? 'INV-' :
-                     mode === 'wholesale' ? 'WHL-' :
-                     mode === 'purchase' ? 'PUR-' :
-                     mode === 'sale_return' ? 'RET-S-' :
-                     mode === 'purchase_return' ? 'RET-P-' : 'QUO-';
-      const seq = mode === 'sale' ? db.settings.nextSale :
-                  mode === 'wholesale' ? db.settings.nextSale :
-                  mode === 'purchase' ? db.settings.nextPurchase :
-                  mode === 'quote' ? db.settings.nextQuote : Date.now().toString().slice(-4);
-      setInvNum(`${prefix}${String(seq).padStart(6, '0')}`);
+      // Guaranteed unique invoice number with zero collisions
+      const { number: uniqueInvNum } = getNextUniqueInvoiceNumber(db, mode);
+      setInvNum(uniqueInvNum);
       setInvDate(getTodayDate());
       const now = new Date();
       setInvTime(String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0'));
@@ -370,19 +366,21 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setExtraIncomeVal('');
       setPaymentRows([]);
 
-      // Default party
+      // Default party: ALWAYS "نقدي" (Cash) as strictly requested
+      setCustSearchInput('نقدي');
+      setCustCode('1');
+      setCustPhone('');
       const partyList = theme.partyRole === 'customer' ? db.customers : db.suppliers;
-      if (partyList.length > 0) {
-        const first = partyList[0];
-        setSelectedParty(first);
-        setCustCode(first.code || '1');
-        setCustSearchInput(first.name);
-        setCustPhone(first.phone || '');
+      const cashParty = partyList.find(
+        p => p.name.trim() === 'نقدي' ||
+             p.name.trim() === (theme.partyRole === 'customer' ? 'عميل نقدي' : 'مورد نقدي') ||
+             p.code === 'CASH'
+      );
+      if (cashParty) {
+        setSelectedParty(cashParty);
+        setCustCode(cashParty.code || '1');
       } else {
         setSelectedParty(null);
-        setCustCode('1');
-        setCustSearchInput('عميل نقدي');
-        setCustPhone('');
       }
     }
   }, [editingInvoice, mode]);
@@ -702,9 +700,23 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     const isCust = theme.partyRole === 'customer';
+    const targetType = isCust ? 'customer' : 'supplier';
     const list = isCust ? updated.customers : updated.suppliers;
-    const prefix = isCust ? 'C-' : 'S-';
-    const newCode = `${prefix}${String(list.length + 1).padStart(3, '0')}`;
+
+    // Duplicate check
+    const dupCheck = isDuplicateParty(updated, targetType, pName, custPhone.trim());
+    if (dupCheck.isDuplicate) {
+      if (dupCheck.existing) {
+        selectParty(dupCheck.existing);
+        showToast(`✓ الشركة مسجلة مسبقاً: "${dupCheck.existing.name}" (كود: ${dupCheck.existing.code || '—'}) تم اختيارها تلقائياً`);
+        setShowCustDropdown(false);
+        return;
+      }
+      alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+      return;
+    }
+
+    const newCode = getNextUniquePartyCode(updated, targetType);
     const newId = generateId('party');
 
     const newParty: Party = {
@@ -714,7 +726,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       company: pName,
       phone: custPhone.trim() || '',
       address: '',
-      type: theme.partyRole,
+      type: targetType,
       balance: 0,
       openingBalance: 0,
       creditLimit: 0,
@@ -729,7 +741,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setCustCode(newParty.code || '');
     setCustSearchInput(newParty.name);
     setShowCustDropdown(false);
-    showToast(`✓ تم إثبات وتسجيل شركة/طرف جديد: "${newParty.name}" (كود: ${newParty.code})`);
+    showToast(`✓ تم إثبات وتسجيل شركة جديدة: "${newParty.name}" (كود: ${newParty.code})`);
   };
 
   // Modify row modal
@@ -845,38 +857,59 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
+    // Strict duplicate check for invoice number
+    if (isDuplicateInvoiceNumber(updated, invNum, editingInvoice?.id)) {
+      alert(`⚠️ منع التكرار: رقم الفاتورة (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`);
+      return;
+    }
+
     // Check Party and auto-register if new
-    const partyName = custSearchInput.trim() || (theme.partyRole === 'customer' ? 'عميل نقدي' : 'مورد عام');
-    let activePartyId = selectedParty?.id;
-    let activePartyCode = custCode;
     const isCust = theme.partyRole === 'customer';
+    const targetType = isCust ? 'customer' : 'supplier';
     const targetPartyList = isCust ? updated.customers : updated.suppliers;
 
-    if (!activePartyId && custSearchInput.trim()) {
-      const existing = targetPartyList.find(p => p.name.trim().toLowerCase() === custSearchInput.trim().toLowerCase());
+    const trimmedInput = custSearchInput.trim();
+    const isCash = !trimmedInput ||
+                   trimmedInput === 'نقدي' ||
+                   trimmedInput === 'عميل نقدي' ||
+                   trimmedInput === 'مورد نقدي';
+
+    let partyName = isCash ? (isCust ? 'عميل نقدي' : 'مورد نقدي') : trimmedInput;
+    let activePartyId = selectedParty?.id;
+    let activePartyCode = custCode;
+
+    if (!isCash && !activePartyId && trimmedInput) {
+      const existing = targetPartyList.find(p => p.name.trim().toLowerCase() === trimmedInput.toLowerCase());
       if (existing) {
         activePartyId = existing.id;
         activePartyCode = existing.code || '';
+        partyName = existing.name;
       } else {
-        const prefix = isCust ? 'C-' : 'S-';
-        const newCode = `${prefix}${String(targetPartyList.length + 1).padStart(3, '0')}`;
-        const newPartyId = generateId('party');
-        const newlyCreated: Party = {
-          id: newPartyId,
-          code: newCode,
-          name: custSearchInput.trim(),
-          company: custSearchInput.trim(),
-          phone: custPhone.trim() || '',
-          address: '',
-          type: theme.partyRole,
-          balance: 0,
-          openingBalance: 0,
-          creditLimit: 0,
-          notes: 'تم الإثبات والتسجيل أثناء حفظ الفاتورة'
-        };
-        targetPartyList.push(newlyCreated);
-        activePartyId = newPartyId;
-        activePartyCode = newCode;
+        const dupCheck = isDuplicateParty(updated, targetType, trimmedInput, custPhone.trim());
+        if (dupCheck.isDuplicate && dupCheck.existing) {
+          activePartyId = dupCheck.existing.id;
+          activePartyCode = dupCheck.existing.code || '';
+          partyName = dupCheck.existing.name;
+        } else {
+          const newCode = getNextUniquePartyCode(updated, targetType);
+          const newPartyId = generateId('party');
+          const newlyCreated: Party = {
+            id: newPartyId,
+            code: newCode,
+            name: trimmedInput,
+            company: trimmedInput,
+            phone: custPhone.trim() || '',
+            address: '',
+            type: targetType,
+            balance: 0,
+            openingBalance: 0,
+            creditLimit: 0,
+            notes: 'تم الإثبات والتسجيل أثناء حفظ الفاتورة'
+          };
+          targetPartyList.push(newlyCreated);
+          activePartyId = newPartyId;
+          activePartyCode = newCode;
+        }
       }
     }
 
@@ -1169,9 +1202,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     // 4. Increment sequence if new
     if (!editingInvoice) {
-      if (mode === 'sale' || mode === 'wholesale') updated.settings.nextSale += 1;
-      else if (mode === 'purchase') updated.settings.nextPurchase += 1;
-      else if (mode === 'quote') updated.settings.nextQuote += 1;
+      const numDigits = parseInt(savedInvoice.number.replace(/\D/g, '')) || 0;
+      if (mode === 'sale' || mode === 'wholesale') {
+        updated.settings.nextSale = Math.max(updated.settings.nextSale || 1, numDigits + 1);
+      } else if (mode === 'purchase') {
+        updated.settings.nextPurchase = Math.max(updated.settings.nextPurchase || 1, numDigits + 1);
+      } else if (mode === 'quote') {
+        updated.settings.nextQuote = Math.max(updated.settings.nextQuote || 1, numDigits + 1);
+      }
     }
 
     // 5. Save to invoices array
@@ -1224,15 +1262,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setGlobalInvDisc('');
       setGlobalInvTax('');
       setExtraIncomeVal('');
-      const prefix = mode === 'sale' ? 'INV-' :
-                     mode === 'wholesale' ? 'WHL-' :
-                     mode === 'purchase' ? 'PUR-' :
-                     mode === 'sale_return' ? 'RET-S-' :
-                     mode === 'purchase_return' ? 'RET-P-' : 'QUO-';
-      const nextSeq = mode === 'sale' ? updated.settings.nextSale :
-                      mode === 'wholesale' ? updated.settings.nextSale :
-                      mode === 'purchase' ? updated.settings.nextPurchase : updated.settings.nextQuote;
-      setInvNum(`${prefix}${String(nextSeq).padStart(6, '0')}`);
+      setCustSearchInput('نقدي');
+      setCustCode('1');
+      setCustPhone('');
+      const cashParty = (isCust ? updated.customers : updated.suppliers).find(
+        p => p.name.trim() === 'نقدي' ||
+             p.name.trim() === (isCust ? 'عميل نقدي' : 'مورد نقدي') ||
+             p.code === 'CASH'
+      );
+      setSelectedParty(cashParty || null);
+      const { number: nextUniqueNum } = getNextUniqueInvoiceNumber(updated, mode);
+      setInvNum(nextUniqueNum);
     }
   };
 
@@ -1399,72 +1439,211 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             <div className="flex flex-col gap-0.5 relative col-span-1 sm:col-span-2">
               <div className="flex items-center justify-between">
                 <label className="font-bold text-slate-600 text-[8px]">اسم {theme.partyLabel} / الشركة (بحث)</label>
-                {custSearchInput.trim().length > 0 && (
+                {custSearchInput.trim().length > 0 && custSearchInput.trim() !== 'نقدي' && (
                   <button
                     type="button"
                     onClick={() => quickRegisterParty(custSearchInput)}
-                    className="text-[7.5px] font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-0.5"
+                    className="text-[7.5px] font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-0.5 bg-emerald-50 px-1 py-0.2 rounded border border-emerald-300"
                     title="تسجيل هذه الشركة في الدليل"
                   >
                     <Plus className="w-2.5 h-2.5" />
-                    <span>إثبات جديد</span>
+                    <span>+ إثبات جديد</span>
                   </button>
                 )}
               </div>
-              <input
-                type="text"
-                value={custSearchInput}
-                placeholder="اكتب اسم الشركة أو العميل أو رقمه..."
-                onFocus={() => setShowCustDropdown(true)}
-                onChange={e => {
-                  setCustSearchInput(e.target.value);
-                  setShowCustDropdown(true);
-                }}
-                className="px-1.5 py-0.5 border border-slate-300 rounded text-[9px] bg-white font-bold h-[22px]"
-              />
-              {/* Autocomplete Dropdown */}
+              <div className="relative flex items-center">
+                <input
+                  type="text"
+                  value={custSearchInput}
+                  placeholder="ابحث بالاسم أو احذف نقدي لكتابة اسم الشركة..."
+                  onFocus={() => setShowCustDropdown(true)}
+                  onChange={e => {
+                    setCustSearchInput(e.target.value);
+                    setShowCustDropdown(true);
+                  }}
+                  className="w-full pl-6 pr-1.5 py-0.5 border border-slate-300 rounded text-[9px] bg-white font-bold h-[22px] focus:ring-1 focus:ring-emerald-500"
+                />
+                {custSearchInput.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustSearchInput('');
+                      setSelectedParty(null);
+                      setCustCode('');
+                      setCustPhone('');
+                      setShowCustDropdown(true);
+                    }}
+                    className="absolute left-1 text-slate-400 hover:text-rose-600 p-0.5 rounded cursor-pointer"
+                    title="مسح للبحث عن شركة أخرى"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              {/* Backdrop to close dropdown on click outside */}
               {showCustDropdown && (
-                <div className="absolute top-full right-0 left-0 bg-white border border-blue-600 rounded-lg max-h-36 overflow-y-auto z-50 shadow-xl mt-0.5 divide-y divide-slate-100">
-                  {custSearchInput.trim().length > 0 && (
-                    <div
-                      onClick={() => quickRegisterParty(custSearchInput)}
-                      className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 cursor-pointer flex items-center justify-between text-[9px] font-bold transition-colors"
+                <div
+                  className="fixed inset-0 z-[90] bg-black/10"
+                  onClick={() => setShowCustDropdown(false)}
+                />
+              )}
+
+              {/* Wide & Tall Autocomplete Dropdown (طويل وعريض) */}
+              {showCustDropdown && (
+                <div className="absolute top-full right-0 w-[92vw] sm:w-[500px] md:w-[620px] max-w-[640px] bg-white border-2 border-emerald-600 rounded-xl max-h-[380px] overflow-hidden z-[100] shadow-2xl mt-1 flex flex-col">
+                  {/* Dropdown Header */}
+                  <div className="bg-gradient-to-r from-slate-800 to-slate-900 text-white p-2 flex items-center justify-between text-[11px] font-bold">
+                    <span className="flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>دليل {theme.partyLabel === 'العميل' ? 'الشركات والعملاء' : 'الشركات والموردين'} ({partiesList.length})</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowCustDropdown(false)}
+                      className="p-1 hover:bg-white/20 rounded cursor-pointer transition-colors"
+                      title="إغلاق القائمة"
                     >
-                      <span className="flex items-center gap-1">
-                        <Plus className="w-3 h-3 text-emerald-700" />
-                        <span>+ إثبات وتسجيل "{custSearchInput}" كشركة جديدة فوراً</span>
-                      </span>
-                      <span className="bg-emerald-600 text-white text-[7.5px] px-1.5 py-0.2 rounded">حفظ بالنظام</span>
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {/* Cash Option Button (Quick Select) */}
+                  <div className="p-1.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustSearchInput('نقدي');
+                        setCustCode('1');
+                        setCustPhone('');
+                        const cashParty = partiesList.find(
+                          p => p.name.trim() === 'نقدي' ||
+                               p.name.trim() === (theme.partyRole === 'customer' ? 'عميل نقدي' : 'مورد نقدي') ||
+                               p.code === 'CASH'
+                        );
+                        setSelectedParty(cashParty || null);
+                        setShowCustDropdown(false);
+                      }}
+                      className="flex-1 py-1 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-colors"
+                    >
+                      <CheckCircle2 className="w-3 h-3 text-emerald-200" />
+                      <span>اختيار سريع: «نقدي / كاش» (بدون تسجيل حساب آجل)</span>
+                    </button>
+                  </div>
+
+                  {/* Quick Register New Company Bar if typed name is not empty and not "نقدي" */}
+                  {custSearchInput.trim().length > 0 &&
+                   custSearchInput.trim() !== 'نقدي' &&
+                   custSearchInput.trim() !== 'عميل نقدي' &&
+                   custSearchInput.trim() !== 'مورد نقدي' && (
+                    <div className="p-2 bg-emerald-50 border-b border-emerald-200 flex flex-col sm:flex-row items-center justify-between gap-1.5">
+                      <div className="flex items-center gap-1.5 text-emerald-950 text-[10px] font-bold">
+                        <Plus className="w-4 h-4 text-emerald-700 shrink-0" />
+                        <span>تسجيل <strong>«{custSearchInput.trim()}»</strong> كشركة / جهة جديدة فوراً بالنظام</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => quickRegisterParty(custSearchInput)}
+                        className="w-full sm:w-auto px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[9px] shadow-xs cursor-pointer flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
+                      >
+                        <Check className="w-3 h-3" />
+                        <span>إثبات وحفظ بالدليل الآن</span>
+                      </button>
                     </div>
                   )}
 
-                  {partiesList
-                    .filter(p => {
+                  {/* Scrollable Parties List */}
+                  <div className="overflow-y-auto max-h-[260px] divide-y divide-slate-100 p-1">
+                    {partiesList
+                      .filter(p => {
+                        const q = custSearchInput.trim().toLowerCase();
+                        if (!q || q === 'نقدي') return true;
+                        return (
+                          p.name.toLowerCase().includes(q) ||
+                          (p.code && p.code.toLowerCase().includes(q)) ||
+                          (p.phone && p.phone.includes(q)) ||
+                          (p.company && p.company.toLowerCase().includes(q))
+                        );
+                      })
+                      .map(p => {
+                        const bal = theme.partyRole === 'customer'
+                          ? calculateCustomerBalance(db, p.id)
+                          : calculateSupplierBalance(db, p.id);
+                        return (
+                          <div
+                            key={p.id}
+                            onClick={() => selectParty(p)}
+                            className="p-2 hover:bg-blue-50/80 cursor-pointer flex items-center justify-between transition-colors rounded-md group"
+                          >
+                            <div className="flex flex-col gap-0.5">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-bold text-slate-900 text-[11px] group-hover:text-blue-700">
+                                  {p.name}
+                                </span>
+                                {p.code && (
+                                  <span className="bg-slate-100 group-hover:bg-blue-100 text-slate-700 group-hover:text-blue-800 text-[8.5px] px-1.5 py-0.2 rounded font-mono font-bold">
+                                    [{p.code}]
+                                  </span>
+                                )}
+                                {p.company && p.company !== p.name && (
+                                  <span className="text-[9px] text-slate-500 bg-slate-100 px-1 rounded">
+                                    {p.company}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 text-[9px] text-slate-500">
+                                {p.phone && (
+                                  <span className="font-mono flex items-center gap-0.5">
+                                    📞 {p.phone}
+                                  </span>
+                                )}
+                                {p.address && (
+                                  <span className="truncate max-w-[160px]">
+                                    📍 {p.address}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-left shrink-0">
+                              <span
+                                className={`text-[9px] font-bold px-1.5 py-0.5 rounded font-mono ${
+                                  bal > 0
+                                    ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                                    : bal < 0
+                                    ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                                    : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                }`}
+                              >
+                                {bal !== 0 ? `الرصيد: ${bal.toLocaleString()} ${db.settings.currency || 'ر.س'}` : 'الحساب خالص'}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                    {partiesList.filter(p => {
                       const q = custSearchInput.trim().toLowerCase();
-                      if (!q) return true;
+                      if (!q || q === 'نقدي') return true;
                       return (
                         p.name.toLowerCase().includes(q) ||
                         (p.code && p.code.toLowerCase().includes(q)) ||
                         (p.phone && p.phone.includes(q)) ||
                         (p.company && p.company.toLowerCase().includes(q))
                       );
-                    })
-                    .slice(0, 15)
-                    .map(p => (
-                      <div
-                        key={p.id}
-                        onClick={() => selectParty(p)}
-                        className="p-1.5 text-[9px] hover:bg-blue-50 cursor-pointer flex items-center justify-between transition-colors"
-                      >
-                        <div>
-                          <span className="font-bold text-slate-900">{p.code ? `[${p.code}] ` : ''}{p.name}</span>
-                          {p.company && p.company !== p.name && (
-                            <span className="text-[8px] text-slate-500 block">{p.company}</span>
-                          )}
-                        </div>
-                        <span className="text-[8px] text-slate-500 font-mono">{p.phone || '—'}</span>
+                    }).length === 0 && (
+                      <div className="p-4 text-center text-slate-500 text-[10px] flex flex-col items-center gap-2">
+                        <span>لا توجد شركة أو عميل مسجل بهذا الاسم: «{custSearchInput}»</span>
+                        <button
+                          type="button"
+                          onClick={() => quickRegisterParty(custSearchInput)}
+                          className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[9px] shadow-xs cursor-pointer flex items-center gap-1"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>إضافة «{custSearchInput}» كشركة جديدة الآن</span>
+                        </button>
                       </div>
-                    ))}
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -1483,20 +1662,23 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 className="px-1.5 py-0.5 border border-slate-300 rounded text-[9px] bg-white font-mono h-[22px]"
               />
               {showPhoneDropdown && (
-                <div className="absolute top-full right-0 left-0 bg-white border border-blue-600 rounded max-h-24 overflow-y-auto z-50 shadow-lg mt-0.5">
-                  {partiesList
-                    .filter(p => p.phone && p.phone.includes(custPhone.trim()))
-                    .map(p => (
-                      <div
-                        key={p.id}
-                        onClick={() => selectParty(p)}
-                        className="p-1 text-[9px] hover:bg-blue-50 cursor-pointer border-b border-slate-100 flex items-center justify-between"
-                      >
-                        <span className="font-bold text-slate-900">{p.name}</span>
-                        <span className="text-[8px] font-mono">{p.phone}</span>
-                      </div>
-                    ))}
-                </div>
+                <>
+                  <div className="fixed inset-0 z-[90] bg-black/10" onClick={() => setShowPhoneDropdown(false)} />
+                  <div className="absolute top-full right-0 w-[80vw] sm:w-[380px] max-w-[400px] bg-white border border-blue-600 rounded-lg max-h-48 overflow-y-auto z-[100] shadow-xl mt-0.5 divide-y divide-slate-100 p-1">
+                    {partiesList
+                      .filter(p => p.phone && p.phone.includes(custPhone.trim()))
+                      .map(p => (
+                        <div
+                          key={p.id}
+                          onClick={() => selectParty(p)}
+                          className="p-1.5 text-[9px] hover:bg-blue-50 cursor-pointer flex items-center justify-between rounded"
+                        >
+                          <span className="font-bold text-slate-900">{p.name} {p.code ? `[${p.code}]` : ''}</span>
+                          <span className="text-[8.5px] font-mono text-blue-700 font-bold">{p.phone}</span>
+                        </div>
+                      ))}
+                  </div>
+                </>
               )}
             </div>
 

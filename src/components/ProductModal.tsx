@@ -14,7 +14,8 @@ import {
   getTodayDate,
   logAudit,
   getProductForBranch,
-  updateProductBranchData
+  updateProductBranchData,
+  isDuplicateProduct
 } from '../services/accountingStorage';
 
 interface ProductModalProps {
@@ -92,6 +93,14 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     if (!name.trim()) return alert('اكتب اسم الصنف');
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+
+    // Strict duplicate check for code & barcode
+    const dupCheck = isDuplicateProduct(updated, code.trim(), barcode.trim(), product?.id);
+    if (dupCheck.isDuplicate) {
+      alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+      return;
+    }
+
     const branchName = currentBranch?.name || 'الفرع الرئيسي';
 
     if (product) {

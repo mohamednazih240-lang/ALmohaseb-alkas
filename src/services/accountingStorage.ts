@@ -1587,3 +1587,152 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
   return updated;
 }
 
+/**
+ * Strict Duplicate Prevention Helpers
+ * Ensures no duplicate invoice numbers, vouchers, customers, suppliers, products, or codes across the entire ERP.
+ */
+export function isDuplicateInvoiceNumber(db: AccountingDB, number: string, excludeId?: string): boolean {
+  if (!number || !number.trim()) return false;
+  const target = number.trim().toLowerCase();
+  return (db.invoices || []).some(
+    inv => (!excludeId || inv.id !== excludeId) && inv.number.trim().toLowerCase() === target
+  );
+}
+
+export function getNextUniqueInvoiceNumber(db: AccountingDB, mode: string): { number: string; nextSeq: number } {
+  const prefix = mode === 'sale' ? 'INV-' :
+                 mode === 'wholesale' ? 'WHL-' :
+                 mode === 'purchase' ? 'PUR-' :
+                 mode === 'sale_return' ? 'RET-S-' :
+                 mode === 'purchase_return' ? 'RET-P-' : 'QUO-';
+
+  let seq = mode === 'sale' ? (db.settings.nextSale || 1) :
+            mode === 'wholesale' ? (db.settings.nextSale || 1) :
+            mode === 'purchase' ? (db.settings.nextPurchase || 1) :
+            mode === 'quote' ? (db.settings.nextQuote || 1) : 1;
+
+  let candidate = `${prefix}${String(seq).padStart(6, '0')}`;
+  while (isDuplicateInvoiceNumber(db, candidate)) {
+    seq += 1;
+    candidate = `${prefix}${String(seq).padStart(6, '0')}`;
+  }
+
+  return { number: candidate, nextSeq: seq };
+}
+
+export function isDuplicateParty(
+  db: AccountingDB,
+  type: 'customer' | 'supplier',
+  name: string,
+  phone?: string,
+  excludeId?: string
+): { isDuplicate: boolean; reason?: string; existing?: Party } {
+  const list = type === 'customer' ? (db.customers || []) : (db.suppliers || []);
+  const cleanName = (name || '').trim().toLowerCase();
+
+  // "نقدي" or generic cash is allowed as a recurring customer
+  if (cleanName === 'نقدي' || cleanName === 'عميل نقدي' || cleanName === 'مورد نقدي' || cleanName === 'مورد عام') {
+    return { isDuplicate: false };
+  }
+
+  // 1. Check duplicate name
+  const existingByName = list.find(
+    p => (!excludeId || p.id !== excludeId) && p.name.trim().toLowerCase() === cleanName
+  );
+  if (existingByName) {
+    return {
+      isDuplicate: true,
+      reason: `الاسم "${name.trim()}" مسجل مسبقاً في قائمة ${type === 'customer' ? 'العملاء' : 'الموردين'} (كود: ${existingByName.code || 'بدون'}) ولا يمكن تكراره.`,
+      existing: existingByName
+    };
+  }
+
+  // 2. Check duplicate phone if provided
+  const cleanPhone = (phone || '').trim();
+  if (cleanPhone && cleanPhone.length >= 6) {
+    const existingByPhone = list.find(
+      p => (!excludeId || p.id !== excludeId) && p.phone && p.phone.trim() === cleanPhone
+    );
+    if (existingByPhone) {
+      return {
+        isDuplicate: true,
+        reason: `رقم الهاتف (${cleanPhone}) مسجل مسبقاً للطرف "${existingByPhone.name}" (كود: ${existingByPhone.code || 'بدون'}) ولا يمكن تكرار أرقام الهواتف.`,
+        existing: existingByPhone
+      };
+    }
+  }
+
+  return { isDuplicate: false };
+}
+
+export function getNextUniquePartyCode(db: AccountingDB, type: 'customer' | 'supplier'): string {
+  const list = type === 'customer' ? (db.customers || []) : (db.suppliers || []);
+  const prefix = type === 'customer' ? 'C-' : 'S-';
+  let counter = list.length + 1;
+  let code = `${prefix}${String(counter).padStart(3, '0')}`;
+  while (list.some(p => p.code && p.code.trim().toUpperCase() === code.toUpperCase())) {
+    counter += 1;
+    code = `${prefix}${String(counter).padStart(3, '0')}`;
+  }
+  return code;
+}
+
+export function isDuplicateVoucherNumber(db: AccountingDB, number: string, excludeId?: string): boolean {
+  if (!number || !number.trim()) return false;
+  const target = number.trim().toLowerCase();
+  return (db.vouchers || []).some(
+    v => (!excludeId || v.id !== excludeId) && v.number.trim().toLowerCase() === target
+  );
+}
+
+export function getNextUniqueVoucherNumber(
+  db: AccountingDB,
+  type: 'receipt' | 'payment'
+): { number: string; nextSeq: number } {
+  const prefix = type === 'receipt' ? 'REC-' : 'PAY-';
+  const currentSeq = type === 'receipt' ? (db.settings.nextReceipt || 1) : (db.settings.nextPayment || 1);
+  let seq = currentSeq;
+  let candidate = `${prefix}${String(seq).padStart(6, '0')}`;
+  while (isDuplicateVoucherNumber(db, candidate)) {
+    seq += 1;
+    candidate = `${prefix}${String(seq).padStart(6, '0')}`;
+  }
+  return { number: candidate, nextSeq: seq };
+}
+
+export function isDuplicateProduct(
+  db: AccountingDB,
+  code: string,
+  barcode?: string,
+  excludeId?: string
+): { isDuplicate: boolean; reason?: string } {
+  const cleanCode = (code || '').trim().toLowerCase();
+  if (cleanCode) {
+    const existingCode = (db.products || []).find(
+      p => (!excludeId || p.id !== excludeId) && p.code.trim().toLowerCase() === cleanCode
+    );
+    if (existingCode) {
+      return {
+        isDuplicate: true,
+        reason: `كود الصنف (${code.trim()}) مستخدم مسبقاً للصنف "${existingCode.name}" ولا يمكن تكراره.`
+      };
+    }
+  }
+
+  const cleanBarcode = (barcode || '').trim();
+  if (cleanBarcode) {
+    const existingBarcode = (db.products || []).find(
+      p => (!excludeId || p.id !== excludeId) && p.barcode && p.barcode.trim() === cleanBarcode
+    );
+    if (existingBarcode) {
+      return {
+        isDuplicate: true,
+        reason: `الباركود (${cleanBarcode}) مستخدم مسبقاً للصنف "${existingBarcode.name}" ولا يمكن تكراره.`
+      };
+    }
+  }
+
+  return { isDuplicate: false };
+}
+
+

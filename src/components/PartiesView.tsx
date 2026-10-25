@@ -28,7 +28,9 @@ import {
   generateId,
   calculateCustomerBalance,
   calculateSupplierBalance,
-  logAudit
+  logAudit,
+  isDuplicateParty,
+  getNextUniquePartyCode
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -154,40 +156,56 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
   const handleSaveParty = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return alert('يرجى كتابة الاسم');
+    const cleanName = name.trim();
+    if (!cleanName) return alert('يرجى كتابة الاسم');
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     const targetArray = isCustomer ? updated.customers : updated.suppliers;
+
+    // Strict duplicate prevention for party name and phone
+    const dupCheck = isDuplicateParty(
+      updated,
+      isCustomer ? 'customer' : 'supplier',
+      cleanName,
+      phone.trim(),
+      editingParty?.id
+    );
+    if (dupCheck.isDuplicate) {
+      alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+      return;
+    }
 
     if (editingParty) {
       const idx = targetArray.findIndex(p => p.id === editingParty.id);
       if (idx !== -1) {
         targetArray[idx] = {
           ...targetArray[idx],
-          name: name.trim(),
-          phone,
-          address,
+          name: cleanName,
+          phone: phone.trim(),
+          address: address.trim(),
           openingBalance,
           creditLimit,
-          taxNumber,
-          notes
+          taxNumber: taxNumber.trim(),
+          notes: notes.trim()
         };
-        logAudit(updated, `تعديل بيانات ${isCustomer ? 'عميل' : 'مورد'}`, `الاسم: ${name}`);
+        logAudit(updated, `تعديل بيانات ${isCustomer ? 'عميل' : 'مورد'}`, `الاسم: ${cleanName}`);
       }
     } else {
+      const uniqueCode = getNextUniquePartyCode(updated, isCustomer ? 'customer' : 'supplier');
       const newParty: Party = {
         id: generateId(isCustomer ? 'cust' : 'supp'),
+        code: uniqueCode,
         type,
-        name: name.trim(),
-        phone,
-        address,
+        name: cleanName,
+        phone: phone.trim(),
+        address: address.trim(),
         openingBalance,
         creditLimit,
-        taxNumber,
-        notes
+        taxNumber: taxNumber.trim(),
+        notes: notes.trim()
       };
       targetArray.push(newParty);
-      logAudit(updated, `إضافة ${isCustomer ? 'عميل' : 'مورد'} جديد`, `الاسم: ${name}`);
+      logAudit(updated, `إضافة ${isCustomer ? 'عميل' : 'مورد'} جديد`, `الاسم: ${cleanName} (كود: ${uniqueCode})`);
     }
 
     onUpdateDb(updated);
