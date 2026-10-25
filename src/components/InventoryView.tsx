@@ -404,6 +404,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   };
 
   const handleDeleteProduct = (p: Product) => {
+    const isManager = db.currentUser?.role === 'مدير';
+    if (!isManager) {
+      alert('عذراً، لا يمكن حذف أي صنف من المخزون إلا من قِبل المدير العام فقط.');
+      return;
+    }
+
     const hasMovements = db.stockMovements.some(sm => sm.productId === p.id);
     if (hasMovements) {
       alert('لا يمكن حذف الصنف لوجود حركات وفواتير سابقة مرتبطة به.');
@@ -1079,13 +1085,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                           <Edit className="w-3.5 h-3.5" />
                           <span>تعديل</span>
                         </button>
-                        <button
-                          onClick={() => handleDeleteProduct(p)}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
-                          title="حذف الصنف"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {db.currentUser?.role === 'مدير' && (
+                          <button
+                            onClick={() => handleDeleteProduct(p)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                            title="حذف الصنف (صلاحية المدير العام)"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>

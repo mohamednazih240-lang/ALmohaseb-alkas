@@ -32,14 +32,28 @@ const ACTIVE_TENANT_KEY = 'hesabaty_active_tenant_id';
  * Ensures the two primary independent companies (الأخوة and الموان) exist in the registry with their secret PINs
  */
 export function ensurePrimaryCompanies(existingList: CompanyTenant[]): CompanyTenant[] {
-  const list = [...existingList];
+  // Purge any stale dummy test companies like "الشركة التجارية للتوزيع" or legacy IDs
+  const filteredList = (existingList || []).filter(c => {
+    const name = c.name || '';
+    const code = c.code || '';
+    const id = c.id || '';
+    if (
+      name.includes('الشركة التجارية للتوزيع') ||
+      code.includes('MV6L2JBE') ||
+      id.includes('MV6L2JBE') ||
+      name.includes('الشركة_التجارية')
+    ) {
+      return false;
+    }
+    return true;
+  });
 
   // 1. شركة الأخوة (COMP-101) - Secret PIN: 1234
-  let ekhwa = list.find(c => c.id === EKHWA_TENANT_ID || c.code === EKHWA_CODE || c.name.includes('الأخوة') || c.id === 'comp_primary');
+  let ekhwa = filteredList.find(c => c.id === EKHWA_TENANT_ID || c.code === EKHWA_CODE || c.name.includes('الأخوة') || c.id === 'comp_primary');
   if (ekhwa) {
     ekhwa.id = EKHWA_TENANT_ID;
     ekhwa.code = EKHWA_CODE;
-    if (!ekhwa.name || !ekhwa.name.includes('الأخوة')) ekhwa.name = 'شركة الأخوة';
+    ekhwa.name = 'شركة الأخوة';
     if (!ekhwa.password) ekhwa.password = EKHWA_DEFAULT_PIN;
   } else {
     ekhwa = {
@@ -55,16 +69,15 @@ export function ensurePrimaryCompanies(existingList: CompanyTenant[]): CompanyTe
       address: 'المقر الرئيسي',
       createdAt: new Date().toISOString()
     };
-    list.unshift(ekhwa);
   }
 
-  // 2. شركة الموان (COMP-102) - Secret PIN: 2919 (editable by manager)
-  let mawan = list.find(c => c.id === MAWAN_TENANT_ID || c.code === MAWAN_CODE || c.name.includes('الموان'));
+  // 2. شركة الموان (COMP-102) - Secret PIN: 2919
+  let mawan = filteredList.find(c => c.id === MAWAN_TENANT_ID || c.code === MAWAN_CODE || c.name.includes('الموان'));
   if (mawan) {
     mawan.id = MAWAN_TENANT_ID;
     mawan.code = MAWAN_CODE;
-    if (!mawan.name || !mawan.name.includes('الموان')) mawan.name = 'شركة الموان';
-    // If PIN was previously default or 1272000, update to user-specified 2919 unless customized
+    mawan.name = 'شركة الموان';
+    // If PIN was previously default 1234 or 1272000, set to user-mandated 2919
     if (!mawan.password || mawan.password === '1272000' || mawan.password === '1234') {
       mawan.password = MAWAN_DEFAULT_PIN;
     }
@@ -82,16 +95,21 @@ export function ensurePrimaryCompanies(existingList: CompanyTenant[]): CompanyTe
       address: 'المقر الرئيسي',
       createdAt: new Date().toISOString()
     };
-    list.push(mawan);
   }
 
-  // De-duplicate by normalized code or ID
-  const seenCodes = new Set<string>();
-  const cleanList: CompanyTenant[] = [];
-  for (const c of list) {
-    const key = (c.code || c.id).toUpperCase();
-    if (!seenCodes.has(key)) {
-      seenCodes.add(key);
+  // Strict order: ALWAYS ekhwa at index 0, mawan at index 1
+  const cleanList: CompanyTenant[] = [ekhwa, mawan];
+
+  // Any other company that isn't ekhwa or mawan
+  for (const c of filteredList) {
+    if (
+      c.id !== EKHWA_TENANT_ID &&
+      c.code !== EKHWA_CODE &&
+      c.id !== MAWAN_TENANT_ID &&
+      c.code !== MAWAN_CODE &&
+      !c.name.includes('الأخوة') &&
+      !c.name.includes('الموان')
+    ) {
       cleanList.push(c);
     }
   }

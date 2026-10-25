@@ -56,6 +56,8 @@ import {
   CompanyTenant,
   EKHWA_CODE,
   MAWAN_CODE,
+  EKHWA_TENANT_ID,
+  MAWAN_TENANT_ID,
   EKHWA_DEFAULT_PIN,
   MAWAN_DEFAULT_PIN
 } from '../services/tenantService';
@@ -525,8 +527,34 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
   };
 
-  const selectedUserObj = companyUsers.find(u => u.id === selectedUserId);
   const registeredTenants = getCompaniesList();
+  const ekhwaTenant: CompanyTenant = registeredTenants.find(c => c.code === EKHWA_CODE || c.id === EKHWA_TENANT_ID || c.name.includes('الأخوة')) || {
+    id: EKHWA_TENANT_ID,
+    code: EKHWA_CODE,
+    name: 'شركة الأخوة',
+    activityType: 'تجارة وتوزيع عام',
+    adminName: 'مدير شركة الأخوة',
+    adminUsername: 'admin',
+    password: EKHWA_DEFAULT_PIN,
+    currency: 'ج.م',
+    createdAt: new Date().toISOString()
+  };
+
+  const mawanTenant: CompanyTenant = registeredTenants.find(c => c.code === MAWAN_CODE || c.id === MAWAN_TENANT_ID || c.name.includes('الموان')) || {
+    id: MAWAN_TENANT_ID,
+    code: MAWAN_CODE,
+    name: 'شركة الموان',
+    activityType: 'تجارة ومواد بناء وتوريدات',
+    adminName: 'مدير شركة الموان',
+    adminUsername: 'mawan_admin',
+    password: MAWAN_DEFAULT_PIN,
+    currency: 'ج.م',
+    createdAt: new Date().toISOString()
+  };
+
+  const primaryCompanies: CompanyTenant[] = [ekhwaTenant, mawanTenant];
+  const isCurrentCompanyUnlocked = unlockedCompanyCodes.includes(normalizeCompanyCode(companyCodeInput));
+  const selectedUserObj = isCurrentCompanyUnlocked ? companyUsers.find(u => u.id === selectedUserId) : undefined;
 
   return (
     <div
@@ -664,7 +692,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
 
                 <div className="grid grid-cols-2 gap-2.5">
-                  {registeredTenants.slice(0, 2).map(comp => {
+                  {primaryCompanies.map(comp => {
                     const normCode = normalizeCompanyCode(comp.code || comp.id);
                     const isSelected = normalizeCompanyCode(companyCodeInput) === normCode;
                     const isUnlocked = unlockedCompanyCodes.includes(normCode);
@@ -745,191 +773,215 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
               </div>
 
-              {/* Live Cloud Sync / Active Company Summary */}
-              {loadedCompany && (
-                <div className="flex items-center justify-between gap-2 bg-blue-950/40 p-2.5 rounded-xl border border-blue-500/30 text-xs">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-black text-white text-xs truncate">{loadedCompany.companyName}</span>
-                      <span className="font-mono text-[10px] bg-blue-500/20 text-blue-300 px-1.5 py-0.2 rounded border border-blue-400/20 font-bold">
-                        {loadedCompany.companyCode}
-                      </span>
-                    </div>
-                    <span className="text-[10px] text-slate-400 block mt-0.5">
-                      {companyUsers.length} مستخدمين مسجلين • آخر تحديث: {lastRefreshedTime || 'الآن'}
-                    </span>
+              {/* When the Company is LOCKED: Show Clean Lock Shield and Unlock Action Buttons */}
+              {!isCurrentCompanyUnlocked ? (
+                <div className="p-5 bg-gradient-to-b from-slate-900/90 to-slate-950/90 border border-slate-700/80 rounded-2xl text-center space-y-3.5 animate-in fade-in">
+                  <div className="w-12 h-12 mx-auto rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-inner">
+                    <Lock className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-white">
+                      الرجاء إدخال الرقم السري للشركة للدخول
+                    </h3>
+                    <p className="text-xs text-slate-300 mt-1 max-w-sm mx-auto leading-relaxed">
+                      بيانات ومستخدمو كل شركة معزولون ومحميون برقم سري مستقل. اضغط على كارت الشركة أعلاه أو الزر أدناه لإدخال الرمز السري:
+                    </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => fetchAndSyncCompanyUsers(companyCodeInput, false)}
-                    disabled={isRefreshingUsers}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs shrink-0"
-                    title="تحديث فوري لقائمة المستخدمين من السحابة"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingUsers ? 'animate-spin' : ''}`} />
-                    <span>تحديث القائمة</span>
-                  </button>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleCompanyCardClick(primaryCompanies[0])}
+                      className="w-full py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold rounded-xl text-xs border border-slate-600 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>فتح شركة الأخوة (COMP-101)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCompanyCardClick(primaryCompanies[1])}
+                      className="w-full py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold rounded-xl text-xs border border-slate-600 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>فتح شركة الموان (COMP-102)</span>
+                    </button>
+                  </div>
                 </div>
-              )}
-
-              {/* User Selection (Filtered Strictly by Selected Company) */}
-              {loadedCompany && (
-                <div className="space-y-3">
-                  {!unlockedCompanyCodes.includes(normalizeCompanyCode(companyCodeInput)) ? (
-                    <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl text-center space-y-2 animate-in fade-in">
-                      <div className="inline-flex p-3 bg-amber-500/20 text-amber-300 rounded-full mb-1">
-                        <Lock className="w-5 h-5" />
-                      </div>
-                      <h4 className="text-xs font-black text-amber-200">
-                        اضغط على شركة «الأخوة» أو شركة «الموان» أعلاه
-                      </h4>
-                      <p className="text-[11px] text-slate-300 max-w-sm mx-auto leading-relaxed">
-                        كل شركة مستقلة بذاتها ومحمية برقم سري معزول تماماً. اضغط على الشركة وأدخل رقمها السري لعرض مستخدميها والعمل عليها.
-                      </p>
-                    </div>
-                  ) : (
-                    <div>
-                      <label className="text-xs text-slate-200 font-bold mb-1.5 flex items-center justify-between">
-                        <span className="flex items-center gap-1">
-                          <Users className="w-3.5 h-3.5 text-blue-400" />
-                          <span>مستخدمو {loadedCompany.companyName}:</span>
+              ) : (
+                /* When the Company is UNLOCKED: Show Live Sync, User Selection & Password Form */
+                <div className="space-y-3 animate-in fade-in">
+                  {/* Live Cloud Sync / Active Company Summary */}
+                  {loadedCompany && (
+                    <div className="flex items-center justify-between gap-2 bg-blue-950/40 p-2.5 rounded-xl border border-blue-500/30 text-xs">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-black text-white text-xs truncate">{loadedCompany.companyName}</span>
+                          <span className="font-mono text-[10px] bg-blue-500/20 text-blue-300 px-1.5 py-0.2 rounded border border-blue-400/20 font-bold">
+                            {loadedCompany.companyCode}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 block mt-0.5">
+                          {companyUsers.length} مستخدمين مسجلين • آخر تحديث: {lastRefreshedTime || 'الآن'}
                         </span>
-                        <span className="text-[10px] text-slate-400 font-normal">
-                          ({companyUsers.length} مستخدم متاح بهذه الشركة)
-                        </span>
-                      </label>
-
-                      {companyUsers.length > 0 ? (
-                        /* Standard Dropdown Select */
-                        <select
-                          value={selectedUserId}
-                          onChange={e => {
-                            setSelectedUserId(e.target.value);
-                            setUserPassword('');
-                          }}
-                          className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-amber-400 outline-none transition cursor-pointer"
-                        >
-                          <option value="" disabled>-- اضغط لاختيار المستخدم --</option>
-                          {companyUsers.map(u => (
-                            <option key={u.id} value={u.id}>
-                              {u.name} — [{u.role}] ({loadedCompany.companyName}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs text-slate-400 text-center leading-relaxed">
-                          لا يوجد مستخدمون مخصصون لهذه الشركة حتى الآن.
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Interactive Visual Cards for Mobile Touch (Filtered strictly by Company) */}
-                  {unlockedCompanyCodes.includes(normalizeCompanyCode(companyCodeInput)) && companyUsers.length > 0 && (
-                    <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto pl-1">
-                      {companyUsers.map(u => {
-                        const isSelected = selectedUserId === u.id;
-                        return (
-                          <div
-                            key={u.id}
-                            onClick={() => {
-                              setSelectedUserId(u.id);
-                              setUserPassword('');
-                            }}
-                            className={`p-2.5 rounded-xl cursor-pointer text-center transition-all space-y-1 select-none border ${
-                              isSelected
-                                ? 'bg-slate-700/90 border-amber-400 ring-2 ring-amber-400/20 shadow-md'
-                                : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
-                            }`}
-                          >
-                            <div className="w-8 h-8 mx-auto rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center">
-                              {getUserRoleIcon(u.role)}
-                            </div>
-                            <p className={`font-bold text-xs truncate ${isSelected ? 'text-amber-300' : 'text-white'}`}>
-                              {u.name}
-                            </p>
-                            <div className="flex items-center justify-center gap-1 flex-wrap">
-                              <span className="text-[9px] text-slate-300 bg-slate-900/80 px-1.5 py-0.2 rounded-full font-bold">
-                                {u.role}
-                              </span>
-                              <span className="text-[8px] text-slate-400 truncate max-w-[80px]">
-                                {loadedCompany.companyName}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Password Verification & Submit Form */}
-                  {selectedUserObj && (
-                    <form onSubmit={handleVerifyAndLogin} className="space-y-3 pt-2 border-t border-slate-700/70 animate-in fade-in duration-150">
-                      <div className="flex items-center justify-between text-xs bg-slate-900/80 p-2.5 rounded-xl border border-slate-800">
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center">
-                            {getUserRoleIcon(selectedUserObj.role)}
-                          </div>
-                          <div>
-                            <span className="text-slate-300 block text-[11px]">المستخدم المحدد:</span>
-                            <strong className="text-amber-400 font-bold">{selectedUserObj.name}</strong>
-                          </div>
-                        </div>
-                        <div className="text-left">
-                          <span className="px-2 py-0.5 rounded-full text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold block text-center">
-                            {selectedUserObj.role}
-                          </span>
-                          <span className="text-[9px] text-slate-400 block mt-0.5">
-                            {selectedUserObj.branchName || 'الفرع الرئيسي'}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-xs text-slate-200 font-bold flex items-center gap-1">
-                            <KeyRound className="w-3.5 h-3.5 text-amber-400" />
-                            <span>كلمة المرور / الرمز السري:</span>
-                          </label>
-                          <span className="text-[10px] text-slate-400">
-                            {selectedUserObj.password ? 'مطلوبة لهذا المستخدم' : 'فارغ إذا لم يتم تعيينها'}
-                          </span>
-                        </div>
-
-                        <div className="relative">
-                          <input
-                            type={showPassword ? 'text' : 'password'}
-                            value={userPassword}
-                            onChange={e => setUserPassword(e.target.value)}
-                            placeholder="••••••••"
-                            autoFocus
-                            className="w-full px-3.5 py-2.5 pl-10 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm focus:outline-none focus:border-amber-400 transition font-mono tracking-wider"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowPassword(!showPassword)}
-                            className="absolute left-3 top-2.5 text-slate-400 hover:text-white cursor-pointer"
-                            tabIndex={-1}
-                          >
-                            {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                          </button>
-                        </div>
                       </div>
 
                       <button
-                        type="submit"
-                        disabled={isLoading}
-                        className="w-full py-3 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black rounded-xl text-sm transition-all shadow-lg shadow-amber-500/20 active:scale-98 cursor-pointer flex items-center justify-center gap-2"
+                        type="button"
+                        onClick={() => fetchAndSyncCompanyUsers(companyCodeInput, false)}
+                        disabled={isRefreshingUsers}
+                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs shrink-0"
+                        title="تحديث فوري لقائمة المستخدمين من السحابة"
                       >
-                        {isLoading ? (
-                          <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
-                        ) : (
-                          <Check className="w-4 h-4 stroke-[3]" />
-                        )}
-                        <span>تسجيل الدخول إلى حساباتي</span>
+                        <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingUsers ? 'animate-spin' : ''}`} />
+                        <span>تحديث القائمة</span>
                       </button>
-                    </form>
+                    </div>
+                  )}
+
+                  {/* User Selection */}
+                  {loadedCompany && (
+                    <div className="space-y-3">
+                      <div>
+                        <label className="text-xs text-slate-200 font-bold mb-1.5 flex items-center justify-between">
+                          <span className="flex items-center gap-1">
+                            <Users className="w-3.5 h-3.5 text-blue-400" />
+                            <span>مستخدمو {loadedCompany.companyName}:</span>
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-normal">
+                            ({companyUsers.length} مستخدم متاح بهذه الشركة)
+                          </span>
+                        </label>
+
+                        {companyUsers.length > 0 ? (
+                          <select
+                            value={selectedUserId}
+                            onChange={e => {
+                              setSelectedUserId(e.target.value);
+                              setUserPassword('');
+                            }}
+                            className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-xs font-bold focus:border-amber-400 outline-none transition cursor-pointer"
+                          >
+                            <option value="" disabled>-- اضغط لاختيار المستخدم --</option>
+                            {companyUsers.map(u => (
+                              <option key={u.id} value={u.id}>
+                                {u.name} — [{u.role}] ({loadedCompany.companyName}) {u.password ? '• محمي بكلمة مرور' : '• بدون كلمة مرور'}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <div className="p-3 bg-slate-800/80 rounded-xl border border-slate-700 text-xs text-slate-400 text-center leading-relaxed">
+                            لا يوجد مستخدمون مخصصون لهذه الشركة حتى الآن.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Interactive Visual Cards for Mobile Touch */}
+                      {companyUsers.length > 0 && (
+                        <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto pl-1">
+                          {companyUsers.map(u => {
+                            const isSelected = selectedUserId === u.id;
+                            return (
+                              <div
+                                key={u.id}
+                                onClick={() => {
+                                  setSelectedUserId(u.id);
+                                  setUserPassword('');
+                                }}
+                                className={`p-2.5 rounded-xl cursor-pointer text-center transition-all space-y-1 select-none border ${
+                                  isSelected
+                                    ? 'bg-slate-700/90 border-amber-400 ring-2 ring-amber-400/20 shadow-md'
+                                    : 'bg-slate-800/80 border-slate-700 hover:border-slate-500'
+                                }`}
+                              >
+                                <div className="w-8 h-8 mx-auto rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center">
+                                  {getUserRoleIcon(u.role)}
+                                </div>
+                                <p className={`font-bold text-xs truncate ${isSelected ? 'text-amber-300' : 'text-white'}`}>
+                                  {u.name}
+                                </p>
+                                <div className="flex items-center justify-center gap-1 flex-wrap">
+                                  <span className="text-[9px] text-slate-300 bg-slate-900/80 px-1.5 py-0.2 rounded-full font-bold">
+                                    {u.role}
+                                  </span>
+                                  <span className="text-[8px] text-slate-400 truncate max-w-[80px]">
+                                    {loadedCompany.companyName}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Password Verification & Submit Form */}
+                      {selectedUserObj && (
+                        <form onSubmit={handleVerifyAndLogin} className="space-y-3 pt-2 border-t border-slate-700/70 animate-in fade-in duration-150">
+                          <div className="flex items-center justify-between text-xs bg-slate-900/80 p-2.5 rounded-xl border border-slate-800">
+                            <div className="flex items-center gap-2">
+                              <div className="w-6 h-6 rounded-full bg-slate-800 flex items-center justify-center">
+                                {getUserRoleIcon(selectedUserObj.role)}
+                              </div>
+                              <div>
+                                <span className="text-slate-300 block text-[11px]">المستخدم المحدد:</span>
+                                <strong className="text-amber-400 font-bold">{selectedUserObj.name}</strong>
+                              </div>
+                            </div>
+                            <div className="text-left">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold block text-center">
+                                {selectedUserObj.role}
+                              </span>
+                              <span className="text-[9px] text-slate-400 block mt-0.5">
+                                {selectedUserObj.branchName || 'الفرع الرئيسي'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-xs text-slate-200 font-bold flex items-center gap-1">
+                                <KeyRound className="w-3.5 h-3.5 text-amber-400" />
+                                <span>كلمة المرور / الرمز السري:</span>
+                              </label>
+                              <span className="text-[10px] text-slate-400">
+                                {selectedUserObj.password ? 'مطلوبة لهذا المستخدم' : 'فارغ إذا لم يتم تعيينها'}
+                              </span>
+                            </div>
+
+                            <div className="relative">
+                              <input
+                                type={showPassword ? 'text' : 'password'}
+                                value={userPassword}
+                                onChange={e => setUserPassword(e.target.value)}
+                                placeholder="••••••••"
+                                autoFocus
+                                className="w-full px-3.5 py-2.5 pl-10 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm focus:outline-none focus:border-amber-400 transition font-mono tracking-wider"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setShowPassword(!showPassword)}
+                                className="absolute left-3 top-2.5 text-slate-400 hover:text-white cursor-pointer"
+                                tabIndex={-1}
+                              >
+                                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                              </button>
+                            </div>
+                          </div>
+
+                          <button
+                            type="submit"
+                            disabled={isLoading}
+                            className="w-full py-3 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black rounded-xl text-sm transition-all shadow-lg shadow-amber-500/20 active:scale-98 cursor-pointer flex items-center justify-center gap-2"
+                          >
+                            {isLoading ? (
+                              <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
+                            ) : (
+                              <Check className="w-4 h-4 stroke-[3]" />
+                            )}
+                            <span>تسجيل الدخول إلى حساباتي</span>
+                          </button>
+                        </form>
+                      )}
+                    </div>
                   )}
                 </div>
               )}

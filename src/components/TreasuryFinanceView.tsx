@@ -378,6 +378,12 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   };
 
   const handleDeleteTreasuryEntry = (tr: TreasuryEntry) => {
+    const isManager = db.currentUser?.role === 'مدير';
+    if (!isManager) {
+      alert('عذراً، لا يمكن حذف أي حركة خزينة إلا من قِبل المدير العام فقط.');
+      return;
+    }
+
     if (!confirm(`هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)}؟`)) return;
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     updated.treasury = updated.treasury.filter(t => t.id !== tr.id);
@@ -389,6 +395,12 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   };
 
   const handleDeleteSimpleRecord = (item: SimpleRecord) => {
+    const isManager = db.currentUser?.role === 'مدير';
+    if (!isManager) {
+      alert('عذراً، لا يمكن حذف أي مصروف أو إيراد إلا من قِبل المدير العام فقط.');
+      return;
+    }
+
     const isExp = subPage === 'expenses';
     if (!confirm(`هل أنت متأكد من حذف ${isExp ? 'المصروف' : 'الإيراد'} "${item.category}"؟`)) return;
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
@@ -815,14 +827,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                           <Printer className="w-3.5 h-3.5" />
                           <span>PDF</span>
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteTreasuryEntry(tr)}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
-                          title="حذف حركة الخزينة"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {db.currentUser?.role === 'مدير' && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteTreasuryEntry(tr)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                            title="حذف حركة الخزينة (صلاحية المدير العام)"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -939,14 +953,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                     >
                       <Edit className="w-3.5 h-3.5" />
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteSimpleRecord(item)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
-                      title="حذف"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    {db.currentUser?.role === 'مدير' && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSimpleRecord(item)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                        title="حذف (صلاحية المدير العام)"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}

@@ -488,13 +488,15 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                   <Edit className="w-3.5 h-3.5" />
                 </button>
 
-                <button
-                  onClick={() => handleDeleteVoucher(v)}
-                  className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
-                  title="حذف السند وعكس القيود"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                {db.currentUser?.role === 'مدير' && (
+                  <button
+                    onClick={() => handleDeleteVoucher(v)}
+                    className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                    title="حذف السند وعكس القيود (صلاحية المدير العام)"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             </div>
           ))}

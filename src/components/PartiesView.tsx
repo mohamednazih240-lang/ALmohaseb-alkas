@@ -195,6 +195,12 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
   };
 
   const handleDeleteParty = (partyId: string, partyName: string) => {
+    const isManager = db.currentUser?.role === 'مدير';
+    if (!isManager) {
+      alert('عذراً، لا يمكن حذف أي طرف أو حساب إلا من قِبل المدير العام فقط.');
+      return;
+    }
+
     const hasInvoices = db.invoices.some(i => i.partyId === partyId);
     const hasVouchers = db.vouchers.some(v => v.partyId === partyId);
 
@@ -696,13 +702,15 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
                       <Edit className="w-3.5 h-3.5" />
                     </button>
 
-                    <button
-                      onClick={() => handleDeleteParty(p.id, p.name)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
-                      title="حذف الطرف"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    {db.currentUser?.role === 'مدير' && (
+                      <button
+                        onClick={() => handleDeleteParty(p.id, p.name)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+                        title="حذف الطرف (صلاحية المدير العام)"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

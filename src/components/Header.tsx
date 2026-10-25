@@ -58,8 +58,7 @@ const HeaderComponent: React.FC<HeaderProps> = ({
   onOpenDriveBackup,
   onOpenLogin,
   onLogout,
-  onManualSync,
-  onSwitchCompany
+  onManualSync
 }) => {
   const [showQuickDropdown, setShowQuickDropdown] = useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
