@@ -150,39 +150,42 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     }
 
     const docs: MovementPrintBlock[] = purchaseInvoices.map(inv => ({
-      title: 'فاتورة مشتريات وتوريد بضائع',
+      title: 'فاتورة مشتريات وتوريد',
       serialNo: inv.number,
       date: inv.date,
       time: inv.time,
-      partyLabel: 'المورد:',
-      partyName: inv.partyName,
+      partyLabel: 'المورد',
+      partyName: inv.partyName || 'مورد عام',
+      partyCode: inv.partyCode || inv.partyId,
       partySubId: inv.partyPhone,
+      statement: inv.notes || inv.jobSite,
       badge: inv.status,
+      typeTitle: 'فاتورة مشتريات وتوريد',
       tableHeaders: [
-        { label: 'م', width: '6%', align: 'center' },
-        { label: 'الصنف المورد', width: '40%', align: 'right' },
-        { label: 'الكمية', width: '14%', align: 'center' },
-        { label: 'سعر الشراء', width: '20%', align: 'center' },
-        { label: 'الإجمالي', width: '20%', align: 'center' }
+        { label: 'اسم الصنف', width: '34%', align: 'right' },
+        { label: 'البيان', width: '22%', align: 'center' },
+        { label: 'العدد', width: '10%', align: 'center' },
+        { label: 'السعر', width: '16%', align: 'center' },
+        { label: 'الإجمالي', width: '18%', align: 'center' }
       ],
-      tableRows: inv.items.map((it, idx) => ({
+      tableRows: inv.items.map(it => ({
         cols: [
-          idx + 1,
           it.productName,
-          `${it.qty} ${it.unit || ''}`,
-          formatMoney(it.unitPrice, db.settings.currency),
-          formatMoney(it.total, db.settings.currency)
+          it.spec || it.notes || it.unit || '—',
+          formatCleanNumber(it.qty),
+          formatCleanNumber(it.unitPrice),
+          formatCleanNumber(it.total)
         ]
       })),
       summaryLines: [
-        { label: 'إجمالي المشتريات', value: formatMoney(inv.subtotal || inv.total, db.settings.currency) },
-        inv.discount ? { label: 'الخصم الممنوح', value: formatMoney(inv.discount, db.settings.currency) } : null,
-        inv.tax ? { label: 'ضريبة القيمة المضافة', value: formatMoney(inv.tax, db.settings.currency) } : null,
-        { label: 'الصافي النهائي', value: formatMoney(inv.total, db.settings.currency), isTotal: true },
-        { label: 'المدفوع نقداً للمورد', value: formatMoney(inv.paid, db.settings.currency) },
-        { label: 'المتبقي آجل للمورد', value: formatMoney(inv.remaining, db.settings.currency), highlight: inv.remaining > 0 }
+        { label: 'إجمالي المشتريات', value: `${formatCleanNumber(inv.subtotal || inv.total)} ${db.settings.currency}` },
+        inv.discount ? { label: 'الخصم الممنوح', value: `${formatCleanNumber(inv.discount)} ${db.settings.currency}` } : null,
+        inv.tax ? { label: 'ضريبة القيمة المضافة', value: `${formatCleanNumber(inv.tax)} ${db.settings.currency}` } : null,
+        { label: 'الصافي النهائي', value: `${formatCleanNumber(inv.total)} ${db.settings.currency}`, isTotal: true },
+        { label: 'المدفوع نقداً للمورد', value: `${formatCleanNumber(inv.paid)} ${db.settings.currency}` },
+        { label: 'المتبقي آجل للمورد', value: `${formatCleanNumber(inv.remaining)} ${db.settings.currency}`, highlight: inv.remaining > 0 }
       ].filter(Boolean) as any[],
-      footerNotes: inv.notes || 'تم استلام وتوريد البضاعة للمخزن وقيد الحساب'
+      footerNotes: inv.notes || db.settings.notes || 'تم استلام وتوريد البضاعة للمخزن وقيد الحساب'
     }));
 
     setPrintDocuments(docs);

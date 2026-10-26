@@ -438,144 +438,141 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             } ${fitScreen ? 'max-w-full' : ''}`}
             data-paper-size={paperSize}
           >
+            {/* حاوية المستند النظيفة بمقاس A5 الأصلي المعتمد */}
             <div className="invoice-container">
-              <div>
-                {/* 1. الترويسة الديناميكية */}
-                <div className="header invoice-header" id="invoiceHeader">
+              <div className="invoice-main-content">
+                {/* 1. الترويسة العلوية الثلاثية */}
+                <div className="company-header">
                   <div className="header-right">
-                    <h2 id="settingCompanyName">{settings.company || 'اسم المنشأة'}</h2>
-                    <p id="settingCompanyAddress">{settings.address || 'المقر الرئيسي'}</p>
+                    <h2>{settings.company || 'اسم الشركة'}</h2>
+                    <p>{invoice.branchName || settings.address || 'المقر الرئيسي'}</p>
                   </div>
-                  
                   <div className="header-center">
                     {settings.logo ? (
                       <img
-                        id="settingCompanyLogo"
-                        className="logo-img"
                         src={settings.logo}
-                        alt="الشعار"
+                        alt="شعار الشركة"
+                        className="logo-img"
+                        onError={(e) => ((e.target as HTMLElement).style.display = 'none')}
                       />
                     ) : null}
                   </div>
-                  
                   <div className="header-left">
-                    <ul className="phones-list" id="settingPhonesList">
-                      {phoneList.length > 0 ? (
-                        phoneList.map((ph, idx) => (
-                          <li key={idx}>{ph}</li>
-                        ))
-                      ) : settings.phone ? (
-                        <li>{settings.phone}</li>
+                    <div><strong>هاتف 1:</strong> {phoneList[0] || settings.phone || '01000000000'}</div>
+                    {phoneList[1] ? (
+                      <div><strong>هاتف 2:</strong> {phoneList[1]}</div>
+                    ) : null}
+                  </div>
+                </div>
+
+                {/* 2. مربع بيانات المستند المعتمد */}
+                <div className="invoice-info-box">
+                  <div className="info-grid">
+                    <div className="info-col-right">
+                      <strong>كود {isSale ? 'العميل' : 'المورد'}:</strong> <span>{invoice.partyCode || invoice.partyId || '—'}</span><br />
+                      <strong>اسم {isSale ? 'العميل' : 'المورد'}:</strong> <span>{invoice.partyName || (isSale ? 'عميل نقدي' : 'مورد عام')}</span><br />
+                      <strong>الهاتف:</strong> <span>{invoice.partyPhone || '—'}</span>
+                    </div>
+                    <div className="info-col-center">
+                      <strong>{invoiceTypeTitle}</strong><br />
+                      <span style={{ fontSize: '13px', fontWeight: 800 }}>رقم: <span>{serialNo}</span></span>
+                    </div>
+                    <div className="info-col-left">
+                      <strong>التاريخ:</strong> <span>{invoice.date}</span><br />
+                      {invoice.time ? (
+                        <span className="print-hide-time"><strong>الوقت:</strong> <span>{invoice.time}</span></span>
                       ) : null}
-                    </ul>
+                    </div>
                   </div>
                 </div>
 
-                {/* 2. صندوق البيانات */}
-                <div className="info-box">
-                  <div className="info-item" style={{ textAlign: 'right' }}>
-                    <p>
-                      <strong>اسم العميل: </strong>
-                      <span id="lblClientName">{invoice.partyName || 'عميل نقدي'}</span>
-                    </p>
-                    <p>
-                      <strong>رقم العميل: </strong>
-                      <span id="lblClientId">{invoice.partyPhone || invoice.partyId || '—'}</span>
-                    </p>
+                {/* 3. مستطيل البيان (يختفي تماماً إذا ترك فارغاً) */}
+                {invoice.notes || invoice.jobSite ? (
+                  <div className="invoice-statement-box">
+                    <strong>البيان: </strong>
+                    <span>{invoice.notes || invoice.jobSite}</span>
                   </div>
-                  
-                  <div className="info-item" style={{ textAlign: 'center' }}>
-                    <p>
-                      <strong id="lblInvoiceType">{invoiceTypeTitle}</strong>{' '}
-                      <strong style={{ fontSize: '1.05rem' }}>
-                        رقم (<span id="lblSerialNo">{serialNo}</span>)
-                      </strong>
-                    </p>
-                    <p>
-                      <strong>وسيلة الدفع: </strong>
-                      <span id="lblPaymentMethod">{invoice.paymentMethod || 'نقدي'}</span>
-                    </p>
-                  </div>
-                  
-                  <div className="info-item" style={{ textAlign: 'left' }}>
-                    <p>
-                      <strong>التاريخ: </strong>
-                      <span id="lblInvoiceDate">{invoice.date}</span>
-                    </p>
-                  </div>
-                </div>
+                ) : (
+                  <div className="invoice-statement-box"></div>
+                )}
 
-                {/* 3. جدول الأصناف (بدون أعمدة خصم أو ضريبة وبدون كسور للأرقام) */}
+                {/* 4. جدول الأصناف (أفقي متناسق بدون أي تمرير) */}
                 <div className="table-wrapper">
-                  <table className="items-table invoice-table">
+                  <table>
                     <thead>
                       <tr>
-                        <th style={{ width: '40%', textAlign: 'right' }}>اسم الصنف</th>
-                        <th style={{ width: '24%', textAlign: 'center' }}>الوصف / الوحدة</th>
-                        <th style={{ width: '10%', textAlign: 'center' }}>العدد</th>
-                        <th style={{ width: '12%', textAlign: 'center' }}>السعر</th>
-                        <th style={{ width: '14%', textAlign: 'center' }}>الإجمالي</th>
+                        <th className="col-item-name">اسم الصنف</th>
+                        <th className="col-item-note">البيان</th>
+                        <th className="col-item-qty">العدد</th>
+                        <th className="col-item-price">السعر</th>
+                        <th className="col-item-total">الإجمالي</th>
                       </tr>
                     </thead>
-                    <tbody id="invoiceTable">
+                    <tbody>
                       {invoice.items.map((it, idx) => (
                         <tr key={idx}>
-                          <td style={{ fontWeight: 'bold', textAlign: 'right', wordBreak: 'break-word' }}>{it.productName}</td>
-                          <td style={{ color: '#333', textAlign: 'center', wordBreak: 'break-word' }}>{it.notes || it.unit || '—'}</td>
-                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>{formatMoneyClean(it.qty)}</td>
-                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>{formatMoneyClean(it.unitPrice)}</td>
-                          <td style={{ fontWeight: 'bold', textAlign: 'center', whiteSpace: 'nowrap' }}>{formatMoneyClean(it.total)}</td>
+                          <td className="col-item-name">{it.productName}</td>
+                          <td className="col-item-note">{it.spec || it.notes || it.unit || '—'}</td>
+                          <td className="col-item-qty">{formatMoneyClean(it.qty)}</td>
+                          <td className="col-item-price">{formatMoneyClean(it.unitPrice)}</td>
+                          <td className="col-item-total">{formatMoneyClean(it.total)}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
 
-                {/* 4. ملخص الحسابات (بدون إظهار أسطر الخصم والضريبة التفصيلية، وتظهر الرسوم والمدفوع والمتبقي فقط عند وجودها وبدون كسور .00) */}
-                <div className="bottom-section">
-                  <div className="summary-vertical-list">
-                    {/* النقل / الرسوم (تظهر فقط عند وجودها) */}
-                    {hasFees && (
-                      <div className="summary-line" id="row-fees">
-                        <span id="lbl-fees">نقل:</span>
-                        <span id="val-fees">{formatMoneyClean(feesAmount)}</span>
-                      </div>
-                    )}
-
-                    {/* صافي القيمة / الإجمالي */}
-                    <div className="summary-line total-line" id="row-total">
-                      <span>صافي القيمة / الإجمالي:</span>
-                      <span id="val-total">{formatMoneyClean(invoice.total)}</span>
-                    </div>
-
-                    {/* المبلغ المدفوع */}
-                    <div className="summary-line" id="row-paid">
-                      <span>المبلغ المدفوع:</span>
-                      <span id="val-paid">{formatMoneyClean(invoice.paid || 0)}</span>
-                    </div>
-
-                    {/* المبلغ المتبقي (يظهر فقط إذا كان أكبر من الصفر) */}
-                    {(invoice.remaining || 0) > 0 && (
-                      <div className="summary-line" id="row-remaining">
-                        <span>المبلغ المتبقي:</span>
-                        <span id="val-remaining">{formatMoneyClean(invoice.remaining)}</span>
-                      </div>
-                    )}
+                {/* 5. قسم الإجماليات وتفاصيل الدفع */}
+                <div className="totals-section">
+                  <div className="total-row">
+                    <span>إجمالي الفاتورة:</span>
+                    <span>{formatMoneyClean(invoice.total)} {settings.currency || 'ج.م'}</span>
                   </div>
+
+                  <div className="total-row" style={{ borderTop: '1px dashed #666', paddingTop: '4px', marginTop: '3px' }}>
+                    <span>طريقة الدفع: <span className="payment-status-badge">{(invoice.remaining || 0) <= 0 ? 'كاش / نقدي' : (invoice.paid || 0) <= 0 ? 'آجل ذمم' : 'سداد جزئي'}</span></span>
+                    <span>المدفوع: <strong>{formatMoneyClean(invoice.paid || 0)} {settings.currency || 'ج.م'}</strong></span>
+                  </div>
+
+                  {(invoice.remaining || 0) > 0 ? (
+                    <div className="total-row" style={{ color: '#b91c1c' }}>
+                      <span>المبلغ المتبقي (الآجل):</span>
+                      <strong>{formatMoneyClean(invoice.remaining)} {settings.currency || 'ج.م'}</strong>
+                    </div>
+                  ) : null}
+
+                  {hasFees ? (
+                    <div className="total-row" style={{ fontWeight: 600, fontSize: '11px', color: '#444' }}>
+                      <span>رسوم النقل / الشحن:</span>
+                      <span>{formatMoneyClean(feesAmount)} {settings.currency || 'ج.م'}</span>
+                    </div>
+                  ) : null}
+
+                  {(invoice.tax || 0) > 0 ? (
+                    <div className="total-row tax-discount-row" style={{ fontWeight: 600, fontSize: '11px', color: '#444' }}>
+                      <span>الضريبة:</span>
+                      <span>{formatMoneyClean(invoice.tax)} {settings.currency || 'ج.م'}</span>
+                    </div>
+                  ) : null}
+
+                  {(invoice.discount || 0) > 0 ? (
+                    <div className="total-row tax-discount-row" style={{ fontWeight: 600, fontSize: '11px', color: '#444' }}>
+                      <span>الخصم:</span>
+                      <span>{formatMoneyClean(invoice.discount)} {settings.currency || 'ج.م'}</span>
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
-              {/* 5. تذييل الفاتورة والملاحظات */}
-              <div className="invoice-footer-note">
-                <div id="settingFooterNotes">
-                  {settings.notes || 'البضاعة المباعة ترد وتستبدل وفقاً لسياسة المحل'}
-                </div>
+              {/* 6. التزييل الداخلي */}
+              <div className="invoice-bottom-notes">
+                <p>{settings.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً للشروط والأحكام'}</p>
               </div>
             </div>
 
-            {/* حقوق الملكية الفكرية في شاشة المعاينة */}
-            <div className="copyright-outside">
-              حقوق الملكيه الفكرية محفوظة ل مطور Mohamed Nazih • 01029190615
+            {/* 7. حقوق الملكية الفكرية المعتمدة للمطور */}
+            <div className="copyright-footer">
+              حقوق الملكية الفكرية محفوظة لمطور النظام Mohamed Nazih ت01029190615
             </div>
           </div>
         </div>

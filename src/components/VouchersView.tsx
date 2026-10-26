@@ -32,6 +32,7 @@ import { VoucherPrintModal } from './VoucherPrintModal';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { tafqeetCurrency } from '../services/tafqeetService';
 
 interface VouchersViewProps {
   type: 'receipt' | 'payment';
@@ -253,34 +254,43 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   };
 
   const batchPrintBlocks: MovementPrintBlock[] = vouchersList.map(v => {
-    const voucherTitle = isReceipt ? 'سند قبض نقدية وشيكات' : 'سند صرف نقدية وشيكات';
-    const partyLabel = isReceipt ? 'استلمنا من السيد / السادة:' : 'اصرفوا إلى السيد / السادة:';
+    const voucherTitle = isReceipt ? 'سند قبض مالي' : 'سند صرف مالي';
+    const partyLabel = isReceipt ? 'المستلم منه' : 'المستفيد / يصرف إلى';
+    const tafqeetWords = tafqeetCurrency(v.amount, v.currencyCode || db.settings.currency || 'ج.م');
     return {
       title: voucherTitle,
       serialNo: v.number,
       date: v.date,
-      time: '12:00',
       partyLabel,
       partyName: v.partyName || 'طرف نقدي عام',
       partySubId: `طريقة السداد: ${v.paymentMethod}`,
+      statement: v.description ? `${v.description} — فقط ${tafqeetWords}` : `فقط ${tafqeetWords}`,
       badge: v.paymentMethod,
       typeTitle: voucherTitle,
       tableHeaders: [
-        { label: 'البيان / تفاصيل السند', width: '60%', align: 'right' },
-        { label: 'طريقة الدفع', width: '20%', align: 'center' },
-        { label: 'المبلغ المسدد', width: '20%', align: 'center' }
+        { label: 'البيان / تفاصيل السند والحركة', width: '50%', align: 'right' },
+        { label: 'المبلغ كتابةً (تفقيط)', width: '30%', align: 'center' },
+        { label: 'المبلغ رقماً', width: '20%', align: 'center' }
       ],
       tableRows: [
         {
           cols: [
             v.description || (isReceipt ? 'دفعة نقدية تحت الحساب' : 'مصروفات / دفعة نقدية'),
-            v.paymentMethod,
+            tafqeetWords,
             `${formatCleanNumber(v.amount)} ${v.currencyCode || db.settings.currency}`
           ],
           isBold: true
         }
       ],
       summaryLines: [
+        {
+          label: 'طريقة السداد / الخزينة',
+          value: v.paymentMethod
+        },
+        {
+          label: 'المبلغ كتابةً',
+          value: tafqeetWords
+        },
         {
           label: 'صافي قيمة السند الإجمالية',
           value: `${formatCleanNumber(v.amount)} ${v.currencyCode || db.settings.currency}`,

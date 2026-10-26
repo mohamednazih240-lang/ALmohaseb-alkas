@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>معاينة وطباعة المستند</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background-color: #e2e8f0;
+            color: #000;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* حاوية المستند بمقاس A5 الأصلي المظبوط والمستقر تماماً */
+        .invoice-container {
+            background: #fff;
+            width: 100%;
+            max-width: 148mm;
+            min-height: 210mm;
+            padding: 10mm;
+            border: 2px solid #000;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            margin: 0 auto;
+        }
+
+        .invoice-main-content {
+            width: 100%;
+        }
+
+        /* 1. الترويسة العلوية الثلاثية */
+        .company-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2.5px solid #000;
+            padding-bottom: 8px;
+            margin-bottom: 8px;
+            gap: 8px;
+        }
+
+        .header-right {
+            flex: 1.2;
+            text-align: right;
+        }
+
+        .header-right h2 {
+            font-size: 16px;
+            font-weight: 800;
+            color: #000;
+            margin-bottom: 2px;
+        }
+
+        .header-right p {
+            font-size: 10px;
+            font-weight: 600;
+            color: #222;
+            line-height: 1.2;
+        }
+
+        .header-center {
+            flex: 0 0 auto;
+            text-align: center;
+        }
+
+        .header-center img {
+            max-height: 40px;
+            max-width: 80px;
+            object-fit: contain;
+        }
+
+        .header-left {
+            flex: 1;
+            text-align: left;
+            font-size: 10px;
+            font-weight: 600;
+            color: #000;
+            line-height: 1.2;
+        }
+
+        .header-center:empty,
+        .header-left:empty {
+            display: none;
+        }
+
+        /* 2. مربع بيانات المستند */
+        .invoice-info-box {
+            border: 1.5px solid #000;
+            background-color: #fff;
+            padding: 6px 8px;
+            margin-bottom: 8px;
+            font-size: 10.5px;
+            font-weight: 600;
+        }
+
+        .info-grid {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: nowrap;
+            gap: 5px;
+        }
+
+        .info-col-right {
+            flex: 1.3;
+            text-align: right;
+            line-height: 1.5;
+        }
+
+        .info-col-center {
+            flex: 1;
+            text-align: center;
+            line-height: 1.5;
+            border-right: 1px dashed #666;
+            border-left: 1px dashed #666;
+            padding: 0 4px;
+        }
+
+        .info-col-left {
+            flex: 1.1;
+            text-align: left;
+            line-height: 1.5;
+        }
+
+        /* 3. مستطيل البيان (يختفي تماماً إذا ترك فارغاً) */
+        .invoice-statement-box {
+            border: 1.5px solid #333;
+            padding: 5px 8px;
+            margin-bottom: 8px;
+            font-size: 10.5px;
+            font-weight: 600;
+            background-color: #fff;
+        }
+
+        .invoice-statement-box:empty {
+            display: none !important;
+            border: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+
+        /* 4. جدول الأصناف والبيانات (أفقي متناسق بدون أي تمرير) */
+        .table-wrapper {
+            width: 100%;
+            margin-bottom: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            table-layout: fixed;
+        }
+
+        table th, table td {
+            border: 1.5px solid #000;
+            padding: 6px 3px;
+            text-align: center;
+            vertical-align: middle;
+            font-weight: 600;
+            word-wrap: break-word;
+        }
+
+        table th {
+            background-color: #e6e6e6;
+            color: #000;
+            font-weight: 800;
+            font-size: 11.5px;
+            white-space: nowrap;
+        }
+
+        .col-item-name  { width: 34%; text-align: right; padding-right: 5px; font-weight: 700; }
+        .col-item-note  { width: 22%; font-size: 10px; }
+        .col-item-qty   { width: 10%; font-size: 11px; white-space: nowrap; }
+        .col-item-price { width: 16%; font-size: 11px; white-space: nowrap; }
+        .col-item-total { width: 18%; font-size: 11.5px; font-weight: 800; white-space: nowrap; }
+
+        /* 5. قسم الإجماليات وتفاصيل الدفع */
+        .totals-section {
+            width: 100%;
+            border-top: 2.5px solid #000;
+            padding-top: 6px;
+            font-size: 11.5px;
+            font-weight: 800;
+            margin-bottom: 10px;
+        }
+
+        .total-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 3px 0;
+        }
+
+        .payment-status-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            background: #e2e8f0;
+            color: #000;
+            border: 1px solid #000;
+        }
+
+        /* 6. التزييل الداخلي */
+        .invoice-bottom-notes {
+            width: 100%;
+            text-align: center;
+            font-size: 10px;
+            font-weight: 800;
+            color: #000;
+            border-top: 1.5px dashed #000;
+            padding-top: 6px;
+            margin-top: auto;
+        }
+
+        /* 7. حقوق الملكية الفكرية المعتمدة للمطور */
+        .copyright-footer {
+            text-align: center;
+            font-size: 9px;
+            font-weight: 600;
+            color: #444;
+            margin-top: 6px;
+            width: 100%;
+        }
+
+        /* ========================================================= */
+        /* إعدادات الطباعة النظيفة لمقاس A5 الحقيقي                    */
+        /* ========================================================= */
+        @media print {
+            body {
+                background: none !important;
+                padding: 0 !important;
+                margin: 0 !important;
+            }
+
+            .invoice-container {
+                border: 1.5px solid #000 !important;
+                box-shadow: none !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                height: 210mm !important;
+                padding: 6mm !important;
+                page-break-after: avoid !important;
+                page-break-inside: avoid !important;
+            }
+
+            .print-hide-time {
+                display: none !important;
+            }
+
+            .tax-discount-row {
+                display: none !important;
+            }
+
+            .invoice-statement-box:empty {
+                display: none !important;
+                border: none !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
+
+            tr, th, td {
+                page-break-inside: avoid !important;
+            }
+
+            @page {
+                size: A5 portrait;
+                margin: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- حاوية المستند النظيفة بمقاس A5 -->
+    <div class="invoice-container">
+        <div class="invoice-main-content">
+            
+            <!-- 1. الترويسة العلوية الثلاثية -->
+            <div class="company-header">
+                <div class="header-right">
+                    <h2>اسم الشركة</h2>
+                    <p>العنوان - الفرع الرئيسي</p>
+                </div>
+                <div class="header-center">
+                    <img src="logo.png" alt="شعار الشركة" onerror="this.style.display='none'">
+                </div>
+                <div class="header-left">
+                    <div><strong>هاتف 1:</strong> 01000000000</div>
+                    <div><strong>هاتف 2:</strong> 01000000000</div>
+                </div>
+            </div>
+
+            <!-- 2. مربع بيانات المستند -->
+            <div class="invoice-info-box">
+                <div class="info-grid">
+                    <div class="info-col-right">
+                        <strong>كود العميل:</strong> <span></span><br>
+                        <strong>اسم العميل:</strong> <span></span><br>
+                        <strong>الهاتف:</strong> <span></span>
+                    </div>
+                    <div class="info-col-center">
+                        <strong>فاتورة مبيعات</strong><br>
+                        <span style="font-size: 13px; font-weight: 800;">رقم: <span></span></span>
+                    </div>
+                    <div class="info-col-left">
+                        <strong>التاريخ:</strong> <span></span><br>
+                        <span class="print-hide-time"><strong>الوقت:</strong> <span></span></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. مستطيل البيان (يختفي تماماً إذا ترك فارغاً) -->
+            <div class="invoice-statement-box"></div>
+
+            <!-- 4. جدول الأصناف -->
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="col-item-name">اسم الصنف</th>
+                            <th class="col-item-note">البيان</th>
+                            <th class="col-item-qty">العدد</th>
+                            <th class="col-item-price">السعر</th>
+                            <th class="col-item-total">الإجمالي</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- صفوف الأصناف تأتي من النظام ديناميكياً -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 5. قسم الإجماليات وتفاصيل الدفع -->
+            <div class="totals-section">
+                <div class="total-row">
+                    <span>إجمالي الفاتورة:</span>
+                    <span>0.00 ج.م</span>
+                </div>
+                
+                <div class="total-row" style="border-top: 1px dashed #666; padding-top: 4px; margin-top: 3px;">
+                    <span>طريقة الدفع: <span class="payment-status-badge">كاش / آجل</span></span>
+                    <span>المدفوع: <strong>0.00 ج.م</strong></span>
+                </div>
+                
+                <div class="total-row" style="color: #b91c1c;">
+                    <span>المبلغ المتبقي (الآجل):</span>
+                    <strong>0.00 ج.م</strong>
+                </div>
+
+                <!-- الضريبة والخصم (تختفي تلقائياً عند الطباعة) -->
+                <div class="total-row tax-discount-row" style="font-weight: 600; font-size: 11px; color: #444;">
+                    <span>الضريبة:</span>
+                    <span>0.00 ج.م</span>
+                </div>
+                <div class="total-row tax-discount-row" style="font-weight: 600; font-size: 11px; color: #444;">
+                    <span>الخصم:</span>
+                    <span>0.00 ج.م</span>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- 6. التزييل الداخلي -->
+        <div class="invoice-bottom-notes">
+            <p>البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً للشروط والأحكام</p>
+        </div>
+    </div>
+
+    <!-- 7. حقوق الملكية الفكرية المعتمدة -->
+    <div class="copyright-footer">
+        حقوق الملكية الفكرية محفوظة لمطور النظام Mohamed Nazih ت01029190615
+    </div>
+
+</body>
+</html>

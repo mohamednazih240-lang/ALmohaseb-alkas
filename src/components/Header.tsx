@@ -86,7 +86,7 @@ const HeaderComponent: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-2xs select-none w-full max-w-full overflow-hidden">
+    <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-xs select-none w-full max-w-full">
       <div className="flex items-center justify-between px-2.5 sm:px-4 py-2 h-14 sm:h-16 max-w-full">
         {/* Right side (RTL start): Toggle, Brand, Current view, Branch (Desktop) */}
         <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">

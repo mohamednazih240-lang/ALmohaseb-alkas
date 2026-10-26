@@ -4,7 +4,7 @@
   html, body, #root {
     width: 100%;
     max-width: 100vw;
-    overflow-x: hidden;
+    overflow-x: clip;
     box-sizing: border-box;
   }
 
@@ -47,82 +47,265 @@
 
 /* ----------------------------------------------------
    1. تنسيقات الفاتورة الأساسية وإعدادات الورق (A4 / A5 / الحراري)
+/* ----------------------------------------------------
+   1. تنسيقات الفاتورة والمستندات القياسية لمقاس A5 الأصلي المعتمد
 ---------------------------------------------------- */
 .invoice-container { 
-  background: #fff; 
+  background: #ffffff; 
+  width: 100%;
+  max-width: 148mm;
+  min-height: 210mm;
   margin: 0 auto; 
-  border: 1.5px solid #000; 
+  padding: 8mm 10mm;
+  border: 2px solid #000000; 
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   box-sizing: border-box;
 }
 
-/* --- مقاس A4 في المعاينة على الشاشة --- */
-.invoice-wrapper-A4 {
+.invoice-main-content {
   width: 100%;
-  max-width: 210mm;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-/* --- مقاس A4 في المعاينة على الشاشة --- */
-.invoice-wrapper-A4 {
-  width: 100%;
-  max-width: 210mm;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-body[data-paper-size="A4"] .invoice-container,
-[data-paper-size="A4"] .invoice-container {
-  width: 100%;
-  max-width: 200mm;
-  min-height: auto;
-  padding: 6mm 8mm;
-  box-sizing: border-box;
-  background: #ffffff;
-  border: 1.5px solid #000;
-  box-shadow: 0 4px 25px -2px rgba(0, 0, 0, 0.12);
-}
-body[data-paper-size="A4"],
-[data-paper-size="A4"] {
-  font-size: 0.88rem;
 }
 
-/* --- مقاس A5 في المعاينة على الشاشة (المقاس القياسي الافتراضي 148×210 mm) --- */
-.invoice-wrapper-A5 {
-  width: 100%;
-  max-width: 148mm;
+/* 1. الترويسة العلوية الثلاثية */
+.company-header {
   display: flex;
-  flex-direction: column;
+  justify-content: space-between;
   align-items: center;
-}
-body[data-paper-size="A5"] .invoice-container,
-[data-paper-size="A5"] .invoice-container {
+  border-bottom: 2.5px solid #000000;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  gap: 8px;
   width: 100%;
-  max-width: 148mm;
-  min-height: auto;
-  padding: 4mm 5mm;
-  box-sizing: border-box;
-  background: #ffffff;
-  border: 1.2px solid #000;
-  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.1);
 }
-body[data-paper-size="A5"],
-[data-paper-size="A5"] {
-  font-size: 0.75rem;
+
+.header-right {
+  flex: 1.2;
+  text-align: right;
+}
+
+.header-right h2 {
+  font-size: 16px;
+  font-weight: 800;
+  color: #000000;
+  margin-bottom: 2px;
+}
+
+.header-right p {
+  font-size: 10px;
+  font-weight: 600;
+  color: #222222;
   line-height: 1.25;
 }
 
-/* --- المقاس الحراري في المعاينة على الشاشة --- */
+.header-center {
+  flex: 0 0 auto;
+  text-align: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.header-center img,
+.header-center .logo-img {
+  max-height: 42px;
+  max-width: 85px;
+  object-fit: contain;
+}
+
+.header-left {
+  flex: 1;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  color: #000000;
+  line-height: 1.25;
+  direction: ltr;
+}
+
+.header-center:empty,
+.header-left:empty {
+  display: none;
+}
+
+/* 2. مربع بيانات المستند المعتمد */
+.invoice-info-box {
+  border: 1.5px solid #000000;
+  background-color: #ffffff;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.info-grid {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 5px;
+  width: 100%;
+}
+
+.info-col-right {
+  flex: 1.3;
+  text-align: right;
+  line-height: 1.5;
+}
+
+.info-col-center {
+  flex: 1;
+  text-align: center;
+  line-height: 1.5;
+  border-right: 1px dashed #666666;
+  border-left: 1px dashed #666666;
+  padding: 0 4px;
+}
+
+.info-col-left {
+  flex: 1.1;
+  text-align: left;
+  line-height: 1.5;
+}
+
+/* 3. مستطيل البيان (يختفي تماماً إذا ترك فارغاً) */
+.invoice-statement-box {
+  border: 1.5px solid #333333;
+  padding: 5px 8px;
+  margin-bottom: 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background-color: #ffffff;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.invoice-statement-box:empty {
+  display: none !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+/* 4. جدول الأصناف والبيانات (أفقي متناسق بدون أي تمرير) */
+.table-wrapper {
+  width: 100%;
+  margin-bottom: 10px;
+  overflow: visible;
+}
+
+.invoice-container table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  table-layout: fixed;
+}
+
+.invoice-container table th,
+.invoice-container table td {
+  border: 1.5px solid #000000;
+  padding: 5px 3px;
+  text-align: center;
+  vertical-align: middle;
+  font-weight: 600;
+  word-wrap: break-word;
+  background-color: #ffffff;
+}
+
+.invoice-container table th {
+  background-color: #e6e6e6 !important;
+  color: #000000;
+  font-weight: 800;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.col-item-name  { width: 34%; text-align: right; padding-right: 5px; font-weight: 700; }
+.col-item-note  { width: 22%; font-size: 10px; }
+.col-item-qty   { width: 10%; font-size: 11px; white-space: nowrap; }
+.col-item-price { width: 16%; font-size: 11px; white-space: nowrap; }
+.col-item-total { width: 18%; font-size: 11.5px; font-weight: 800; white-space: nowrap; }
+
+/* 5. قسم الإجماليات وتفاصيل الدفع */
+.totals-section {
+  width: 100%;
+  border-top: 2.5px solid #000000;
+  padding-top: 6px;
+  font-size: 11.5px;
+  font-weight: 800;
+  margin-bottom: 10px;
+}
+
+.total-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2.5px 0;
+  align-items: center;
+}
+
+.payment-status-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  background: #e2e8f0;
+  color: #000000;
+  border: 1px solid #000000;
+  font-weight: 700;
+}
+
+/* 6. التزييل الداخلي */
+.invoice-bottom-notes {
+  width: 100%;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 800;
+  color: #000000;
+  border-top: 1.5px dashed #000000;
+  padding-top: 6px;
+  margin-top: auto;
+}
+
+/* 7. حقوق الملكية الفكرية المعتمدة للمطور */
+.copyright-footer {
+  text-align: center;
+  font-size: 9px;
+  font-weight: 600;
+  color: #444444;
+  margin-top: 6px;
+  width: 100%;
+  direction: rtl;
+}
+
+/* --- أحجام الورق التبادلية في المعاينة على الشاشة --- */
+.invoice-wrapper-A4 {
+  width: 100%;
+  max-width: 210mm;
+}
+body[data-paper-size="A4"] .invoice-container,
+[data-paper-size="A4"] .invoice-container {
+  max-width: 195mm;
+  padding: 10mm 12mm;
+  font-size: 12px;
+}
+
+.invoice-wrapper-A5 {
+  width: 100%;
+  max-width: 148mm;
+}
+body[data-paper-size="A5"] .invoice-container,
+[data-paper-size="A5"] .invoice-container {
+  max-width: 148mm;
+  min-height: 210mm;
+}
+
 .invoice-wrapper-thermal {
   width: 100%;
   max-width: 76mm;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
 }
 body[data-paper-size="thermal"] .invoice-container,
 [data-paper-size="thermal"] .invoice-container {
@@ -130,124 +313,33 @@ body[data-paper-size="thermal"] .invoice-container,
   max-width: 100%;
   min-height: auto;
   padding: 4mm 3mm;
-  border: 1px dashed #000;
-  box-shadow: none;
+  border: 1px dashed #000000;
 }
-
-/* عناصر الفاتورة الداخلية */
-.header,
-.invoice-header { 
-  display: flex; 
-  justify-content: space-between; 
-  align-items: center; 
-  border-bottom: 1.5px solid #000; 
-  padding-bottom: 6px; 
-  margin-bottom: 8px; 
-  width: 100%;
-}
-.header.is-empty,
-.invoice-header.is-empty { display: none !important; }
-
-.header-right { text-align: right; flex: 1.2; }
-.header-right h2 { margin: 0 0 2px 0; font-size: 1.1rem; font-weight: bold; }
-.header-right p { margin: 0; font-size: 0.73rem; color: #333; }
-
-.header-center {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-width: 80px;
-  flex: 0.8;
-}
-.logo-img { max-width: 80px; max-height: 45px; object-fit: contain; }
-
-.header-left { flex: 1.2; display: flex; justify-content: flex-end; }
-.phones-list { list-style: none; padding: 0; margin: 0; font-size: 0.73rem; direction: ltr; text-align: left; }
-.phones-list li { margin-bottom: 1px; font-weight: 600; }
-
-.info-box { 
-  display: flex; 
-  justify-content: space-between; 
-  align-items: center; 
-  border: 1.5px solid #000; 
-  padding: 5px 10px; 
-  margin-bottom: 8px; 
-  font-size: 0.8rem;
-  line-height: 1.4;
-  width: 100%;
-  background-color: #fafafa;
-  box-sizing: border-box;
-}
-.info-item p { margin: 1px 0; }
-
-.table-wrapper { width: 100%; flex-grow: 1; }
-table.items-table,
-.invoice-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
-table.items-table th, table.items-table td,
-.invoice-table th, .invoice-table td { border: 1px solid #000; padding: 4px 6px; text-align: center; font-size: 0.8rem; }
-table.items-table th,
-.invoice-table th { background-color: #ededed; font-weight: bold; font-size: 0.78rem; }
-
-.bottom-section { display: flex; justify-content: flex-end; margin-top: 6px; margin-bottom: 8px; width: 100%; }
-.summary-vertical-list { width: 240px; display: flex; flex-direction: column; gap: 2px; font-size: 0.82rem; font-weight: bold; }
-.summary-line { display: flex; justify-content: space-between; align-items: center; padding: 1px 0; }
-.summary-line.total-line { 
-  border-top: 1.5px solid #000; 
-  margin-top: 3px; 
-  padding-top: 3px; 
-  font-size: 0.95rem; 
-}
-
-.invoice-footer-note {
-  border-top: 1.5px solid #000;
-  padding-top: 5px;
-  margin-top: auto; 
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.73rem;
-  font-weight: 600;
-  width: 100%;
-}
-
-.invoice-developer-copyright {
-  width: 100%;
-  text-align: center;
-  margin-top: 5px;
-  padding-top: 3px;
-  border-top: 1px dashed #777;
-  display: flex;
+body[data-paper-size="thermal"] .info-grid,
+[data-paper-size="thermal"] .info-grid {
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  line-height: 1.35;
+  gap: 3px;
 }
-.invoice-developer-copyright .dev-name {
-  font-size: 0.72rem;
-  font-weight: 700;
-  color: #111;
-}
-.invoice-developer-copyright .dev-phone {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.7rem;
-  letter-spacing: 0.5px;
-  color: #222;
-  font-weight: 700;
-}
-
-.copyright-outside {
+body[data-paper-size="thermal"] .info-col-center,
+[data-paper-size="thermal"] .info-col-center {
+  border-right: none;
+  border-left: none;
+  border-top: 1px dashed #666;
+  border-bottom: 1px dashed #666;
+  padding: 2px 0;
   width: 100%;
-  text-align: center;
-  font-size: 0.68rem;
-  font-weight: bold;
-  color: #444;
-  padding: 5px 0;
-  direction: rtl;
 }
-
-.hide-row { display: none !important; }
-
-/* قواعد الحجم الحراري على الشاشة والطباعة */
-.invoice-wrapper-thermal .invoice-header,
+body[data-paper-size="thermal"] .company-header,
+[data-paper-size="thermal"] .company-header {
+  flex-direction: column;
+  text-align: center;
+}
+body[data-paper-size="thermal"] .header-right,
+body[data-paper-size="thermal"] .header-left,
+[data-paper-size="thermal"] .header-right,
+[data-paper-size="thermal"] .header-left {
+  text-align: center;
+}
 [data-paper-size="thermal"] .invoice-header {
   flex-direction: column;
   text-align: center;

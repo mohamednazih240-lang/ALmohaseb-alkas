@@ -9,6 +9,8 @@ import {
   formatCleanNumber
 } from './UniversalPrintModal';
 
+import { tafqeetCurrency } from '../services/tafqeetService';
+
 interface VoucherPrintModalProps {
   voucher: Voucher | null;
   settings: AppSettings;
@@ -23,8 +25,9 @@ export const VoucherPrintModal: React.FC<VoucherPrintModalProps> = ({
   if (!voucher) return null;
 
   const isReceipt = voucher.type === 'receipt';
-  const voucherTitle = isReceipt ? 'سند قبض نقدية وشيكات' : 'سند صرف نقدية وشيكات';
-  const partyLabel = isReceipt ? 'استلمنا من السيد / السادة:' : 'اصرفوا إلى السيد / السادة:';
+  const voucherTitle = isReceipt ? 'سند قبض مالي' : 'سند صرف مالي';
+  const partyLabel = isReceipt ? 'المستلم منه' : 'المستفيد / يصرف إلى';
+  const tafqeetWords = tafqeetCurrency(voucher.amount, settings.currency || 'ج.م');
 
   const docBlock: MovementPrintBlock = {
     title: voucherTitle,
@@ -33,32 +36,41 @@ export const VoucherPrintModal: React.FC<VoucherPrintModalProps> = ({
     time: '12:00',
     partyLabel,
     partyName: voucher.partyName || 'طرف نقدي عام',
-    partySubId: `طريقة السداد: ${voucher.paymentMethod}`,
+    partySubId: voucher.partyId,
+    statement: `البيان: ${voucher.description || (isReceipt ? 'دفعة نقدية تحت الحساب' : 'مصروفات / دفعة نقدية')} — ${tafqeetWords}`,
     badge: voucher.paymentMethod,
     typeTitle: voucherTitle,
     tableHeaders: [
-      { label: 'البيان / تفاصيل السند', width: '60%', align: 'right' },
-      { label: 'طريقة الدفع', width: '20%', align: 'center' },
-      { label: 'المبلغ المسدد', width: '20%', align: 'center' }
+      { label: 'البيان / تفاصيل السند والحركة', width: '50%', align: 'right' },
+      { label: 'المبلغ كتابةً (تفقيط)', width: '30%', align: 'center' },
+      { label: 'المبلغ رقماً', width: '20%', align: 'center' }
     ],
     tableRows: [
       {
         cols: [
           voucher.description || (isReceipt ? 'دفعة نقدية تحت الحساب' : 'مصروفات / دفعة نقدية'),
-          voucher.paymentMethod,
-          `${formatCleanNumber(voucher.amount)} ${voucher.currencyCode || settings.currency}`
+          tafqeetWords,
+          `${formatCleanNumber(voucher.amount)} ${voucher.currencyCode || settings.currency || 'ج.م'}`
         ],
         isBold: true
       }
     ],
     summaryLines: [
       {
+        label: 'طريقة السداد / الخزينة',
+        value: voucher.paymentMethod || 'نقدي'
+      },
+      {
+        label: 'المبلغ كتابةً',
+        value: tafqeetWords
+      },
+      {
         label: 'صافي قيمة السند الإجمالية',
-        value: `${formatCleanNumber(voucher.amount)} ${voucher.currencyCode || settings.currency}`,
+        value: `${formatCleanNumber(voucher.amount)} ${voucher.currencyCode || settings.currency || 'ج.م'}`,
         isTotal: true
       }
     ],
-    footerNotes: settings.notes || 'سند رسمي معتمد وموثق بالسجلات المالية.',
+    footerNotes: settings.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً للشروط والأحكام',
     createdBy: settings.company || 'المسؤول المالي'
   };
 

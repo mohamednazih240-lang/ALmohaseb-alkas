@@ -354,11 +354,14 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
     const totalCredit = rows.reduce((s, r) => s + r.credit, 0);
 
     const doc: MovementPrintBlock = {
-      title: `كشف حساب تفصيلي: ${party.name}`,
+      title: `كشف حساب: ${party.name}`,
       serialNo: `#STMT-${party.id.slice(0, 8)}`,
       date: new Date().toISOString().slice(0, 10),
-      partyLabel: isCustomer ? 'العميل:' : 'المورد:',
-      partyName: `${party.name}${party.phone ? ` - هاتف: ${party.phone}` : ''}${party.address ? ` (${party.address})` : ''}`,
+      partyLabel: isCustomer ? 'العميل' : 'المورد',
+      partyName: party.name,
+      partyCode: party.code || party.id.slice(0, 8),
+      partySubId: party.phone || party.address || '—',
+      statement: `كشف حساب تحليلي لجميع الحركات المالية والفواتير والسندات المسجلة للطرف`,
       badge: isCustomer ? 'كشف حساب عميل' : 'كشف حساب مورد',
       tableHeaders: [
         { label: 'التاريخ', width: '15%', align: 'center' },

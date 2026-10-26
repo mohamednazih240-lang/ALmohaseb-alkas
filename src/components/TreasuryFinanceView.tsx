@@ -40,6 +40,7 @@ import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { tafqeetCurrency } from '../services/tafqeetService';
 
 interface TreasuryFinanceViewProps {
   subPage: 'treasury' | 'expenses' | 'revenues' | 'accounts' | 'journals' | 'ledger';
@@ -453,32 +454,35 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   };
 
   const handlePrintTreasurySingle = (tr: TreasuryEntry) => {
+    const tafqeetWords = tafqeetCurrency(tr.amount, db.settings.currency || 'ج.م');
     const block: MovementPrintBlock = {
       title: tr.direction === 'in' ? 'حركة إيداع وقبض خزينة' : 'حركة صرف وسحب خزينة',
       serialNo: `#TR-${tr.id.slice(-6).toUpperCase()}`,
       date: tr.date,
-      time: '12:00',
-      partyLabel: 'القناة / الخزينة:',
+      partyLabel: 'الخزينة / الحساب',
       partyName: tr.method,
       partySubId: `الاتجاه: ${tr.direction === 'in' ? 'وارد (+)' : 'صادر (-)'}`,
+      statement: tr.description ? `${tr.description} — فقط ${tafqeetWords}` : `فقط ${tafqeetWords}`,
       badge: tr.direction === 'in' ? 'إيداع نقدي' : 'صرف نقدي',
       typeTitle: 'حركة خزينة ونقدية',
       tableHeaders: [
-        { label: 'البيان / تفاصيل الحركة', width: '60%', align: 'right' },
-        { label: 'طريقة الدفع', width: '20%', align: 'center' },
-        { label: 'المبلغ', width: '20%', align: 'center' }
+        { label: 'البيان / تفاصيل الحركة', width: '50%', align: 'right' },
+        { label: 'المبلغ كتابةً (تفقيط)', width: '30%', align: 'center' },
+        { label: 'المبلغ رقماً', width: '20%', align: 'center' }
       ],
       tableRows: [
         {
           cols: [
-            tr.description || 'حركة نقدية بالخزينة',
-            tr.method,
+            tr.description || (tr.direction === 'in' ? 'إيداع نقدي بالخزينة' : 'صرف نقدي من الخزينة'),
+            tafqeetWords,
             `${formatCleanNumber(tr.amount)} ${db.settings.currency}`
           ],
           isBold: true
         }
       ],
       summaryLines: [
+        { label: 'طريقة الدفع / القناة', value: tr.method },
+        { label: 'المبلغ كتابةً', value: tafqeetWords },
         { label: 'المبلغ الإجمالي للحركة', value: `${formatCleanNumber(tr.amount)} ${db.settings.currency}`, isTotal: true }
       ],
       footerNotes: db.settings.notes || 'حركة نقدية رسمية موثقة بحسابات الخزينة.',
@@ -531,32 +535,35 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
   const handlePrintSimpleSingle = (item: SimpleRecord) => {
     const isExp = subPage === 'expenses';
+    const tafqeetWords = tafqeetCurrency(item.amount, db.settings.currency || 'ج.م');
     const block: MovementPrintBlock = {
       title: isExp ? 'إيصال إثبات مصروف' : 'إيصال إثبات إيراد',
       serialNo: `#REC-${item.id.slice(-6).toUpperCase()}`,
       date: item.date,
-      time: '12:00',
-      partyLabel: isExp ? 'بند المصروف:' : 'بند الإيراد:',
+      partyLabel: isExp ? 'بند المصروف' : 'بند الإيراد',
       partyName: item.category,
       partySubId: `الخزينة: ${item.method}`,
+      statement: item.description ? `${item.description} — فقط ${tafqeetWords}` : `فقط ${tafqeetWords}`,
       badge: item.method,
       typeTitle: isExp ? 'مصروف تشغيلي' : 'إيراد إضافي',
       tableHeaders: [
-        { label: 'البيان والتفاصيل', width: '60%', align: 'right' },
-        { label: 'الخزينة المسدد منها', width: '20%', align: 'center' },
-        { label: 'المبلغ', width: '20%', align: 'center' }
+        { label: 'البيان والتفاصيل', width: '50%', align: 'right' },
+        { label: 'المبلغ كتابةً (تفقيط)', width: '30%', align: 'center' },
+        { label: 'المبلغ رقماً', width: '20%', align: 'center' }
       ],
       tableRows: [
         {
           cols: [
             item.description || item.category,
-            item.method,
+            tafqeetWords,
             `${formatCleanNumber(item.amount)} ${db.settings.currency}`
           ],
           isBold: true
         }
       ],
       summaryLines: [
+        { label: 'طريقة السداد / الخزينة', value: item.method },
+        { label: 'المبلغ كتابةً', value: tafqeetWords },
         { label: 'القيمة الإجمالية', value: `${formatCleanNumber(item.amount)} ${db.settings.currency}`, isTotal: true }
       ],
       footerNotes: db.settings.notes || 'إيصال محاسبي رسمي معتمد',

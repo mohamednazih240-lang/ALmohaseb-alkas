@@ -427,7 +427,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-white text-slate-900 flex flex-col font-sans relative w-full max-w-full overflow-x-hidden" dir="rtl">
+    <div className="min-h-screen bg-white text-slate-900 flex flex-col font-sans relative w-full max-w-full overflow-x-clip" dir="rtl">
       {/* Hesabaty Subtle Background Watermark */}
       <div 
         className="fixed inset-0 pointer-events-none z-0 flex items-center justify-center opacity-[0.035] select-none"
@@ -436,10 +436,7 @@ export default function App() {
         <img src="/logo.png" alt="" className="w-[520px] h-[520px] object-contain" />
       </div>
 
-      {/* PWA Mobile App Installation & Instant Auto-Update Banner */}
-      <PWAInstallBanner />
-
-      {/* Header with Hesabaty Logo, Realtime Sync & Branch Switcher */}
+      {/* Header with Hesabaty Logo, Realtime Sync & Branch Switcher - Sticky at top */}
       <Header
         settings={db.settings}
         currentUser={authSession?.user || db.currentUser || db.users[0]}
@@ -478,7 +475,10 @@ export default function App() {
         activePageTitle={getPageTitle(currentPage)}
       />
 
-      <div className="flex flex-1 relative z-10 w-full max-w-full overflow-x-hidden min-w-0">
+      {/* PWA Mobile App Installation & Instant Auto-Update Banner */}
+      <PWAInstallBanner />
+
+      <div className="flex flex-1 relative z-10 w-full max-w-full overflow-x-clip min-w-0">
         {/* Responsive Sidebar with User Role & Permissions */}
         <Sidebar
           currentPage={currentPage}
@@ -490,7 +490,7 @@ export default function App() {
         />
 
         {/* Main Workspace Content Area */}
-        <main className="flex-1 min-w-0 lg:mr-64 p-2.5 sm:p-6 max-w-7xl mx-auto w-full max-w-full overflow-x-hidden transition-all">
+        <main className="flex-1 min-w-0 lg:mr-64 p-2.5 sm:p-6 max-w-7xl mx-auto w-full max-w-full overflow-x-clip transition-all">
           {currentPage === 'dashboard' && (
             <DashboardView
               db={db}

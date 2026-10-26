@@ -84,8 +84,10 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
       title: isSale ? 'سند مردود مبيعات' : 'سند مردود مشتريات',
       serialNo: ret.number,
       date: ret.date,
-      partyLabel: isSale ? 'العميل:' : 'المورد:',
+      partyLabel: isSale ? 'العميل' : 'المورد',
       partyName: ret.partyName,
+      partySubId: `الفاتورة الأصلية: ${ret.originalInvoiceNumber || '—'}`,
+      statement: ret.notes || (isSale ? 'سند استرجاع بضاعة مبيعات وإرجاعها للمخزن وقيد الحساب' : 'سند رد بضاعة مشتريات للمورد وقيد الحساب'),
       badge: isSale ? 'مردود مبيعات' : 'مردود مشتريات',
       tableHeaders: [
         { label: 'الصنف المردود', width: '40%', align: 'right' },

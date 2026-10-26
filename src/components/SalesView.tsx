@@ -162,35 +162,38 @@ export const SalesView: React.FC<SalesViewProps> = ({
       serialNo: inv.number,
       date: inv.date,
       time: inv.time,
-      partyLabel: 'العميل:',
-      partyName: inv.partyName,
+      partyLabel: 'العميل',
+      partyName: inv.partyName || 'عميل نقدي',
+      partyCode: inv.partyCode || inv.partyId,
       partySubId: inv.partyPhone,
+      statement: inv.notes || inv.jobSite,
       badge: inv.status,
+      typeTitle: inv.invoiceKind === 'wholesale' ? 'فاتورة مبيعات جملة' : 'فاتورة مبيعات',
       tableHeaders: [
-        { label: 'م', width: '6%', align: 'center' },
-        { label: 'الصنف', width: '40%', align: 'right' },
-        { label: 'الكمية', width: '14%', align: 'center' },
-        { label: 'السعر', width: '20%', align: 'center' },
-        { label: 'الإجمالي', width: '20%', align: 'center' }
+        { label: 'اسم الصنف', width: '34%', align: 'right' },
+        { label: 'البيان', width: '22%', align: 'center' },
+        { label: 'العدد', width: '10%', align: 'center' },
+        { label: 'السعر', width: '16%', align: 'center' },
+        { label: 'الإجمالي', width: '18%', align: 'center' }
       ],
-      tableRows: inv.items.map((it, idx) => ({
+      tableRows: inv.items.map(it => ({
         cols: [
-          idx + 1,
           it.productName,
-          `${it.qty} ${it.unit || ''}`,
-          formatMoney(it.unitPrice, db.settings.currency),
-          formatMoney(it.total, db.settings.currency)
+          it.spec || it.notes || it.unit || '—',
+          formatCleanNumber(it.qty),
+          formatCleanNumber(it.unitPrice),
+          formatCleanNumber(it.total)
         ]
       })),
       summaryLines: [
-        { label: 'إجمالي المبيعات', value: formatMoney(inv.subtotal || inv.total, db.settings.currency) },
-        inv.discount ? { label: 'الخصم', value: formatMoney(inv.discount, db.settings.currency) } : null,
-        inv.tax ? { label: 'ضريبة القيمة المضافة', value: formatMoney(inv.tax, db.settings.currency) } : null,
-        { label: 'الصافي النهائي', value: formatMoney(inv.total, db.settings.currency), isTotal: true },
-        { label: 'المحصل نقدياً', value: formatMoney(inv.paid, db.settings.currency) },
-        { label: 'المتبقي آجل', value: formatMoney(inv.remaining, db.settings.currency), highlight: inv.remaining > 0 }
+        { label: 'إجمالي المبيعات', value: `${formatCleanNumber(inv.subtotal || inv.total)} ${db.settings.currency}` },
+        inv.discount ? { label: 'الخصم', value: `${formatCleanNumber(inv.discount)} ${db.settings.currency}` } : null,
+        inv.tax ? { label: 'ضريبة القيمة المضافة', value: `${formatCleanNumber(inv.tax)} ${db.settings.currency}` } : null,
+        { label: 'الصافي النهائي', value: `${formatCleanNumber(inv.total)} ${db.settings.currency}`, isTotal: true },
+        { label: 'المحصل نقدياً', value: `${formatCleanNumber(inv.paid)} ${db.settings.currency}` },
+        { label: 'المتبقي آجل', value: `${formatCleanNumber(inv.remaining)} ${db.settings.currency}`, highlight: inv.remaining > 0 }
       ].filter(Boolean) as any[],
-      footerNotes: inv.notes || 'شكراً لتعاملكم معنا'
+      footerNotes: inv.notes || db.settings.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً للشروط والأحكام'
     }));
 
     setPrintDocuments(docs);

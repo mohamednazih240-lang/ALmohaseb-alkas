@@ -1,6 +1,7 @@
 import {
   getFirestore,
   initializeFirestore,
+  setLogLevel,
   doc,
   setDoc,
   getDoc,
@@ -12,14 +13,15 @@ import { saveDatabase, loadDatabase, ensurePrimaryBranches, sanitizeCompanyDatab
 import firebaseConfig from '../../firebase-applet-config.json';
 import { getCompanyByCode } from './tenantService';
 
-// Connect to provisioned Firestore database with auto-detect long polling for resilient connections
+// Connect to provisioned Firestore database with forced long polling to avoid 10s streaming timeout in iframe/proxy environments
 const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId;
 export const firestore = (() => {
   try {
+    setLogLevel('silent');
     return initializeFirestore(
       auth.app,
       {
-        experimentalAutoDetectLongPolling: true
+        experimentalForceLongPolling: true
       },
       firestoreDbId || undefined
     );

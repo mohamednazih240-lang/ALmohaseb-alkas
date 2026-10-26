@@ -22,9 +22,11 @@ export interface MovementPrintBlock {
   time?: string;
   partyLabel?: string;           // e.g. 'اسم العميل:', 'المسؤول:', 'المورد:', 'الخزينة:'
   partyName?: string;
+  partyCode?: string;
   partySubId?: string;           // Phone or ID
   badge?: string;                // e.g. 'نقدي', 'مغلق', 'معتمد'
   typeTitle?: string;
+  statement?: string;            // Statement / Notes / description / Tafqeet
   tableHeaders: { label: string; width?: string; align?: 'right' | 'center' | 'left' }[];
   tableRows: {
     cols: (string | number)[];
@@ -350,11 +352,11 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                   breakAfter: docIdx < documents.length - 1 ? 'page' : 'auto'
                 }}
               >
-                {/* الحاوية الرئيسية المعتمدة مع نفس التنسيقات والنسب */}
-                <div className="invoice-container w-full">
-                  <div>
-                    {/* 1. الترويسة الديناميكية */}
-                    <div className="header invoice-header" id={`invoiceHeader-${docIdx}`}>
+                {/* الحاوية الرئيسية المعتمدة مع نفس التنسيقات والنسب بمقاس A5 */}
+                <div className="invoice-container">
+                  <div className="invoice-main-content">
+                    {/* 1. الترويسة العلوية الثلاثية */}
+                    <div className="company-header" id={`invoiceHeader-${docIdx}`}>
                       <div className="header-right">
                         <h2>{settings.company || 'اسم المنشأة'}</h2>
                         <p>{settings.address || 'المقر الرئيسي'}</p>
@@ -366,70 +368,70 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                             className="logo-img"
                             src={settings.logo}
                             alt="الشعار"
+                            onError={(e) => ((e.target as HTMLElement).style.display = 'none')}
                           />
                         ) : null}
                       </div>
 
                       <div className="header-left">
-                        <ul className="phones-list">
-                          {phoneList.length > 0 ? (
-                            phoneList.map((ph, idx) => (
-                              <li key={idx}>{ph}</li>
-                            ))
-                          ) : settings.phone ? (
-                            <li>{settings.phone}</li>
-                          ) : null}
-                        </ul>
+                        <div><strong>هاتف 1:</strong> {phoneList[0] || settings.phone || '01000000000'}</div>
+                        {phoneList[1] ? (
+                          <div><strong>هاتف 2:</strong> {phoneList[1]}</div>
+                        ) : null}
                       </div>
                     </div>
 
                     {/* 2. صندوق البيانات المعتمد */}
-                    <div className="info-box">
-                      <div className="info-item" style={{ textAlign: 'right' }}>
-                        <p>
-                          <strong>{doc.partyLabel || 'الطرف المعني:'} </strong>
-                          <span>{doc.partyName || '—'}</span>
-                        </p>
-                        {doc.partySubId ? (
-                          <p>
-                            <strong>الرقم / الهاتف: </strong>
-                            <span>{doc.partySubId}</span>
-                          </p>
-                        ) : null}
-                      </div>
-
-                      <div className="info-item" style={{ textAlign: 'center' }}>
-                        <p>
-                          <strong>{doc.title}</strong>
-                          {doc.serialNo ? (
+                    <div className="invoice-info-box">
+                      <div className="info-grid">
+                        <div className="info-col-right">
+                          {doc.partyCode ? (
                             <>
-                              {' '} - <strong style={{ fontSize: '1rem' }}>{doc.serialNo}</strong>
+                              <strong>الكود:</strong> <span>{doc.partyCode}</span><br />
                             </>
                           ) : null}
-                        </p>
-                        {doc.badge ? (
-                          <p>
-                            <strong>الحالة / الطريقة: </strong>
-                            <span>{doc.badge}</span>
-                          </p>
-                        ) : null}
-                      </div>
+                          <strong>{doc.partyLabel || 'الطرف المعني'}:</strong> <span>{doc.partyName || 'طرف نقدي عام'}</span><br />
+                          {doc.partySubId ? (
+                            <>
+                              <strong>الهاتف / المعرف:</strong> <span>{doc.partySubId}</span>
+                            </>
+                          ) : null}
+                        </div>
 
-                      <div className="info-item" style={{ textAlign: 'left' }}>
-                        <p>
-                          <strong>التاريخ: </strong>
-                          <span>{doc.date || new Date().toISOString().slice(0, 10)}</span>
-                        </p>
-                        <p>
-                          <strong>الوقت: </strong>
-                          <span>{doc.time || new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</span>
-                        </p>
+                        <div className="info-col-center">
+                          <strong>{doc.typeTitle || doc.title}</strong><br />
+                          {doc.serialNo ? (
+                            <span style={{ fontSize: '13px', fontWeight: 800 }}>رقم: <span>{doc.serialNo}</span></span>
+                          ) : null}
+                          {doc.badge ? (
+                            <div style={{ marginTop: '2px' }}>
+                              <span className="payment-status-badge">{doc.badge}</span>
+                            </div>
+                          ) : null}
+                        </div>
+
+                        <div className="info-col-left">
+                          <strong>التاريخ:</strong> <span>{doc.date || new Date().toISOString().slice(0, 10)}</span><br />
+                          {doc.time ? (
+                            <span className="print-hide-time"><strong>الوقت:</strong> <span>{doc.time}</span></span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
 
-                    {/* 3. جدول الأصناف / الحركات الأصلي المعتمد */}
+                    {/* 3. مستطيل البيان (يختفي تماماً إذا ترك فارغاً) */}
+                    {doc.statement ? (
+                      <div className="invoice-statement-box">
+                        <strong>البيان: </strong>
+                        <span>{doc.statement}</span>
+                      </div>
+                    ) : (
+                      <div className="invoice-statement-box"></div>
+                    )}
+
+                    {/* 4. جدول الأصناف والبيانات (أفقي متناسق بدون أي تمرير) */}
                     <div className="table-wrapper">
-                      <table className="items-table invoice-table">
+                      <table>
                         <thead>
                           <tr>
                             {doc.tableHeaders.map((th, thIdx) => (
@@ -452,7 +454,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                 <td
                                   key={cIdx}
                                   style={{
-                                    fontWeight: tr.isBold || cIdx === 0 ? 'bold' : 'normal',
+                                    fontWeight: tr.isBold || cIdx === 0 ? 700 : 600,
                                     textAlign: doc.tableHeaders[cIdx]?.align || 'center',
                                     whiteSpace: cIdx > 0 && typeof col === 'string' && /[\d]+/.test(col) ? 'nowrap' : 'normal',
                                     wordBreak: 'break-word'
@@ -467,38 +469,43 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                       </table>
                     </div>
 
-                    {/* 4. ملخص الحسابات السفلي الأصلي */}
+                    {/* 5. قسم الإجماليات وتفاصيل الدفع */}
                     {doc.summaryLines && doc.summaryLines.length > 0 && (
-                      <div className="bottom-section">
-                        <div className="summary-vertical-list">
-                          {doc.summaryLines.map((sm, smIdx) => (
-                            <div
-                              key={smIdx}
-                              className={`summary-line ${sm.isTotal ? 'total-line' : ''}`}
-                            >
-                              <span>{sm.label}:</span>
-                              <span>{sm.value}</span>
-                            </div>
-                          ))}
-                        </div>
+                      <div className="totals-section">
+                        {doc.summaryLines.map((sm, smIdx) => (
+                          <div
+                            key={smIdx}
+                            className="total-row"
+                            style={{
+                              fontWeight: sm.isTotal ? 900 : 700,
+                              fontSize: sm.isTotal ? '12px' : '11px',
+                              borderTop: sm.isTotal ? '1.5px dashed #000' : 'none',
+                              paddingTop: sm.isTotal ? '4px' : '2px',
+                              marginTop: sm.isTotal ? '3px' : '0'
+                            }}
+                          >
+                            <span>{sm.label}:</span>
+                            <span>{sm.value}</span>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
 
-                  {/* 5. تذييل الفاتورة والملاحظات */}
-                  <div className="invoice-footer-note">
-                    <div>
-                      {doc.footerNotes || settings.notes || 'شكراً لتعاملكم معنا'}
-                    </div>
-                    <div>
-                      {doc.createdBy ? `المسؤول: ${doc.createdBy}` : ''}
-                    </div>
+                  {/* 6. التزييل الداخلي */}
+                  <div className="invoice-bottom-notes">
+                    <p>{doc.footerNotes || settings.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً للشروط والأحكام'}</p>
+                    {doc.createdBy ? (
+                      <p style={{ fontSize: '9px', fontWeight: 600, marginTop: '2px', color: '#444' }}>
+                        المسؤول: {doc.createdBy}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
 
-                {/* حقوق الملكية الفكرية في شاشة المعاينة */}
-                <div className="copyright-outside">
-                  حقوق الملكيه الفكرية محفوظة ل مطور Mohamed Nazih • 01029190615
+                {/* 7. حقوق الملكية الفكرية المعتمدة للمطور */}
+                <div className="copyright-footer">
+                  حقوق الملكية الفكرية محفوظة لمطور النظام Mohamed Nazih ت01029190615
                 </div>
               </div>
             ))}

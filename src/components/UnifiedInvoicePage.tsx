@@ -1436,7 +1436,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               />
             </div>
 
-            <div className="flex flex-col gap-0.5 relative col-span-1 sm:col-span-2">
+            <div className="flex flex-col gap-0.5 relative col-span-2 sm:col-span-2">
               <div className="flex items-center justify-between">
                 <label className="font-bold text-slate-600 text-[8px]">اسم {theme.partyLabel} / الشركة (بحث)</label>
                 {custSearchInput.trim().length > 0 && custSearchInput.trim() !== 'نقدي' && (
@@ -1484,18 +1484,18 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               {/* Backdrop to close dropdown on click outside */}
               {showCustDropdown && (
                 <div
-                  className="fixed inset-0 z-[90] bg-black/10"
+                  className="fixed inset-0 z-[95] bg-black/40 backdrop-blur-[1px]"
                   onClick={() => setShowCustDropdown(false)}
                 />
               )}
 
-              {/* Wide & Tall Autocomplete Dropdown (طويل وعريض) */}
+              {/* Wide & Tall Dropdown - Responsive: Centered floating sheet on mobile, anchored on desktop */}
               {showCustDropdown && (
-                <div className="absolute top-full right-0 w-[92vw] sm:w-[500px] md:w-[620px] max-w-[640px] bg-white border-2 border-emerald-600 rounded-xl max-h-[380px] overflow-hidden z-[100] shadow-2xl mt-1 flex flex-col">
+                <div className="fixed inset-x-2.5 top-8 bottom-8 sm:absolute sm:inset-auto sm:top-full sm:right-0 sm:w-[580px] md:w-[660px] sm:max-h-[460px] bg-white border-2 border-emerald-600 rounded-xl sm:rounded-2xl overflow-hidden z-[100] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
                   {/* Dropdown Header */}
-                  <div className="bg-gradient-to-r from-slate-800 to-slate-900 text-white p-2 flex items-center justify-between text-[11px] font-bold">
+                  <div className="bg-gradient-to-r from-slate-800 to-slate-900 text-white p-2.5 flex items-center justify-between text-xs font-bold shrink-0">
                     <span className="flex items-center gap-1.5">
-                      <Building2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <Building2 className="w-4 h-4 text-emerald-400" />
                       <span>دليل {theme.partyLabel === 'العميل' ? 'الشركات والعملاء' : 'الشركات والموردين'} ({partiesList.length})</span>
                     </span>
                     <button
@@ -1504,12 +1504,44 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       className="p-1 hover:bg-white/20 rounded cursor-pointer transition-colors"
                       title="إغلاق القائمة"
                     >
-                      <X className="w-3.5 h-3.5" />
+                      <X className="w-4 h-4" />
                     </button>
                   </div>
 
-                  {/* Cash Option Button (Quick Select) */}
-                  <div className="p-1.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2">
+                  {/* 1. Dynamic Live Search Bar (Inside the Modal as requested) */}
+                  <div className="p-2 sm:p-2.5 bg-slate-100 border-b border-slate-200 shrink-0">
+                    <div className="relative flex items-center">
+                      <Search className="w-4 h-4 text-emerald-600 absolute right-3 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={
+                          custSearchInput === 'نقدي' || custSearchInput === 'عميل نقدي' || custSearchInput === 'مورد نقدي'
+                            ? ''
+                            : custSearchInput
+                        }
+                        onChange={e => setCustSearchInput(e.target.value)}
+                        placeholder={`ابحث باسم ${theme.partyLabel}، الشركة، الكود، أو الهاتف...`}
+                        className="w-full pl-8 pr-9 py-2 bg-white border-2 border-emerald-500 rounded-lg text-xs font-bold text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-600 shadow-2xs"
+                        autoFocus
+                      />
+                      {custSearchInput &&
+                        custSearchInput !== 'نقدي' &&
+                        custSearchInput !== 'عميل نقدي' &&
+                        custSearchInput !== 'مورد نقدي' && (
+                          <button
+                            type="button"
+                            onClick={() => setCustSearchInput('')}
+                            className="absolute left-2.5 p-1 text-slate-400 hover:text-rose-600 rounded cursor-pointer"
+                            title="مسح البحث وعرض الكل"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                    </div>
+                  </div>
+
+                  {/* 2. Quick Cash Select Button */}
+                  <div className="p-1.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 shrink-0">
                     <button
                       type="button"
                       onClick={() => {
@@ -1524,45 +1556,62 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         setSelectedParty(cashParty || null);
                         setShowCustDropdown(false);
                       }}
-                      className="flex-1 py-1 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-colors"
+                      className="flex-1 py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-lg text-[10px] font-black flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"
                     >
-                      <CheckCircle2 className="w-3 h-3 text-emerald-200" />
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-200" />
                       <span>اختيار سريع: «نقدي / كاش» (بدون تسجيل حساب آجل)</span>
                     </button>
                   </div>
 
-                  {/* Quick Register New Company Bar if typed name is not empty and not "نقدي" */}
-                  {custSearchInput.trim().length > 0 &&
-                   custSearchInput.trim() !== 'نقدي' &&
-                   custSearchInput.trim() !== 'عميل نقدي' &&
-                   custSearchInput.trim() !== 'مورد نقدي' && (
-                    <div className="p-2 bg-emerald-50 border-b border-emerald-200 flex flex-col sm:flex-row items-center justify-between gap-1.5">
-                      <div className="flex items-center gap-1.5 text-emerald-950 text-[10px] font-bold">
-                        <Plus className="w-4 h-4 text-emerald-700 shrink-0" />
-                        <span>تسجيل <strong>«{custSearchInput.trim()}»</strong> كشركة / جهة جديدة فوراً بالنظام</span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => quickRegisterParty(custSearchInput)}
-                        className="w-full sm:w-auto px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[9px] shadow-xs cursor-pointer flex items-center justify-center gap-1 transition-colors whitespace-nowrap"
-                      >
-                        <Check className="w-3 h-3" />
-                        <span>إثبات وحفظ بالدليل الآن</span>
-                      </button>
-                    </div>
-                  )}
+                  {/* 3. Search status & Quick Register Bar when user types a name */}
+                  {(() => {
+                    const q = custSearchInput.trim().toLowerCase();
+                    const isSearching = q.length > 0 && q !== 'نقدي' && q !== 'عميل نقدي' && q !== 'مورد نقدي';
+                    if (!isSearching) return null;
 
-                  {/* Scrollable Parties List */}
-                  <div className="overflow-y-auto max-h-[260px] divide-y divide-slate-100 p-1">
+                    const matchCount = partiesList.filter(p => (
+                      p.name.toLowerCase().includes(q) ||
+                      (p.code && p.code.toLowerCase().includes(q)) ||
+                      (p.phone && p.phone.includes(q)) ||
+                      (p.company && p.company.toLowerCase().includes(q)) ||
+                      (p.taxNumber && p.taxNumber.includes(q))
+                    )).length;
+
+                    return (
+                      <div className="p-2 bg-emerald-50 border-b border-emerald-200 flex flex-col sm:flex-row items-center justify-between gap-1.5 shrink-0">
+                        <div className="flex items-center gap-1.5 text-emerald-950 text-[10px] font-bold">
+                          <Plus className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                          <span>
+                            {matchCount > 0
+                              ? `تم العثور على ${matchCount} شركة مطابقة — أو تسجيل «${custSearchInput.trim()}» كشركة جديدة:`
+                              : `لم يتم العثور على «${custSearchInput.trim()}» — يمكنك تسجيلها الآن:`}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => quickRegisterParty(custSearchInput)}
+                          className="w-full sm:w-auto px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-black text-[9.5px] shadow-xs cursor-pointer flex items-center justify-center gap-1 transition-all whitespace-nowrap"
+                        >
+                          <Check className="w-3 h-3" />
+                          <span>+ حفظ وتسجيل الشركة بالدليل فوراً</span>
+                        </button>
+                      </div>
+                    );
+                  })()}
+
+                  {/* 4. Scrollable Dynamic Results List */}
+                  <div className="flex-1 overflow-y-auto divide-y divide-slate-100 p-1 min-h-[140px] max-h-[50vh] sm:max-h-[290px]">
                     {partiesList
                       .filter(p => {
                         const q = custSearchInput.trim().toLowerCase();
-                        if (!q || q === 'نقدي') return true;
+                        if (!q || q === 'نقدي' || q === 'عميل نقدي' || q === 'مورد نقدي') return true;
                         return (
                           p.name.toLowerCase().includes(q) ||
                           (p.code && p.code.toLowerCase().includes(q)) ||
                           (p.phone && p.phone.includes(q)) ||
-                          (p.company && p.company.toLowerCase().includes(q))
+                          (p.company && p.company.toLowerCase().includes(q)) ||
+                          (p.address && p.address.toLowerCase().includes(q)) ||
+                          (p.taxNumber && p.taxNumber.includes(q))
                         );
                       })
                       .map(p => {
@@ -1573,32 +1622,32 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           <div
                             key={p.id}
                             onClick={() => selectParty(p)}
-                            className="p-2 hover:bg-blue-50/80 cursor-pointer flex items-center justify-between transition-colors rounded-md group"
+                            className="p-2 sm:p-2.5 hover:bg-blue-50/80 cursor-pointer flex items-center justify-between transition-colors rounded-lg group"
                           >
                             <div className="flex flex-col gap-0.5">
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-bold text-slate-900 text-[11px] group-hover:text-blue-700">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-black text-slate-900 text-xs group-hover:text-blue-700">
                                   {p.name}
                                 </span>
                                 {p.code && (
-                                  <span className="bg-slate-100 group-hover:bg-blue-100 text-slate-700 group-hover:text-blue-800 text-[8.5px] px-1.5 py-0.2 rounded font-mono font-bold">
+                                  <span className="bg-slate-100 group-hover:bg-blue-100 text-slate-700 group-hover:text-blue-800 text-[9px] px-1.5 py-0.2 rounded font-mono font-bold">
                                     [{p.code}]
                                   </span>
                                 )}
                                 {p.company && p.company !== p.name && (
-                                  <span className="text-[9px] text-slate-500 bg-slate-100 px-1 rounded">
+                                  <span className="text-[9px] text-slate-500 bg-slate-100 px-1 rounded font-medium">
                                     {p.company}
                                   </span>
                                 )}
                               </div>
-                              <div className="flex items-center gap-3 text-[9px] text-slate-500">
+                              <div className="flex items-center gap-3 text-[9.5px] text-slate-500">
                                 {p.phone && (
                                   <span className="font-mono flex items-center gap-0.5">
                                     📞 {p.phone}
                                   </span>
                                 )}
                                 {p.address && (
-                                  <span className="truncate max-w-[160px]">
+                                  <span className="truncate max-w-[200px]">
                                     📍 {p.address}
                                   </span>
                                 )}
@@ -1606,7 +1655,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                             </div>
                             <div className="text-left shrink-0">
                               <span
-                                className={`text-[9px] font-bold px-1.5 py-0.5 rounded font-mono ${
+                                className={`text-[9.5px] font-bold px-2 py-0.5 rounded font-mono ${
                                   bal > 0
                                     ? 'bg-rose-50 text-rose-700 border border-rose-200'
                                     : bal < 0
@@ -1614,7 +1663,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                                     : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                                 }`}
                               >
-                                {bal !== 0 ? `الرصيد: ${bal.toLocaleString()} ${db.settings.currency || 'ر.س'}` : 'الحساب خالص'}
+                                {bal !== 0 ? `الرصيد: ${bal.toLocaleString()} ${db.settings.currency || 'ج.م'}` : 'الحساب خالص'}
                               </span>
                             </div>
                           </div>
@@ -1623,23 +1672,26 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                     {partiesList.filter(p => {
                       const q = custSearchInput.trim().toLowerCase();
-                      if (!q || q === 'نقدي') return true;
+                      if (!q || q === 'نقدي' || q === 'عميل نقدي' || q === 'مورد نقدي') return true;
                       return (
                         p.name.toLowerCase().includes(q) ||
                         (p.code && p.code.toLowerCase().includes(q)) ||
                         (p.phone && p.phone.includes(q)) ||
-                        (p.company && p.company.toLowerCase().includes(q))
+                        (p.company && p.company.toLowerCase().includes(q)) ||
+                        (p.address && p.address.toLowerCase().includes(q)) ||
+                        (p.taxNumber && p.taxNumber.includes(q))
                       );
                     }).length === 0 && (
-                      <div className="p-4 text-center text-slate-500 text-[10px] flex flex-col items-center gap-2">
-                        <span>لا توجد شركة أو عميل مسجل بهذا الاسم: «{custSearchInput}»</span>
+                      <div className="p-6 text-center text-slate-500 text-xs flex flex-col items-center gap-3">
+                        <Building2 className="w-8 h-8 text-slate-300" />
+                        <span>لا توجد شركة أو مورد مسجل بهذا الاسم: «{custSearchInput}»</span>
                         <button
                           type="button"
                           onClick={() => quickRegisterParty(custSearchInput)}
-                          className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[9px] shadow-xs cursor-pointer flex items-center gap-1"
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white rounded-lg font-black text-xs shadow-md cursor-pointer flex items-center gap-1.5 transition-all"
                         >
-                          <Plus className="w-3 h-3" />
-                          <span>إضافة «{custSearchInput}» كشركة جديدة الآن</span>
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>إضافة «{custSearchInput}» كشركة جديدة وحفظها فوراً</span>
                         </button>
                       </div>
                     )}
@@ -1663,26 +1715,32 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               />
               {showPhoneDropdown && (
                 <>
-                  <div className="fixed inset-0 z-[90] bg-black/10" onClick={() => setShowPhoneDropdown(false)} />
-                  <div className="absolute top-full right-0 w-[80vw] sm:w-[380px] max-w-[400px] bg-white border border-blue-600 rounded-lg max-h-48 overflow-y-auto z-[100] shadow-xl mt-0.5 divide-y divide-slate-100 p-1">
-                    {partiesList
-                      .filter(p => p.phone && p.phone.includes(custPhone.trim()))
-                      .map(p => (
-                        <div
-                          key={p.id}
-                          onClick={() => selectParty(p)}
-                          className="p-1.5 text-[9px] hover:bg-blue-50 cursor-pointer flex items-center justify-between rounded"
-                        >
-                          <span className="font-bold text-slate-900">{p.name} {p.code ? `[${p.code}]` : ''}</span>
-                          <span className="text-[8.5px] font-mono text-blue-700 font-bold">{p.phone}</span>
-                        </div>
-                      ))}
+                  <div className="fixed inset-0 z-[95] bg-black/40" onClick={() => setShowPhoneDropdown(false)} />
+                  <div className="fixed inset-x-4 top-24 max-h-[50vh] sm:absolute sm:inset-auto sm:top-full sm:right-0 sm:w-[380px] sm:max-h-48 bg-white border border-blue-600 rounded-xl overflow-hidden z-[100] shadow-2xl divide-y divide-slate-100 p-1 flex flex-col">
+                    <div className="p-1.5 bg-slate-800 text-white font-bold text-[9px] flex items-center justify-between">
+                      <span>البحث برقم الهاتف</span>
+                      <button type="button" onClick={() => setShowPhoneDropdown(false)}><X className="w-3 h-3" /></button>
+                    </div>
+                    <div className="overflow-y-auto max-h-[40vh] sm:max-h-40 divide-y divide-slate-100">
+                      {partiesList
+                        .filter(p => p.phone && p.phone.includes(custPhone.trim()))
+                        .map(p => (
+                          <div
+                            key={p.id}
+                            onClick={() => selectParty(p)}
+                            className="p-1.5 text-[9px] hover:bg-blue-50 cursor-pointer flex items-center justify-between rounded"
+                          >
+                            <span className="font-bold text-slate-900">{p.name} {p.code ? `[${p.code}]` : ''}</span>
+                            <span className="text-[8.5px] font-mono text-blue-700 font-bold">{p.phone}</span>
+                          </div>
+                        ))}
+                    </div>
                   </div>
                 </>
               )}
             </div>
 
-            <div className="flex flex-col gap-0.5 col-span-3 sm:col-span-4">
+            <div className="flex flex-col gap-0.5 col-span-2 sm:col-span-4">
               <label className="font-bold text-slate-600 text-[8px]">البيان / جهة العمل</label>
               <input
                 type="text"
@@ -1960,8 +2018,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
 
           {/* Invoice Items Table */}
-          <div className="flex-1 border border-slate-300 rounded bg-white overflow-y-auto max-h-[360px] min-h-[160px]">
-            <table className="w-full text-center text-[8.5px] border-collapse">
+          <div className="flex-1 border border-slate-300 rounded bg-white overflow-x-auto overflow-y-auto max-h-[360px] min-h-[160px]">
+            <table className="w-full min-w-[340px] sm:min-w-full text-center text-[8.5px] border-collapse">
               <thead>
                 <tr className="bg-slate-100 text-slate-800 font-bold border-b border-slate-300 sticky top-0 z-10">
                   <th className="py-1 px-1 border-l border-slate-300 w-6">م</th>

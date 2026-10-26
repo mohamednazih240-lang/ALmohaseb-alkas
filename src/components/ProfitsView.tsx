@@ -257,10 +257,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       title: 'تحليل أرباح فاتورة مبيعات',
       serialNo: row.number,
       date: row.date,
-      time: row.time,
-      partyLabel: 'العميل:',
+      partyLabel: 'العميل',
       partyName: row.customer,
+      partyCode: row.invoice.partyId || '—',
       partySubId: `وسيلة الدفع: ${row.paymentMethod}`,
+      statement: `تقرير تفصيلي لربحية الفاتورة (${row.number}) ومقارنة سعر البيع مع تكلفة الشراء`,
       badge: row.profit >= 0 ? 'ربح محقق' : 'خسارة',
       typeTitle: 'بيان ربحية الفاتورة',
       tableHeaders: [
