@@ -798,11 +798,14 @@ export function calculateCustomerBalance(db: AccountingDB, customerId: string, b
     }
   });
 
-  // Subtract receipts
+  // Subtract receipts (only standalone vouchers, as invoice remaining already deducts invoice.paid)
   db.vouchers.forEach(v => {
     if (v.type === 'receipt' && v.partyId === customerId) {
-      if (!branchId || (v.branchId === branchId || (!v.branchId && branchId === 'br_main'))) {
-        balance -= Number(v.amount);
+      const isInvoiceLinked = Boolean(v.invoiceId || (v.referenceNumber && db.invoices.some(i => i.number === v.referenceNumber)));
+      if (!isInvoiceLinked) {
+        if (!branchId || (v.branchId === branchId || (!v.branchId && branchId === 'br_main'))) {
+          balance -= Number(v.amount);
+        }
       }
     }
   });
@@ -840,11 +843,14 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string, b
     }
   });
 
-  // Subtract payments
+  // Subtract payments (only standalone vouchers, as invoice remaining already deducts invoice.paid)
   db.vouchers.forEach(v => {
     if (v.type === 'payment' && v.partyId === supplierId) {
-      if (!branchId || (v.branchId === branchId || (!v.branchId && branchId === 'br_main'))) {
-        balance -= Number(v.amount);
+      const isInvoiceLinked = Boolean(v.invoiceId || (v.referenceNumber && db.invoices.some(i => i.number === v.referenceNumber)));
+      if (!isInvoiceLinked) {
+        if (!branchId || (v.branchId === branchId || (!v.branchId && branchId === 'br_main'))) {
+          balance -= Number(v.amount);
+        }
       }
     }
   });
@@ -1734,5 +1740,109 @@ export function isDuplicateProduct(
 
   return { isDuplicate: false };
 }
+
+/**
+ * Normalizes Arabic-Indic numerals (٠-٩) to Western standard numerals (0-9).
+ */
+export function toWesternNumerals(str: any): string {
+  if (str === null || str === undefined) return '';
+  return str.toString().replace(/[٠-٩]/g, (d: string) => "٠١٢٣٤٥٦٧٨٩".indexOf(d).toString());
+}
+
+/**
+ * Parses numeric inputs safely with Arabic-Indic numeral support.
+ */
+export function parseNum(val: any): number {
+  if (!val) return 0;
+  const cleaned = toWesternNumerals(val).replace(/[^0-9.-]/g, '');
+  return parseFloat(cleaned) || 0;
+}
+
+/**
+ * Synchronizes linked Receipt (سند قبض) or Payment (سند صرف) vouchers for an invoice.
+ * Follows ERP cascading relational integrity (Odoo / Pro Accountant 2000 style):
+ * - Sales / Wholesale Invoices with paid amount generate linked Receipt Vouchers
+ * - Purchase Invoices with paid amount generate linked Payment Vouchers
+ * - When an invoice is edited, its linked voucher is automatically updated
+ * - When an invoice is deleted, its linked voucher is purged
+ */
+export function syncInvoiceVouchers(
+  db: AccountingDB,
+  invoice: Invoice,
+  currentUserName: string = 'مدير النظام'
+): AccountingDB {
+  const updated = db;
+  if (!updated.vouchers) updated.vouchers = [];
+
+  const invoiceId = invoice.id;
+  const invoiceNumber = invoice.number;
+
+  // 1. Remove existing linked vouchers for this invoice to prevent duplication
+  updated.vouchers = updated.vouchers.filter(v => {
+    const isLinked = (v as any).invoiceId === invoiceId ||
+                     (v as any).referenceNumber === invoiceNumber ||
+                     (v as any).sourceId === invoiceId ||
+                     (v.description && v.description.includes(invoiceNumber));
+    return !isLinked;
+  });
+
+  const finalPaid = Number(invoice.paid) || 0;
+  if (finalPaid <= 0) {
+    return updated;
+  }
+
+  const isSale = invoice.type === 'sale' || invoice.invoiceKind === 'sale' || invoice.invoiceKind === 'wholesale';
+  const isPurchaseReturn = invoice.invoiceKind === 'purchase_return';
+
+  // Money incoming -> 'receipt': Sales, Wholesale, Purchase Return
+  // Money outgoing -> 'payment': Purchase, Sale Return
+  let voucherType: 'receipt' | 'payment' = 'receipt';
+  if (isSale || isPurchaseReturn) {
+    voucherType = 'receipt';
+  } else {
+    voucherType = 'payment';
+  }
+
+  const paymentLines = (invoice.payments && invoice.payments.length > 0)
+    ? invoice.payments.filter(p => (Number(p.amount) || 0) > 0 && p.method !== 'آجل')
+    : [{ method: invoice.paymentMethod || 'نقدي', amount: finalPaid }];
+
+  paymentLines.forEach(pLine => {
+    const amt = Number(pLine.amount) || 0;
+    if (amt <= 0) return;
+
+    const { number: vNum, nextSeq } = getNextUniqueVoucherNumber(updated, voucherType);
+    const settingKey = voucherType === 'receipt' ? 'nextReceipt' : 'nextPayment';
+    updated.settings[settingKey] = Math.max(updated.settings[settingKey] || 1, nextSeq + 1);
+
+    const desc = voucherType === 'receipt'
+      ? `سند قبض مقابل فاتورة ${isSale ? 'مبيعات' : 'مرتجع'} رقم ${invoice.number} (${invoice.partyName}) عبر ${pLine.method}`
+      : `سند صرف مقابل فاتورة ${!isSale ? 'مشتريات' : 'مرتجع'} رقم ${invoice.number} (${invoice.partyName}) عبر ${pLine.method}`;
+
+    const newVoucher: Voucher = {
+      id: generateId(voucherType === 'receipt' ? 'rec' : 'pay'),
+      number: vNum,
+      type: voucherType,
+      date: invoice.date,
+      partyId: invoice.partyId,
+      partyName: invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام'),
+      amount: amt,
+      paymentMethod: pLine.method,
+      description: desc,
+      referenceNumber: invoice.number,
+      invoiceId: invoice.id,
+      branchId: invoice.branchId || 'br_main',
+      branchName: invoice.branchName || 'الفرع الرئيسي',
+      journalEntryId: invoice.journalEntryId,
+      createdAt: invoice.createdAt || new Date().toISOString(),
+      createdBy: invoice.createdBy || currentUserName,
+    };
+
+    updated.vouchers.unshift(newVoucher);
+  });
+
+  return updated;
+}
+
 
 

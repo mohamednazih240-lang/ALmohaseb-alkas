@@ -56,7 +56,10 @@ import {
   isDuplicateInvoiceNumber,
   getNextUniqueInvoiceNumber,
   isDuplicateParty,
-  getNextUniquePartyCode
+  getNextUniquePartyCode,
+  toWesternNumerals,
+  parseNum,
+  syncInvoiceVouchers
 } from '../services/accountingStorage';
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
@@ -301,6 +304,28 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
   const itemQtyInputRef = useRef<HTMLInputElement>(null);
 
+  // Rapid Item Modal States (merged from user index.html code with bidirectional calculation & Enter navigation)
+  const [showRapidItemModal, setShowRapidItemModal] = useState<boolean>(false);
+  const [rapidEditingIndex, setRapidEditingIndex] = useState<number | null>(null);
+  const [rapidItemName, setRapidItemName] = useState<string>('');
+  const [rapidItemDesc, setRapidItemDesc] = useState<string>('');
+  const [rapidItemQty, setRapidItemQty] = useState<string>('1');
+  const [rapidItemPrice, setRapidItemPrice] = useState<string>('');
+  const [rapidItemDiscount, setRapidItemDiscount] = useState<string>('');
+  const [rapidItemDiscountType, setRapidItemDiscountType] = useState<'fixed' | 'percent'>('fixed');
+  const [rapidItemTax, setRapidItemTax] = useState<string>('');
+  const [rapidItemTaxType, setRapidItemTaxType] = useState<'fixed' | 'percent'>('fixed');
+  const [rapidItemTotal, setRapidItemTotal] = useState<string>('');
+
+  // Enter-key navigation field refs
+  const rapidNameRef = useRef<HTMLInputElement>(null);
+  const rapidDescRef = useRef<HTMLInputElement>(null);
+  const rapidQtyRef = useRef<HTMLInputElement>(null);
+  const rapidPriceRef = useRef<HTMLInputElement>(null);
+  const rapidDiscRef = useRef<HTMLInputElement>(null);
+  const rapidTaxRef = useRef<HTMLInputElement>(null);
+  const rapidTotalRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     if (showItemCardModal) {
       setTimeout(() => {
@@ -397,16 +422,238 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     [db.products]
   );
 
+  // Synchronize customer/supplier code, name, and phone with Western digit conversion
+  const syncCustomerInput = (type: 'code' | 'name' | 'phone', rawVal: string) => {
+    const val = toWesternNumerals(rawVal);
+    if (type === 'code') setCustCode(val);
+    if (type === 'name') setCustSearchInput(val);
+    if (type === 'phone') setCustPhone(val);
+
+    const match = partiesList.find(
+      p => (p.code && p.code.toLowerCase() === val.toLowerCase().trim()) ||
+           (p.name && p.name.trim().toLowerCase() === val.toLowerCase().trim()) ||
+           (p.phone && p.phone.trim() === val.trim())
+    );
+
+    if (match) {
+      setSelectedParty(match);
+      setCustCode(match.code || '');
+      setCustSearchInput(match.name);
+      setCustPhone(match.phone || '');
+    } else if (type === 'name' && val.trim() !== '' && val.trim() !== 'نقدي' && val.trim() !== 'عميل نقدي' && val.trim() !== 'مورد نقدي') {
+      setSelectedParty(null);
+    }
+  };
+
   // Sync Party by code
   const syncPartyByCode = (codeValue: string) => {
-    setCustCode(codeValue);
-    const found = partiesList.find(p => p.code === codeValue.trim());
-    if (found) {
-      setSelectedParty(found);
-      setCustSearchInput(found.name);
-      setCustPhone(found.phone || '');
+    syncCustomerInput('code', codeValue);
+  };
+
+  // Rapid Item Modal bidirectional calculations (forward: qty/price/disc/tax -> total | backward: total -> unit price)
+  const calculateRapidItemTotal = (
+    direction: 'forward' | 'backward',
+    opts?: {
+      overrideQty?: string;
+      overridePrice?: string;
+      overrideDisc?: string;
+      overrideDiscType?: 'fixed' | 'percent';
+      overrideTax?: string;
+      overrideTaxType?: 'fixed' | 'percent';
+      overrideTotal?: string;
+    }
+  ) => {
+    const qty = parseNum(opts?.overrideQty !== undefined ? opts.overrideQty : rapidItemQty);
+    const price = parseNum(opts?.overridePrice !== undefined ? opts.overridePrice : rapidItemPrice);
+    const disc = parseNum(opts?.overrideDisc !== undefined ? opts.overrideDisc : rapidItemDiscount);
+    const discType = opts?.overrideDiscType || rapidItemDiscountType;
+    const tax = parseNum(opts?.overrideTax !== undefined ? opts.overrideTax : rapidItemTax);
+    const taxType = opts?.overrideTaxType || rapidItemTaxType;
+
+    const baseTotal = qty * price;
+    const discVal = discType === 'percent' ? (baseTotal * disc / 100) : disc;
+    const taxVal = taxType === 'percent' ? (baseTotal * tax / 100) : tax;
+
+    if (direction === 'forward') {
+      const tot = Math.max(0, baseTotal - discVal + taxVal);
+      setRapidItemTotal(tot > 0 ? tot.toFixed(2) : '');
+    } else if (direction === 'backward') {
+      const targetTot = parseNum(opts?.overrideTotal !== undefined ? opts.overrideTotal : rapidItemTotal);
+      if (qty > 0) {
+        let effectiveSubtotal = targetTot + discVal - taxVal;
+        if (discType === 'percent' || taxType === 'percent') {
+          const factor = 1 - (discType === 'percent' ? disc / 100 : 0) + (taxType === 'percent' ? tax / 100 : 0);
+          effectiveSubtotal = factor > 0 ? targetTot / factor : targetTot;
+        }
+        const newUnitPrice = effectiveSubtotal / qty;
+        setRapidItemPrice(Math.max(0, newUnitPrice).toFixed(2));
+      }
+    }
+  };
+
+  const openRapidItemModal = () => {
+    setRapidEditingIndex(null);
+    setRapidItemName('');
+    setRapidItemDesc('');
+    setRapidItemQty('1');
+    setRapidItemPrice('');
+    setRapidItemDiscount('');
+    setRapidItemDiscountType('fixed');
+    setRapidItemTax('');
+    setRapidItemTaxType('fixed');
+    setRapidItemTotal('');
+    setShowRapidItemModal(true);
+    setTimeout(() => rapidNameRef.current?.focus(), 100);
+  };
+
+  const openRapidItemModalForEdit = (idx: number) => {
+    const it = invoiceItems[idx];
+    if (!it) return;
+    setRapidEditingIndex(idx);
+    setRapidItemName(it.productName);
+    setRapidItemDesc(it.spec || '');
+    setRapidItemQty(String(it.qty));
+    setRapidItemPrice(String(it.unitPrice));
+    setRapidItemDiscount(it.discount ? String(it.discount) : '');
+    setRapidItemDiscountType('fixed');
+    setRapidItemTax(it.taxRate ? String(it.taxRate) : '');
+    setRapidItemTaxType('fixed');
+    setRapidItemTotal(it.total ? String(it.total.toFixed(2)) : '');
+    setShowRapidItemModal(true);
+    setTimeout(() => rapidNameRef.current?.focus(), 100);
+  };
+
+  const onRapidItemNameChange = (val: string) => {
+    setRapidItemName(val);
+    const matched = db.products.find(
+      p => p.name.trim().toLowerCase() === val.trim().toLowerCase() ||
+           p.code.toLowerCase() === val.trim().toLowerCase() ||
+           (p.barcode && p.barcode === val.trim())
+    );
+    if (matched) {
+      const bp = getProductForBranch(matched, invoiceBranchId);
+      let pPrice = bp.sellPrice;
+      if (mode === 'purchase' || mode === 'purchase_return') pPrice = bp.buyPrice;
+      else if (mode === 'wholesale' || priceType === 'wholesale') pPrice = bp.wholesalePrice;
+      else if (priceType === 'buy') pPrice = bp.buyPrice;
+
+      setRapidItemPrice(pPrice.toString());
+      const qtyNum = parseNum(rapidItemQty) || 1;
+      const baseTotal = qtyNum * pPrice;
+      const rawDisc = parseNum(rapidItemDiscount);
+      const discVal = rapidItemDiscountType === 'percent' ? (baseTotal * rawDisc / 100) : rawDisc;
+      const rawTax = parseNum(rapidItemTax);
+      const taxVal = rapidItemTaxType === 'percent' ? (baseTotal * rawTax / 100) : rawTax;
+      const tot = Math.max(0, baseTotal - discVal + taxVal);
+      setRapidItemTotal(tot > 0 ? tot.toFixed(2) : '');
+    }
+  };
+
+  const saveRapidItemToInvoice = () => {
+    const name = rapidItemName.trim();
+    const qty = parseNum(rapidItemQty);
+    const price = parseNum(rapidItemPrice);
+    const total = parseNum(rapidItemTotal);
+    const discount = parseNum(rapidItemDiscount);
+    const tax = parseNum(rapidItemTax);
+
+    if (!name) {
+      alert('يرجى إدخال اسم الصنف');
+      rapidNameRef.current?.focus();
+      return;
+    }
+    if (qty <= 0) {
+      alert('يرجى إدخال العدد الصحيح (أكبر من صفر)');
+      rapidQtyRef.current?.focus();
+      return;
+    }
+
+    let matched: Product | undefined = db.products.find(
+      p => p.name.trim().toLowerCase() === name.toLowerCase() ||
+           p.code.toLowerCase() === name.toLowerCase()
+    );
+
+    if (!matched) {
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const newProdCode = `P-${String(1000 + updated.products.length + 1)}`;
+      const newProdId = generateId('prod');
+      const newProduct: Product = {
+        id: newProdId,
+        code: newProdCode,
+        barcode: '',
+        name: name,
+        category: 'عامة',
+        unit: 'قطعة',
+        buyPrice: mode === 'purchase' ? price : (price * 0.8),
+        sellPrice: mode === 'purchase' ? (price * 1.25) : price,
+        wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+        minStock: 5,
+        currentQty: 0,
+        avgCost: mode === 'purchase' ? price : (price * 0.8),
+        branchesData: {
+          [invoiceBranchId]: {
+            currentQty: 0,
+            buyPrice: mode === 'purchase' ? price : (price * 0.8),
+            sellPrice: mode === 'purchase' ? (price * 1.25) : price,
+            wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+            minStock: 5,
+            avgCost: mode === 'purchase' ? price : (price * 0.8)
+          }
+        }
+      };
+      updated.products.push(newProduct);
+      matched = newProduct;
+      onUpdateDb(updated);
+    }
+
+    const calculatedTotal = total > 0 ? total : Math.max(0, (qty * price) - discount + tax);
+
+    const itemObj: InvoiceItem = {
+      productId: matched.id,
+      productCode: matched.code,
+      productName: name,
+      unit: matched.unit || 'قطعة',
+      spec: rapidItemDesc.trim() || undefined,
+      qty,
+      unitPrice: price,
+      costPrice: matched.buyPrice || price,
+      discount,
+      taxRate: tax,
+      total: calculatedTotal
+    };
+
+    if (rapidEditingIndex !== null && rapidEditingIndex >= 0) {
+      setInvoiceItems(prev => {
+        const copy = [...prev];
+        copy[rapidEditingIndex] = itemObj;
+        return copy;
+      });
+      setShowRapidItemModal(false);
+      setRapidEditingIndex(null);
+      showToast(`✓ تم تحديث بيانات الصنف "${name}"`);
     } else {
-      setSelectedParty(null);
+      setInvoiceItems(prev => [...prev, itemObj]);
+      // Reset for continuous rapid entry
+      setRapidItemName('');
+      setRapidItemDesc('');
+      setRapidItemQty('1');
+      setRapidItemPrice('');
+      setRapidItemDiscount('');
+      setRapidItemTax('');
+      setRapidItemTotal('');
+      rapidNameRef.current?.focus();
+      showToast(`✓ تمت إضافة الصنف "${name}" للفاتورة`);
+    }
+  };
+
+  const handleRapidKeyDown = (e: React.KeyboardEvent, nextRef: React.RefObject<HTMLInputElement | null> | 'save') => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (nextRef === 'save') {
+        saveRapidItemToInvoice();
+      } else if (nextRef && nextRef.current) {
+        nextRef.current.focus();
+      }
     }
   };
 
@@ -965,6 +1212,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       updated.treasury = updated.treasury.filter(tr => tr.sourceId !== editingInvoice.id);
       updated.journals = updated.journals.filter(j => j.sourceId !== editingInvoice.id);
       updated.invoices = updated.invoices.filter(i => i.id !== editingInvoice.id);
+      // Clean previous linked vouchers to guarantee cascading integrity
+      updated.vouchers = (updated.vouchers || []).filter(v => (v as any).invoiceId !== editingInvoice.id && (v as any).referenceNumber !== editingInvoice.number && !v.description?.includes(editingInvoice.number));
     }
 
     const invId = editingInvoice ? editingInvoice.id : generateId('inv');
@@ -1215,6 +1464,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     // 5. Save to invoices array
     updated.invoices.unshift(savedInvoice);
 
+    // 5.1 Automatically generate or update linked Receipt / Payment Voucher (Odoo / Pro Accountant 2000 style)
+    syncInvoiceVouchers(updated, savedInvoice, currentUserName);
+
     // If this is a return invoice, also populate db.returns items for individual return tracking
     if (mode === 'sale_return' || mode === 'purchase_return') {
       if (!updated.returns) updated.returns = [];
@@ -1430,15 +1682,23 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               <input
                 type="text"
                 value={custCode}
+                list="custCodeList"
                 placeholder="الكود..."
-                onChange={e => syncPartyByCode(e.target.value)}
+                onChange={e => syncCustomerInput('code', e.target.value)}
                 className="px-1.5 py-0.5 border border-slate-300 rounded text-[9px] bg-white font-bold h-[22px]"
               />
+              <datalist id="custCodeList">
+                {partiesList.map(p => (
+                  <option key={p.id} value={p.code || p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </datalist>
             </div>
 
             <div className="flex flex-col gap-0.5 relative col-span-2 sm:col-span-2">
               <div className="flex items-center justify-between">
-                <label className="font-bold text-slate-600 text-[8px]">اسم {theme.partyLabel} / الشركة (بحث)</label>
+                <label className="font-bold text-slate-600 text-[8px]">اسم {theme.partyLabel} / الشركة (بحث وتزامن)</label>
                 {custSearchInput.trim().length > 0 && custSearchInput.trim() !== 'نقدي' && (
                   <button
                     type="button"
@@ -1455,14 +1715,22 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 <input
                   type="text"
                   value={custSearchInput}
+                  list="custNameList"
                   placeholder="ابحث بالاسم أو احذف نقدي لكتابة اسم الشركة..."
                   onFocus={() => setShowCustDropdown(true)}
                   onChange={e => {
-                    setCustSearchInput(e.target.value);
+                    syncCustomerInput('name', e.target.value);
                     setShowCustDropdown(true);
                   }}
                   className="w-full pl-6 pr-1.5 py-0.5 border border-slate-300 rounded text-[9px] bg-white font-bold h-[22px] focus:ring-1 focus:ring-emerald-500"
                 />
+                <datalist id="custNameList">
+                  {partiesList.map(p => (
+                    <option key={p.id} value={p.name}>
+                      {p.code ? `[${p.code}]` : ''}
+                    </option>
+                  ))}
+                </datalist>
                 {custSearchInput.length > 0 && (
                   <button
                     type="button"
@@ -1705,14 +1973,22 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               <input
                 type="text"
                 value={custPhone}
+                list="custPhoneList"
                 placeholder="ابحث برقم الهاتف..."
                 onFocus={() => setShowPhoneDropdown(true)}
                 onChange={e => {
-                  setCustPhone(e.target.value);
+                  syncCustomerInput('phone', e.target.value);
                   setShowPhoneDropdown(true);
                 }}
                 className="px-1.5 py-0.5 border border-slate-300 rounded text-[9px] bg-white font-mono h-[22px]"
               />
+              <datalist id="custPhoneList">
+                {partiesList.filter(p => p.phone).map(p => (
+                  <option key={p.id} value={p.phone}>
+                    {p.name}
+                  </option>
+                ))}
+              </datalist>
               {showPhoneDropdown && (
                 <>
                   <div className="fixed inset-0 z-[95] bg-black/40" onClick={() => setShowPhoneDropdown(false)} />
@@ -1855,23 +2131,31 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             </div>
           </div>
 
-          {/* Top Actions & Dynamic Product Search Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+          {/* Actions Bar (matching user's HTML interface) */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 no-print">
             <button
               type="button"
-              onClick={() => setShowLookupModal(true)}
-              className="py-1.5 px-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-colors shadow-2xs"
+              onClick={openRapidItemModal}
+              className="py-1.5 px-2 bg-blue-600 hover:bg-blue-700 active:scale-[0.99] text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs cursor-pointer"
             >
-              <Boxes className="w-3.5 h-3.5" />
-              <span>دليل الأصناف الكلي (1001 صنف)</span>
+              <Plus className="w-3.5 h-3.5" />
+              <span>إضافة صنف (Enter)</span>
             </button>
             <button
               type="button"
               onClick={() => setShowOptionsModal(true)}
-              className="py-1.5 px-2 bg-slate-700 hover:bg-slate-800 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-colors shadow-2xs"
+              className="py-1.5 px-2 bg-slate-700 hover:bg-slate-800 active:scale-[0.99] text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all shadow-xs cursor-pointer"
             >
               <Sliders className="w-3.5 h-3.5" />
-              <span>الخصم، الضريبة والدفع</span>
+              <span>الخصم، السداد والإيرادات</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowLookupModal(true)}
+              className="col-span-2 sm:col-span-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-900 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+            >
+              <Boxes className="w-3.5 h-3.5 text-blue-300" />
+              <span>دليل الأصناف الكلي (1001 صنف)</span>
             </button>
           </div>
 
@@ -2040,9 +2324,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   </tr>
                 ) : (
                   invoiceItems.map((item, idx) => (
-                    <tr key={idx} className="hover:bg-slate-50">
+                    <tr
+                      key={idx}
+                      onClick={() => openRapidItemModalForEdit(idx)}
+                      className="hover:bg-blue-50/80 cursor-pointer transition-colors group"
+                      title="اضغط لتعديل بيانات الصنف أو الإجمالي (Enter)"
+                    >
                       <td className="py-1 px-1 border-l border-slate-200 font-mono">{idx + 1}</td>
-                      <td className="py-1 px-1 border-l border-slate-200 text-right font-bold text-slate-900">
+                      <td className="py-1 px-1 border-l border-slate-200 text-right font-bold text-slate-900 group-hover:text-blue-700">
                         {item.productName}
                       </td>
                       <td className="py-1 px-1 border-l border-slate-200 text-right text-slate-500 truncate max-w-[90px]">
@@ -2054,24 +2343,24 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       <td className="py-1 px-1 border-l border-slate-200 font-mono text-slate-800">
                         {item.unitPrice.toFixed(2)}
                       </td>
-                      <td className="py-1 px-1 border-l border-slate-200 font-mono font-bold text-slate-950">
+                      <td className="py-1 px-1 border-l border-slate-200 font-mono font-bold text-blue-700">
                         {item.total.toFixed(2)}
                       </td>
-                      <td className="py-1 px-1 text-center">
+                      <td className="py-1 px-1 text-center" onClick={e => e.stopPropagation()}>
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => openModifyItem(idx)}
-                            className="p-0.5 text-blue-600 hover:text-blue-800"
-                            title="تعديل"
+                            onClick={() => openRapidItemModalForEdit(idx)}
+                            className="p-0.5 text-blue-600 hover:text-blue-800 cursor-pointer"
+                            title="تعديل (Enter)"
                           >
                             <PenSquare className="w-3 h-3" />
                           </button>
                           <button
                             type="button"
                             onClick={() => removeInvoiceItem(idx)}
-                            className="p-0.5 text-rose-600 hover:text-rose-800"
-                            title="حذف"
+                            className="p-0.5 text-rose-600 hover:text-rose-800 cursor-pointer"
+                            title="حذف الصنف"
                           >
                             <Trash2 className="w-3 h-3" />
                           </button>
@@ -3299,6 +3588,222 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               >
                 <Check className="w-4 h-4" />
                 <span>✓ إثبات الصنف بالمخزون وإدراجه بالفاتورة</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Rapid Add / Edit Item Card (merged from user index.html code with bidirectional calculation & Enter progression) */}
+      {showRapidItemModal && (
+        <div className="fixed inset-0 z-[80] bg-black/75 backdrop-blur-[2px] flex items-center justify-center p-3 animate-in fade-in duration-150">
+          <div className="bg-[#151e32] border border-[#273754] text-[#f8fafc] rounded-xl w-full max-w-[440px] shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-3 border-b border-[#273754] bg-[#0b1120]/60">
+              <h3 className="text-xs sm:text-sm font-bold flex items-center gap-2 text-white">
+                <Boxes className="w-4 h-4 text-blue-400" />
+                <span>
+                  {rapidEditingIndex !== null ? 'كارت تعديل بيانات الصنف' : 'كارت إضافة صنف سريع (Enter)'}
+                </span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRapidItemModal(false);
+                  setRapidEditingIndex(null);
+                }}
+                className="text-[#94a3b8] hover:text-white p-1 rounded hover:bg-white/10 transition-colors cursor-pointer text-lg leading-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            {/* Modal Form Content */}
+            <div className="p-3.5 space-y-2.5 overflow-y-auto flex-1 text-xs">
+              {/* Item Name */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between">
+                  <span>اسم الصنف (يبحث بدليل الأصناف أو يثبت صنفاً جديداً) *</span>
+                </label>
+                <input
+                  ref={rapidNameRef}
+                  type="text"
+                  value={rapidItemName}
+                  list="rapidProductsDatalist"
+                  placeholder="أدخل اسم الصنف..."
+                  onChange={e => onRapidItemNameChange(e.target.value)}
+                  onKeyDown={e => handleRapidKeyDown(e, rapidDescRef)}
+                  className="bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs outline-none focus:border-blue-500 font-bold"
+                  autoFocus
+                />
+                <datalist id="rapidProductsDatalist">
+                  {db.products.map(p => (
+                    <option key={p.id} value={p.name}>
+                      {p.code}
+                    </option>
+                  ))}
+                </datalist>
+              </div>
+
+              {/* Item Description / Spec */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-[#94a3b8] font-semibold">
+                  بيان الصنف (عمود منفصل / وصف اختياري)
+                </label>
+                <input
+                  ref={rapidDescRef}
+                  type="text"
+                  value={rapidItemDesc}
+                  placeholder="بيان / مواصفة / وصف الصنف..."
+                  onChange={e => setRapidItemDesc(e.target.value)}
+                  onKeyDown={e => handleRapidKeyDown(e, rapidQtyRef)}
+                  className="bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs outline-none focus:border-blue-500"
+                />
+              </div>
+
+              {/* Qty & Price Grid */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] text-[#94a3b8] font-semibold">
+                    الكمية (العدد) *
+                  </label>
+                  <input
+                    ref={rapidQtyRef}
+                    type="text"
+                    value={rapidItemQty}
+                    placeholder="العدد..."
+                    onChange={e => {
+                      const converted = toWesternNumerals(e.target.value);
+                      setRapidItemQty(converted);
+                      calculateRapidItemTotal('forward', { overrideQty: converted });
+                    }}
+                    onKeyDown={e => handleRapidKeyDown(e, rapidPriceRef)}
+                    className="bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs text-center font-mono font-bold outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] text-[#94a3b8] font-semibold">
+                    السعر (للقطعة) *
+                  </label>
+                  <input
+                    ref={rapidPriceRef}
+                    type="text"
+                    value={rapidItemPrice}
+                    placeholder="السعر..."
+                    onChange={e => {
+                      const converted = toWesternNumerals(e.target.value);
+                      setRapidItemPrice(converted);
+                      calculateRapidItemTotal('forward', { overridePrice: converted });
+                    }}
+                    onKeyDown={e => handleRapidKeyDown(e, rapidDiscRef)}
+                    className="bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs text-center font-mono font-bold outline-none focus:border-blue-500 text-emerald-400"
+                  />
+                </div>
+              </div>
+
+              {/* Discount & Tax Grid */}
+              <div className="grid grid-cols-2 gap-2">
+                {/* Item Discount */}
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] text-[#94a3b8] font-semibold">
+                    خصم الصنف
+                  </label>
+                  <div className="flex gap-1">
+                    <input
+                      ref={rapidDiscRef}
+                      type="text"
+                      value={rapidItemDiscount}
+                      placeholder="الخصم..."
+                      onChange={e => {
+                        const converted = toWesternNumerals(e.target.value);
+                        setRapidItemDiscount(converted);
+                        calculateRapidItemTotal('forward', { overrideDisc: converted });
+                      }}
+                      onKeyDown={e => handleRapidKeyDown(e, rapidTaxRef)}
+                      className="bg-[#1a263d] border border-[#273754] text-white px-2 py-1.5 rounded-md text-xs font-mono flex-1 outline-none focus:border-blue-500"
+                    />
+                    <select
+                      value={rapidItemDiscountType}
+                      onChange={e => {
+                        const t = e.target.value as 'fixed' | 'percent';
+                        setRapidItemDiscountType(t);
+                        calculateRapidItemTotal('forward', { overrideDiscType: t });
+                      }}
+                      className="bg-[#1a263d] border border-[#273754] text-[#94a3b8] px-1 py-1 rounded-md text-[11px] outline-none"
+                    >
+                      <option value="fixed">ج.م</option>
+                      <option value="percent">%</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Item Tax */}
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] text-[#94a3b8] font-semibold">
+                    ضريبة الصنف
+                  </label>
+                  <div className="flex gap-1">
+                    <input
+                      ref={rapidTaxRef}
+                      type="text"
+                      value={rapidItemTax}
+                      placeholder="الضريبة..."
+                      onChange={e => {
+                        const converted = toWesternNumerals(e.target.value);
+                        setRapidItemTax(converted);
+                        calculateRapidItemTotal('forward', { overrideTax: converted });
+                      }}
+                      onKeyDown={e => handleRapidKeyDown(e, rapidTotalRef)}
+                      className="bg-[#1a263d] border border-[#273754] text-white px-2 py-1.5 rounded-md text-xs font-mono flex-1 outline-none focus:border-blue-500"
+                    />
+                    <select
+                      value={rapidItemTaxType}
+                      onChange={e => {
+                        const t = e.target.value as 'fixed' | 'percent';
+                        setRapidItemTaxType(t);
+                        calculateRapidItemTotal('forward', { overrideTaxType: t });
+                      }}
+                      className="bg-[#1a263d] border border-[#273754] text-[#94a3b8] px-1 py-1 rounded-md text-[11px] outline-none"
+                    >
+                      <option value="fixed">ج.م</option>
+                      <option value="percent">%</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Editable Item Total (Backward Calculation) */}
+              <div className="p-2.5 rounded-lg bg-blue-950/40 border border-blue-500/50 flex flex-col gap-1">
+                <label className="text-[10.5px] font-bold text-blue-300 flex items-center justify-between">
+                  <span>إجمالي الصنف (قابل للتعديل ليعدل السعر تلقائياً بدون انحراف)</span>
+                  <span className="text-[9px] text-[#94a3b8] font-normal">عكسي</span>
+                </label>
+                <input
+                  ref={rapidTotalRef}
+                  type="text"
+                  value={rapidItemTotal}
+                  placeholder="إجمالي الصنف..."
+                  onChange={e => {
+                    const converted = toWesternNumerals(e.target.value);
+                    setRapidItemTotal(converted);
+                    calculateRapidItemTotal('backward', { overrideTotal: converted });
+                  }}
+                  onKeyDown={e => handleRapidKeyDown(e, 'save')}
+                  className="bg-[#1a263d] border border-blue-500 text-blue-300 px-3 py-1.5 rounded-md text-sm font-mono font-black outline-none text-center"
+                />
+              </div>
+
+              {/* Action Button */}
+              <button
+                type="button"
+                onClick={saveRapidItemToInvoice}
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 active:scale-[0.99] text-white rounded-lg font-bold text-xs shadow transition-all cursor-pointer flex items-center justify-center gap-1.5 mt-1"
+              >
+                <Check className="w-4 h-4" />
+                <span>
+                  {rapidEditingIndex !== null ? 'حفظ التعديلات (Enter)' : 'إضافة الصنف للفاتورة (Enter)'}
+                </span>
               </button>
             </div>
           </div>

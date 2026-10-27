@@ -255,6 +255,11 @@ export interface Voucher {
   exchangeRate?: number;
   branchId?: string;
   branchName?: string;
+  referenceNumber?: string;
+  invoiceId?: string;
+  createdAt?: string;
+  createdBy?: string;
+  status?: 'معتمد' | 'مسودة' | 'ملغي';
 }
 
 export interface TreasuryEntry {

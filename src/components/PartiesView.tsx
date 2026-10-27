@@ -269,29 +269,53 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
       .filter(i => i.partyId === party.id)
       .forEach(inv => {
         if (isCustomer && inv.type === 'sale') {
-          // Sale adds debt to customer (Debit)
-          const unpaid = inv.total - inv.paid;
-          running += unpaid;
-          rows.push({
-            date: inv.date,
-            desc: `فاتورة بيع رقم ${inv.number}`,
-            type: 'sale',
-            debit: inv.total,
-            credit: inv.paid,
-            balance: running
-          });
+          const hasLinkedVoucher = db.vouchers.some(v => v.partyId === party.id && v.type === 'receipt' && (v.invoiceId === inv.id || v.referenceNumber === inv.number));
+          if (hasLinkedVoucher) {
+            running += inv.total;
+            rows.push({
+              date: inv.date,
+              desc: `فاتورة بيع رقم ${inv.number}`,
+              type: 'sale',
+              debit: inv.total,
+              credit: 0,
+              balance: running
+            });
+          } else {
+            const unpaid = inv.total - inv.paid;
+            running += unpaid;
+            rows.push({
+              date: inv.date,
+              desc: `فاتورة بيع رقم ${inv.number}`,
+              type: 'sale',
+              debit: inv.total,
+              credit: inv.paid,
+              balance: running
+            });
+          }
         } else if (!isCustomer && inv.type === 'purchase') {
-          // Purchase adds debt to us towards supplier (Credit)
-          const unpaid = inv.total - inv.paid;
-          running += unpaid;
-          rows.push({
-            date: inv.date,
-            desc: `فاتورة شراء رقم ${inv.number}`,
-            type: 'purchase',
-            debit: inv.paid,
-            credit: inv.total,
-            balance: running
-          });
+          const hasLinkedVoucher = db.vouchers.some(v => v.partyId === party.id && v.type === 'payment' && (v.invoiceId === inv.id || v.referenceNumber === inv.number));
+          if (hasLinkedVoucher) {
+            running += inv.total;
+            rows.push({
+              date: inv.date,
+              desc: `فاتورة شراء رقم ${inv.number}`,
+              type: 'purchase',
+              debit: 0,
+              credit: inv.total,
+              balance: running
+            });
+          } else {
+            const unpaid = inv.total - inv.paid;
+            running += unpaid;
+            rows.push({
+              date: inv.date,
+              desc: `فاتورة شراء رقم ${inv.number}`,
+              type: 'purchase',
+              debit: inv.paid,
+              credit: inv.total,
+              balance: running
+            });
+          }
         }
       });
 
@@ -303,7 +327,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
           running -= v.amount;
           rows.push({
             date: v.date,
-            desc: `سند قبض نقدي/بنكي رقم ${v.number} - (${v.description || ''})`,
+            desc: v.referenceNumber ? `سند قبض رقم ${v.number} (تحصيل فاتورة ${v.referenceNumber})` : `سند قبض رقم ${v.number} - (${v.description || ''})`,
             type: 'receipt',
             debit: 0,
             credit: v.amount,
@@ -313,7 +337,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
           running -= v.amount;
           rows.push({
             date: v.date,
-            desc: `سند صرف للمورد رقم ${v.number} - (${v.description || ''})`,
+            desc: v.referenceNumber ? `سند صرف رقم ${v.number} (سداد فاتورة ${v.referenceNumber})` : `سند صرف للمورد رقم ${v.number} - (${v.description || ''})`,
             type: 'payment',
             debit: v.amount,
             credit: 0,

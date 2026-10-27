@@ -455,6 +455,13 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                   </span>
                 </div>
 
+                {v.referenceNumber && (
+                  <div className="flex items-center justify-between text-[10.5px] text-blue-800 bg-blue-50/80 p-1.5 rounded-lg border border-blue-200 font-bold">
+                    <span>مرجع الفاتورة المرتبطة:</span>
+                    <span className="font-mono font-black text-blue-900">#{v.referenceNumber}</span>
+                  </div>
+                )}
+
                 {v.description && (
                   <div className="text-[11px] text-slate-500 bg-slate-50 p-1.5 rounded truncate">
                     {v.description}
