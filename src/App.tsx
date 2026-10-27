@@ -6,7 +6,8 @@ import {
   calculateFinancialSummary,
   loadFromIndexedDB,
   isCompanyMawan,
-  sanitizeCompanyDatabase
+  sanitizeCompanyDatabase,
+  syncAllExistingInvoiceVouchers
 } from './services/accountingStorage';
 import {
   AccountingDB,
@@ -468,9 +469,19 @@ export default function App() {
           else if (action === 'new_purchase') navigateToPage('purchases');
           else if (action === 'new_receipt') navigateToPage('receipts');
           else if (action === 'new_payment') navigateToPage('payments');
+          else if (action === 'new_wholesale') navigateToPage('sales');
           else if (action === 'new_product') setProductModalState({ isOpen: true, product: null });
           else if (action === 'new_customer') navigateToPage('customers');
+          else if (action === 'new_supplier') navigateToPage('suppliers');
+          else if (action === 'view_reports') navigateToPage('reports');
           else if (action === 'view_low_stock') navigateToPage('products');
+          else if (action === 'sync_past_vouchers') {
+            const res = syncAllExistingInvoiceVouchers(db);
+            setDb(res.db);
+            saveDatabase(res.db);
+            pushDatabaseToCloud(res.db, true);
+            alert(`تم بنجاح! تم فحص كافة فواتير النظام وتوليد (${res.createdCount}) سند قبض وصرف للفواتير السابقة وربطها بالخزينة والحسابات.`);
+          }
         }}
         activePageTitle={getPageTitle(currentPage)}
       />

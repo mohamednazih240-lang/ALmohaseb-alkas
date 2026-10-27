@@ -1759,7 +1759,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
               {/* Wide & Tall Dropdown - Responsive: Centered floating sheet on mobile, anchored on desktop */}
               {showCustDropdown && (
-                <div className="fixed inset-x-2.5 top-8 bottom-8 sm:absolute sm:inset-auto sm:top-full sm:right-0 sm:w-[580px] md:w-[660px] sm:max-h-[460px] bg-white border-2 border-emerald-600 rounded-xl sm:rounded-2xl overflow-hidden z-[100] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
+                <div className="fixed inset-x-2.5 top-16 bottom-4 sm:absolute sm:inset-auto sm:top-full sm:right-0 sm:w-[580px] md:w-[660px] sm:max-h-[460px] bg-white border-2 border-emerald-600 rounded-xl sm:rounded-2xl overflow-hidden z-[100] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
                   {/* Dropdown Header */}
                   <div className="bg-gradient-to-r from-slate-800 to-slate-900 text-white p-2.5 flex items-center justify-between text-xs font-bold shrink-0">
                     <span className="flex items-center gap-1.5">
@@ -2451,7 +2451,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       {/* MODAL 1: Options Modal (الخصم والضريبة والدفع المتعدد) */}
       {showOptionsModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-2">
+        <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-2">
           <div className="bg-white rounded-lg w-full max-w-[390px] border border-slate-300 shadow-2xl overflow-hidden flex flex-col">
             <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold">
               <span>خصومات، ضرائب، إيرادات وطرق الدفع</span>
@@ -2642,7 +2642,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       {/* MODAL 2: Lookup Modal (دليل الأصناف - إضافة سريعة) */}
       {showLookupModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-2">
+        <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-2">
           <div className="bg-slate-200 rounded-lg w-[96vw] max-w-4xl h-[92vh] border-2 border-slate-500 shadow-2xl flex flex-col overflow-hidden">
             <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold">
               <div className="flex items-center gap-2">
@@ -2842,7 +2842,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       {/* MODAL 3: Add New Item Modal (إضافة صنف جديد للمخزون) */}
       {showEditItemModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-2">
+        <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-2">
           <div className="bg-white rounded-lg w-full max-w-[390px] border border-slate-300 shadow-2xl overflow-hidden flex flex-col">
             <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold">
               <span>إضافة صنف جديد للمخزون</span>

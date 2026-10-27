@@ -447,6 +447,11 @@ export function sanitizeCompanyDatabase(db: AccountingDB, identifier?: string): 
     }
   }
 
+  // Retroactively ensure all previously recorded invoices with payments have their linked vouchers
+  if (db.invoices && db.invoices.length > 0) {
+    db = syncAllExistingInvoiceVouchers(db).db;
+  }
+
   return db;
 }
 
@@ -1605,22 +1610,32 @@ export function isDuplicateInvoiceNumber(db: AccountingDB, number: string, exclu
   );
 }
 
-export function getNextUniqueInvoiceNumber(db: AccountingDB, mode: string): { number: string; nextSeq: number } {
-  const prefix = mode === 'sale' ? 'INV-' :
-                 mode === 'wholesale' ? 'WHL-' :
-                 mode === 'purchase' ? 'PUR-' :
-                 mode === 'sale_return' ? 'RET-S-' :
-                 mode === 'purchase_return' ? 'RET-P-' : 'QUO-';
+export function getNextUniqueInvoiceNumber(db: AccountingDB, _mode?: string): { number: string; nextSeq: number } {
+  // Pure integer numbering starting from 1 with NO letter prefixes
+  let maxSeq = 0;
+  (db.invoices || []).forEach(inv => {
+    const raw = String(inv.number || '').trim();
+    if (/^\d+$/.test(raw)) {
+      const n = parseInt(raw, 10);
+      if (!isNaN(n) && n > maxSeq) {
+        maxSeq = n;
+      }
+    } else {
+      const match = raw.match(/\d+$/);
+      if (match) {
+        const n = parseInt(match[0], 10);
+        if (!isNaN(n) && n > maxSeq) {
+          maxSeq = n;
+        }
+      }
+    }
+  });
 
-  let seq = mode === 'sale' ? (db.settings.nextSale || 1) :
-            mode === 'wholesale' ? (db.settings.nextSale || 1) :
-            mode === 'purchase' ? (db.settings.nextPurchase || 1) :
-            mode === 'quote' ? (db.settings.nextQuote || 1) : 1;
-
-  let candidate = `${prefix}${String(seq).padStart(6, '0')}`;
+  let seq = Math.max(1, maxSeq + 1);
+  let candidate = String(seq);
   while (isDuplicateInvoiceNumber(db, candidate)) {
     seq += 1;
-    candidate = `${prefix}${String(seq).padStart(6, '0')}`;
+    candidate = String(seq);
   }
 
   return { number: candidate, nextSeq: seq };
@@ -1842,6 +1857,42 @@ export function syncInvoiceVouchers(
   });
 
   return updated;
+}
+
+/**
+ * Retroactively synchronizes linked financial vouchers (سندات قبض وسندات صرف)
+ * for all previously entered invoices that had a paid amount (paid > 0).
+ * Ensures every paid invoice in the system has its corresponding voucher.
+ */
+export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: AccountingDB; createdCount: number } {
+  if (!db.vouchers) db.vouchers = [];
+  if (!db.invoices || db.invoices.length === 0) return { db, createdCount: 0 };
+
+  let createdCount = 0;
+  const currentUserName = db.currentUser?.name || 'مدير النظام';
+
+  // Sort invoices chronologically so vouchers are generated in order
+  const sortedInvoices = [...db.invoices].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  sortedInvoices.forEach(inv => {
+    const paid = Number(inv.paid) || 0;
+    if (paid <= 0) return;
+
+    // Check if this invoice already has any linked voucher
+    const alreadyLinked = db.vouchers.some(v => {
+      return (v as any).invoiceId === inv.id ||
+             (v as any).referenceNumber === inv.number ||
+             (v as any).sourceId === inv.id ||
+             (v.description && v.description.includes(inv.number));
+    });
+
+    if (!alreadyLinked) {
+      syncInvoiceVouchers(db, inv, inv.createdBy || currentUserName);
+      createdCount++;
+    }
+  });
+
+  return { db, createdCount };
 }
 
 
