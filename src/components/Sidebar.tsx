@@ -77,7 +77,8 @@ export type PageId =
   | 'audit'
   | 'periods'
   | 'backup'
-  | 'settings';
+  | 'settings'
+  | 'quick_menu';
 
 interface SidebarProps {
   currentPage: PageId;
@@ -160,6 +161,8 @@ export function canUserAccessPage(user?: User, pageId?: PageId): boolean {
       return p ? p.canManageBackup === true : isManager;
     case 'settings':
       return p ? p.canManageSettings === true : isManager;
+    case 'quick_menu':
+      return true;
     default:
       return true;
   }

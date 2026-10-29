@@ -61,7 +61,8 @@ export const SalesView: React.FC<SalesViewProps> = ({
   const branches = db.branches || [{ id: 'br_main', name: 'الفرع الرئيسي', code: 'BR-01', isMain: true }];
   const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
   const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
-  const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
+  const isManager = db.currentUser?.role === 'مدير';
+  const [branchFilter, setBranchFilter] = useState<'current' | 'all'>(isManager ? 'all' : 'current');
 
   const [activeTab, setActiveTab] = useState<'editor' | 'list'>(initialTab);
   const [salesMode, setSalesMode] = useState<'sale' | 'wholesale'>('sale');
@@ -80,7 +81,6 @@ export const SalesView: React.FC<SalesViewProps> = ({
 
   // Permissions checks: Only general manager can delete invoices per strict security rule
   const userPerms = db.currentUser?.permissions;
-  const isManager = db.currentUser?.role === 'مدير';
   const canCreateSales = userPerms ? userPerms.canCreateSales !== false : true;
   const canEditSales = userPerms ? userPerms.canEditSales !== false : true;
   const canDeleteSales = isManager;
@@ -92,10 +92,29 @@ export const SalesView: React.FC<SalesViewProps> = ({
   const [printDocTitle, setPrintDocTitle] = useState('فواتير المبيعات');
   const [selectedAuditInvoice, setSelectedAuditInvoice] = useState<Invoice | null>(null);
 
-  // Mobile back button: If inside invoice editor, phone back button exits editor to list
+  // Mobile back button: Strict protection against accidental exit from sales invoice editor
   useModalBackHandler(
     activeTab === 'editor',
     () => {
+      // Check if draft or uncommitted invoice has items
+      const draftStr = localStorage.getItem('hesabaty_draft_sale') || localStorage.getItem('hesabaty_last_uncommitted_invoice');
+      let hasItems = false;
+      try {
+        if (draftStr) {
+          const d = JSON.parse(draftStr);
+          if (d.invoiceItems && d.invoiceItems.length > 0) hasItems = true;
+        }
+      } catch (e) {}
+
+      if (hasItems || editingInvoice) {
+        const ok = confirm(
+          '⚠️ تنبيه مهم: هناك فاتورة مبيعات قيد التحرير ولم يتم حفظها بعد.\n\n' +
+          'هل تريد الخروج إلى قائمة الفواتير بدون حفظ؟\n' +
+          '• اضغط «موافق» للخروج (سيتم حفظ مسودة احتياطية يمكنك استعادتها فوراً).\n' +
+          '• اضغط «إلغاء» للبقاء في شاشة الفاتورة لمتابعة حفظها.'
+        );
+        if (!ok) return;
+      }
       setEditingInvoice(null);
       setActiveTab('list');
     },

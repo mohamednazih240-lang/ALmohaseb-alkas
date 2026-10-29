@@ -29,8 +29,10 @@ import {
   Minus,
   Edit3,
   Wallet,
-  CreditCard
+  CreditCard,
+  AlertTriangle
 } from 'lucide-react';
+import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
   AccountingDB,
   Invoice,
@@ -334,6 +336,134 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     }
   }, [showItemCardModal]);
 
+  // Protection against double submission & accidental exit
+  const [isSavingInvoice, setIsSavingInvoice] = useState<boolean>(false);
+  const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
+  const [unsavedDraftData, setUnsavedDraftData] = useState<any>(null);
+
+  // Submodal back handlers: Prevents Android Back button from kicking user out of invoice!
+  useModalBackHandler(showCustDropdown, () => setShowCustDropdown(false), 'invoice_party_dropdown');
+  useModalBackHandler(showLookupModal, () => setShowLookupModal(false), 'invoice_lookup_modal');
+  useModalBackHandler(showItemCardModal, () => setShowItemCardModal(false), 'invoice_item_card_modal');
+  useModalBackHandler(showRapidItemModal, () => setShowRapidItemModal(false), 'invoice_rapid_item_modal');
+  useModalBackHandler(showFastCreateModal, () => setShowFastCreateModal(false), 'invoice_fast_create_modal');
+  useModalBackHandler(showOptionsModal, () => setShowOptionsModal(false), 'invoice_options_modal');
+  useModalBackHandler(showModifyModal, () => setShowModifyModal(false), 'invoice_modify_modal');
+  useModalBackHandler(showEditItemModal, () => setShowEditItemModal(false), 'invoice_edit_item_modal');
+  useModalBackHandler(showAuditModal, () => setShowAuditModal(false), 'invoice_audit_modal');
+
+  // Browser beforeunload protection
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (invoiceItems.length > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [invoiceItems.length]);
+
+  // Safe close handler that warns before exiting
+  const handleAttemptClose = () => {
+    if (invoiceItems.length > 0) {
+      const confirmExit = confirm(
+        '⚠️ تنبيه مهم: يوجد أصناف مدخلة بالفاتورة لم يتم حفظها بعد.\n\n' +
+        'هل تريد الخروج وإلغاء هذه الفاتورة؟\n\n' +
+        '• اضغط «موافق» للخروج وتجاهل الفاتورة (سيتم حفظها كمسودة يمكنك استعادتها).\n' +
+        '• اضغط «إلغاء» للبقاء في شاشة الفاتورة لحفظها.'
+      );
+      if (!confirmExit) return;
+    }
+    if (onClose) onClose();
+    else if (onCloseEdit) onCloseEdit();
+  };
+
+  // Restore draft function
+  const restoreDraft = (customData?: any) => {
+    const data = customData || unsavedDraftData;
+    if (!data) return;
+    if (data.invoiceItems && Array.isArray(data.invoiceItems) && data.invoiceItems.length > 0) {
+      setInvoiceItems(data.invoiceItems);
+    }
+    if (data.custSearchInput) setCustSearchInput(data.custSearchInput);
+    if (data.custCode) setCustCode(data.custCode);
+    if (data.custPhone) setCustPhone(data.custPhone);
+    if (data.jobSite) setJobSite(data.jobSite);
+    if (data.priceType) setPriceType(data.priceType);
+    if (data.globalInvDisc) setGlobalInvDisc(data.globalInvDisc);
+    if (data.globalInvTax) setGlobalInvTax(data.globalInvTax);
+    if (data.extraIncomeVal) setExtraIncomeVal(data.extraIncomeVal);
+    if (data.settlementType) setSettlementType(data.settlementType);
+    if (data.partialPaidInput) setPartialPaidInput(data.partialPaidInput);
+    if (data.paymentRows) setPaymentRows(data.paymentRows);
+    if (data.selectedParty) setSelectedParty(data.selectedParty);
+    setHasUnsavedDraft(false);
+    showToast(`✓ تم استعادة مسودة الفاتورة بنجاح (${data.invoiceItems?.length || 0} أصناف)`);
+  };
+
+  const discardDraft = () => {
+    localStorage.removeItem(`hesabaty_draft_${mode}`);
+    localStorage.removeItem('hesabaty_last_uncommitted_invoice');
+    setHasUnsavedDraft(false);
+    setUnsavedDraftData(null);
+    showToast('تم تفريغ المسودة المؤقتة');
+  };
+
+  // Auto-save draft on every change
+  useEffect(() => {
+    if (editingInvoice) return;
+    if (invoiceItems.length === 0) return;
+
+    const timer = setTimeout(() => {
+      const draftObj = {
+        mode,
+        invNum,
+        invDate,
+        invTime,
+        jobSite,
+        priceType,
+        custCode,
+        custSearchInput,
+        custPhone,
+        selectedParty,
+        invoiceBranchId,
+        settlementType,
+        partialPaidInput,
+        globalInvDisc,
+        globalInvTax,
+        extraIncomeVal,
+        paymentRows,
+        invoiceItems,
+        savedAt: Date.now()
+      };
+      localStorage.setItem(`hesabaty_draft_${mode}`, JSON.stringify(draftObj));
+      localStorage.setItem('hesabaty_last_uncommitted_invoice', JSON.stringify(draftObj));
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [
+    editingInvoice,
+    mode,
+    invNum,
+    invDate,
+    invTime,
+    jobSite,
+    priceType,
+    custCode,
+    custSearchInput,
+    custPhone,
+    selectedParty,
+    invoiceBranchId,
+    settlementType,
+    partialPaidInput,
+    globalInvDisc,
+    globalInvTax,
+    extraIncomeVal,
+    paymentRows,
+    invoiceItems
+  ]);
+
   // Initialize or load editing invoice
   useEffect(() => {
     if (editingInvoice) {
@@ -407,6 +537,18 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       } else {
         setSelectedParty(null);
       }
+
+      // Check for unsaved draft to recover
+      try {
+        const rawDraft = localStorage.getItem(`hesabaty_draft_${mode}`) || localStorage.getItem('hesabaty_last_uncommitted_invoice');
+        if (rawDraft) {
+          const parsed = JSON.parse(rawDraft);
+          if (parsed && Array.isArray(parsed.invoiceItems) && parsed.invoiceItems.length > 0) {
+            setHasUnsavedDraft(true);
+            setUnsavedDraftData(parsed);
+          }
+        }
+      } catch (e) {}
     }
   }, [editingInvoice, mode]);
 
@@ -630,9 +772,28 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       });
       setShowRapidItemModal(false);
       setRapidEditingIndex(null);
-      showToast(`✓ تم تحديث بيانات الصنف "${name}"`);
     } else {
-      setInvoiceItems(prev => [...prev, itemObj]);
+      setInvoiceItems(prev => {
+        const existingIdx = prev.findIndex(
+          it => (matched && it.productId === matched.id) ||
+                it.productName.trim().toLowerCase() === name.toLowerCase()
+        );
+        if (existingIdx > -1) {
+          const copy = [...prev];
+          const newQty = copy[existingIdx].qty + qty;
+          const finalPrice = price > 0 ? price : copy[existingIdx].unitPrice;
+          copy[existingIdx] = {
+            ...copy[existingIdx],
+            qty: newQty,
+            unitPrice: finalPrice,
+            spec: rapidItemDesc.trim() || copy[existingIdx].spec,
+            total: (newQty * finalPrice) - (copy[existingIdx].discount || 0) + (copy[existingIdx].taxRate || 0)
+          };
+          showToast(`✓ تم زيادة كمية "${name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
+          return copy;
+        }
+        return [...prev, itemObj];
+      });
       // Reset for continuous rapid entry
       setRapidItemName('');
       setRapidItemDesc('');
@@ -814,16 +975,21 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     setInvoiceItems(prev => {
       const existingIdx = prev.findIndex(
-        it => it.productId === selectedCardProduct.id && (it.spec || '') === itemCardSpec.trim() && Math.abs(it.unitPrice - unitPrice) < 0.001
+        it => it.productId === selectedCardProduct.id ||
+              it.productName.trim().toLowerCase() === selectedCardProduct.name.trim().toLowerCase()
       );
       if (existingIdx > -1) {
         const copy = [...prev];
         const newQty = copy[existingIdx].qty + qty;
+        const effectivePrice = unitPrice > 0 ? unitPrice : copy[existingIdx].unitPrice;
         copy[existingIdx] = {
           ...copy[existingIdx],
           qty: newQty,
-          total: newQty * copy[existingIdx].unitPrice - (copy[existingIdx].discount || 0)
+          unitPrice: effectivePrice,
+          spec: itemCardSpec.trim() || copy[existingIdx].spec,
+          total: (newQty * effectivePrice) - (copy[existingIdx].discount || 0)
         };
+        showToast(`✓ تم زيادة كمية "${selectedCardProduct.name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
         return copy;
       } else {
         const newItem: InvoiceItem = {
@@ -878,40 +1044,64 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     }
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const newCode = `P-${String(1000 + updated.products.length + 1)}`;
-    const newId = generateId('prod');
-
-    // The product starts with 0 stock in inventory, and saving the invoice will record the movement (negative for sale, positive for purchase)
     const isSale = mode === 'sale' || mode === 'wholesale';
-    const initialQty = 0;
 
-    const newProd: Product = {
-      id: newId,
-      code: newCode,
-      barcode: '',
-      name,
-      category: fastItemCategory || 'عامة',
-      unit: fastItemUnit || 'قطعة',
-      buyPrice: mode === 'purchase' ? price : (price * 0.8),
-      sellPrice: mode === 'purchase' ? (price * 1.25) : price,
-      wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
-      minStock: 5,
-      currentQty: initialQty,
-      avgCost: mode === 'purchase' ? price : (price * 0.8),
-      branchesData: {
-        [invoiceBranchId]: {
-          currentQty: initialQty,
-          buyPrice: mode === 'purchase' ? price : (price * 0.8),
-          sellPrice: mode === 'purchase' ? (price * 1.25) : price,
-          wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
-          minStock: 5,
-          avgCost: mode === 'purchase' ? price : (price * 0.8)
-        }
+    // Deduplicate: check if a product with the same name already exists in the catalog
+    let existingProd = updated.products.find(
+      p => p.name.trim().toLowerCase() === name.trim().toLowerCase()
+    );
+
+    let newProd: Product;
+
+    if (existingProd) {
+      // Reuse existing product so purchases offset sales (e.g. -5 + 5 = 0, or increases if more)
+      newProd = existingProd;
+      if (mode === 'purchase') {
+        newProd.buyPrice = price;
+        newProd.avgCost = price;
       }
-    };
+      const existingBranchData = getProductForBranch(newProd, invoiceBranchId);
+      newProd = updateProductBranchData(newProd, invoiceBranchId, {
+        buyPrice: mode === 'purchase' ? price : existingBranchData.buyPrice,
+        sellPrice: isSale ? price : existingBranchData.sellPrice,
+      });
+      const pIdx = updated.products.findIndex(p => p.id === newProd.id);
+      if (pIdx > -1) updated.products[pIdx] = newProd;
+      logAudit(updated, `ربط صنف مسجل مسبقاً بالفاتورة (${invoiceBranch.name})`, `${newProd.name} (كود: ${newProd.code})`);
+    } else {
+      const newCode = `P-${String(1000 + updated.products.length + 1)}`;
+      const newId = generateId('prod');
+      const initialQty = 0;
 
-    updated.products.push(newProd);
-    logAudit(updated, `إثبات صنف جديد أثناء البحث بالفاتورة (${invoiceBranch.name})`, `${newProd.name} (كود: ${newProd.code}) - الرصيد: ${initialQty}`);
+      newProd = {
+        id: newId,
+        code: newCode,
+        barcode: '',
+        name,
+        category: fastItemCategory || 'عامة',
+        unit: fastItemUnit || 'قطعة',
+        buyPrice: mode === 'purchase' ? price : (price * 0.8),
+        sellPrice: mode === 'purchase' ? (price * 1.25) : price,
+        wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+        minStock: 5,
+        currentQty: initialQty,
+        avgCost: mode === 'purchase' ? price : (price * 0.8),
+        branchesData: {
+          [invoiceBranchId]: {
+            currentQty: initialQty,
+            buyPrice: mode === 'purchase' ? price : (price * 0.8),
+            sellPrice: mode === 'purchase' ? (price * 1.25) : price,
+            wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+            minStock: 5,
+            avgCost: mode === 'purchase' ? price : (price * 0.8)
+          }
+        }
+      };
+
+      updated.products.push(newProd);
+      logAudit(updated, `إثبات صنف جديد أثناء البحث بالفاتورة (${invoiceBranch.name})`, `${newProd.name} (كود: ${newProd.code}) - الرصيد: ${initialQty}`);
+    }
+
     onUpdateDb(updated);
 
     const newItem: InvoiceItem = {
@@ -928,13 +1118,30 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       total: qty * price
     };
 
-    setInvoiceItems(prev => [...prev, newItem]);
+    setInvoiceItems(prev => {
+      const existingIdx = prev.findIndex(
+        it => it.productId === newProd.id ||
+              it.productName.trim().toLowerCase() === name.toLowerCase()
+      );
+      if (existingIdx > -1) {
+        const copy = [...prev];
+        const newQty = copy[existingIdx].qty + qty;
+        copy[existingIdx] = {
+          ...copy[existingIdx],
+          qty: newQty,
+          total: (newQty * copy[existingIdx].unitPrice) - (copy[existingIdx].discount || 0)
+        };
+        showToast(`✓ تم زيادة كمية "${name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
+        return copy;
+      }
+      return [...prev, newItem];
+    });
     setShowFastCreateModal(false);
     setInlineProductSearch('');
     setShowInlineDropdown(false);
     setShowLookupModal(false);
 
-    showToast(`✓ تم إثبات الصنف "${name}" بالمخزون بنجاح وتسجيله${isSale ? ` بالسالب (${initialQty})` : ` (+${initialQty})`} وإدراجه بالفاتورة`);
+    showToast(`✓ تم إثبات الصنف "${name}" بالمخزون بنجاح وتسجيله${isSale ? ` بالسالب (${newProd.currentQty})` : ` (+${newProd.currentQty})`} وإدراجه بالفاتورة`);
   };
 
   // Quick Register Party (عميل / مورد / شركة)
@@ -1097,6 +1304,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // SAVE INVOICE WITH COMPLETE ACCOUNTING IMPACT
   const handleSaveInvoice = () => {
+    if (isSavingInvoice) return;
+
     if (invoiceItems.length === 0) {
       alert('الفاتورة فارغة! أضف أصنافاً أولاً.');
       return;
@@ -1109,6 +1318,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       alert(`⚠️ منع التكرار: رقم الفاتورة (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`);
       return;
     }
+
+    setIsSavingInvoice(true);
 
     // Check Party and auto-register if new
     const isCust = theme.partyRole === 'customer';
@@ -1502,6 +1713,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     onUpdateDb(updated);
 
+    // Clear saved drafts from localStorage
+    localStorage.removeItem(`hesabaty_draft_${mode}`);
+    localStorage.removeItem('hesabaty_last_uncommitted_invoice');
+    setHasUnsavedDraft(false);
+    setUnsavedDraftData(null);
+    setIsSavingInvoice(false);
+
     alert(`✓ تم حفظ الفاتورة رقم ${savedInvoice.number} بنجاح وترحيل جميع الحركات المحاسبية للمخزن والخزينة!`);
 
     if (onCloseEdit) {
@@ -1585,11 +1803,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
             <InvoiceLiveClock />
 
-            {/* Close Button X (requested by user) */}
+            {/* Close Button X (guarded against accidental data loss) */}
             {(onClose || onCloseEdit) && (
               <button
                 type="button"
-                onClick={onClose || onCloseEdit}
+                onClick={handleAttemptClose}
                 className="p-1 rounded bg-black/20 hover:bg-rose-600 text-white transition-colors flex items-center justify-center cursor-pointer ml-0.5"
                 title="إغلاق الفاتورة والعودة للقائمة (X)"
                 aria-label="إغلاق الفاتورة"
@@ -1602,6 +1820,39 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
         {/* Main Workspace Content */}
         <div className="p-1.5 sm:p-2 flex flex-col gap-1.5 flex-1">
+          {/* Unsaved Draft Recovery Banner (User Request: استعادة الفاتورة غير المحفوظة وحمايتها من الضياع) */}
+          {hasUnsavedDraft && (
+            <div className="bg-amber-50 border-2 border-amber-400 p-2.5 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-xs animate-in slide-in-from-top-2">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 animate-bounce" />
+                <div className="text-right">
+                  <div className="text-xs font-black text-amber-950">
+                    تم العثور على مسودة فاتورة {mode === 'purchase' ? 'مشتريات' : 'مبيعات'} سابقة لم تُحفظ بعد ({unsavedDraftData?.invoiceItems?.length || 0} أصناف)
+                  </div>
+                  <div className="text-[10px] text-amber-800">
+                    يمكنك استعادة كافة الأصناف والبيانات المدخلة فوراً بنقرة زر واحدة لمتابعة الحفظ بدون فقد أي بيانات
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => restoreDraft()}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-black shadow-xs flex items-center gap-1 cursor-pointer transition-all"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>استعادة الفاتورة الآن ✓</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => discardDraft()}
+                  className="px-2.5 py-1.5 bg-slate-200 hover:bg-rose-100 hover:text-rose-700 text-slate-700 rounded-lg text-xs font-bold cursor-pointer transition-all"
+                >
+                  تفريغ ✕
+                </button>
+              </div>
+            </div>
+          )}
           {/* Financial Audit & Governance Bar */}
           <div className="bg-slate-100 border border-slate-300 rounded p-1.5 flex flex-wrap items-center justify-between gap-1.5 text-[9px]">
             <div className="flex items-center gap-1.5 flex-wrap">
@@ -2409,15 +2660,27 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
 
           {/* Action Buttons Bar */}
-          <div className="flex gap-1">
+          <div className="flex gap-1 flex-wrap">
             <button
               type="button"
               onClick={handleSaveInvoice}
-              className="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[10px] flex items-center justify-center gap-1.5 transition-colors shadow-2xs"
+              disabled={isSavingInvoice}
+              className="flex-1 min-w-[120px] py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white rounded font-bold text-[10px] flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer"
             >
               <Save className="w-3.5 h-3.5" />
-              <span>حفظ وترحيل الحسابات</span>
+              <span>{isSavingInvoice ? 'جارٍ الحفظ والترحيل...' : 'حفظ وترحيل الحسابات'}</span>
             </button>
+            {(onClose || onCloseEdit) && (
+              <button
+                type="button"
+                onClick={handleAttemptClose}
+                className="px-2.5 py-1.5 bg-slate-100 hover:bg-rose-50 text-slate-700 hover:text-rose-700 border border-slate-300 rounded font-bold text-[10px] flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                title="الخروج مع تنبيه الحفظ"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>إلغاء وخروج</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -3594,12 +3857,24 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         </div>
       )}
 
-      {/* MODAL: Rapid Add / Edit Item Card (merged from user index.html code with bidirectional calculation & Enter progression) */}
+      {/* MODAL: Rapid Add / Edit Item Card */}
       {showRapidItemModal && (
-        <div className="fixed inset-0 z-[80] bg-black/75 backdrop-blur-[2px] flex items-center justify-center p-3 animate-in fade-in duration-150">
-          <div className="bg-[#151e32] border border-[#273754] text-[#f8fafc] rounded-xl w-full max-w-[440px] shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+        <div
+          className="fixed inset-0 z-[80] bg-black/75 backdrop-blur-[2px] flex items-center justify-center p-3 animate-in fade-in duration-150"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              e.stopPropagation();
+              setShowRapidItemModal(false);
+              setRapidEditingIndex(null);
+            }
+          }}
+        >
+          <div
+            className="bg-[#151e32] border border-[#273754] text-[#f8fafc] rounded-xl w-full max-w-[430px] shadow-2xl overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
             {/* Modal Header */}
-            <div className="flex items-center justify-between p-3 border-b border-[#273754] bg-[#0b1120]/60">
+            <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-[#273754] bg-[#0b1120]/70">
               <h3 className="text-xs sm:text-sm font-bold flex items-center gap-2 text-white">
                 <Boxes className="w-4 h-4 text-blue-400" />
                 <span>
@@ -3608,18 +3883,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </h3>
               <button
                 type="button"
-                onClick={() => {
+                onClick={(e) => {
+                  e.stopPropagation();
                   setShowRapidItemModal(false);
                   setRapidEditingIndex(null);
                 }}
-                className="text-[#94a3b8] hover:text-white p-1 rounded hover:bg-white/10 transition-colors cursor-pointer text-lg leading-none"
+                className="text-[#94a3b8] hover:text-white p-1 rounded hover:bg-white/10 transition-colors cursor-pointer text-xl leading-none w-7 h-7 flex items-center justify-center"
+                title="إغلاق كارت الصنف"
               >
                 &times;
               </button>
             </div>
 
             {/* Modal Form Content */}
-            <div className="p-3.5 space-y-2.5 overflow-y-auto flex-1 text-xs">
+            <div className="p-3.5 space-y-2.5 text-xs">
               {/* Item Name */}
               <div className="flex flex-col gap-1">
                 <label className="text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between">
@@ -3702,74 +3979,116 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 </div>
               </div>
 
-              {/* Discount & Tax Grid */}
-              <div className="grid grid-cols-2 gap-2">
+              {/* Discount & Tax Grid - Clean Touch-Friendly Responsive Design */}
+              <div className="grid grid-cols-2 gap-2.5">
                 {/* Item Discount */}
                 <div className="flex flex-col gap-1">
-                  <label className="text-[10px] text-[#94a3b8] font-semibold">
-                    خصم الصنف
-                  </label>
-                  <div className="flex gap-1">
-                    <input
-                      ref={rapidDiscRef}
-                      type="text"
-                      value={rapidItemDiscount}
-                      placeholder="الخصم..."
-                      onChange={e => {
-                        const converted = toWesternNumerals(e.target.value);
-                        setRapidItemDiscount(converted);
-                        calculateRapidItemTotal('forward', { overrideDisc: converted });
-                      }}
-                      onKeyDown={e => handleRapidKeyDown(e, rapidTaxRef)}
-                      className="bg-[#1a263d] border border-[#273754] text-white px-2 py-1.5 rounded-md text-xs font-mono flex-1 outline-none focus:border-blue-500"
-                    />
-                    <select
-                      value={rapidItemDiscountType}
-                      onChange={e => {
-                        const t = e.target.value as 'fixed' | 'percent';
-                        setRapidItemDiscountType(t);
-                        calculateRapidItemTotal('forward', { overrideDiscType: t });
-                      }}
-                      className="bg-[#1a263d] border border-[#273754] text-[#94a3b8] px-1 py-1 rounded-md text-[11px] outline-none"
-                    >
-                      <option value="fixed">ج.م</option>
-                      <option value="percent">%</option>
-                    </select>
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] text-[#94a3b8] font-semibold">
+                      خصم الصنف
+                    </label>
+                    {/* Segmented Type Toggle */}
+                    <div className="inline-flex rounded border border-[#273754] p-0.5 bg-[#0b1120]">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRapidItemDiscountType('fixed');
+                          calculateRapidItemTotal('forward', { overrideDiscType: 'fixed' });
+                        }}
+                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
+                          rapidItemDiscountType === 'fixed'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-[#94a3b8] hover:text-white'
+                        }`}
+                      >
+                        ج.م
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRapidItemDiscountType('percent');
+                          calculateRapidItemTotal('forward', { overrideDiscType: 'percent' });
+                        }}
+                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
+                          rapidItemDiscountType === 'percent'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-[#94a3b8] hover:text-white'
+                        }`}
+                      >
+                        %
+                      </button>
+                    </div>
                   </div>
+                  <input
+                    ref={rapidDiscRef}
+                    type="text"
+                    value={rapidItemDiscount}
+                    placeholder="الخصم..."
+                    onChange={e => {
+                      const converted = toWesternNumerals(e.target.value);
+                      setRapidItemDiscount(converted);
+                      calculateRapidItemTotal('forward', { overrideDisc: converted });
+                    }}
+                    onKeyDown={e => handleRapidKeyDown(e, rapidTaxRef)}
+                    className="w-full bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs font-mono outline-none focus:border-blue-500 text-center"
+                  />
                 </div>
 
                 {/* Item Tax */}
                 <div className="flex flex-col gap-1">
-                  <label className="text-[10px] text-[#94a3b8] font-semibold">
-                    ضريبة الصنف
-                  </label>
-                  <div className="flex gap-1">
-                    <input
-                      ref={rapidTaxRef}
-                      type="text"
-                      value={rapidItemTax}
-                      placeholder="الضريبة..."
-                      onChange={e => {
-                        const converted = toWesternNumerals(e.target.value);
-                        setRapidItemTax(converted);
-                        calculateRapidItemTotal('forward', { overrideTax: converted });
-                      }}
-                      onKeyDown={e => handleRapidKeyDown(e, rapidTotalRef)}
-                      className="bg-[#1a263d] border border-[#273754] text-white px-2 py-1.5 rounded-md text-xs font-mono flex-1 outline-none focus:border-blue-500"
-                    />
-                    <select
-                      value={rapidItemTaxType}
-                      onChange={e => {
-                        const t = e.target.value as 'fixed' | 'percent';
-                        setRapidItemTaxType(t);
-                        calculateRapidItemTotal('forward', { overrideTaxType: t });
-                      }}
-                      className="bg-[#1a263d] border border-[#273754] text-[#94a3b8] px-1 py-1 rounded-md text-[11px] outline-none"
-                    >
-                      <option value="fixed">ج.م</option>
-                      <option value="percent">%</option>
-                    </select>
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] text-[#94a3b8] font-semibold">
+                      ضريبة الصنف
+                    </label>
+                    {/* Segmented Type Toggle */}
+                    <div className="inline-flex rounded border border-[#273754] p-0.5 bg-[#0b1120]">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRapidItemTaxType('fixed');
+                          calculateRapidItemTotal('forward', { overrideTaxType: 'fixed' });
+                        }}
+                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
+                          rapidItemTaxType === 'fixed'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-[#94a3b8] hover:text-white'
+                        }`}
+                      >
+                        ج.م
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRapidItemTaxType('percent');
+                          calculateRapidItemTotal('forward', { overrideTaxType: 'percent' });
+                        }}
+                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
+                          rapidItemTaxType === 'percent'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-[#94a3b8] hover:text-white'
+                        }`}
+                      >
+                        %
+                      </button>
+                    </div>
                   </div>
+                  <input
+                    ref={rapidTaxRef}
+                    type="text"
+                    value={rapidItemTax}
+                    placeholder="الضريبة..."
+                    onChange={e => {
+                      const converted = toWesternNumerals(e.target.value);
+                      setRapidItemTax(converted);
+                      calculateRapidItemTotal('forward', { overrideTax: converted });
+                    }}
+                    onKeyDown={e => handleRapidKeyDown(e, rapidTotalRef)}
+                    className="w-full bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs font-mono outline-none focus:border-blue-500 text-center"
+                  />
                 </div>
               </div>
 

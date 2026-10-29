@@ -12,15 +12,7 @@ import {
   Cloud,
   LogOut,
   MoreVertical,
-  X,
-  RefreshCw,
-  FileText,
-  ShoppingCart,
-  ShoppingBag,
-  ArrowDownLeft,
-  ArrowUpRight,
-  Boxes,
-  Users
+  RefreshCw
 } from 'lucide-react';
 import { AppSettings, User as UserType, Branch } from '../types/accounting';
 import { PWAInstallButton } from './PWAInstallBanner';
@@ -62,7 +54,6 @@ const HeaderComponent: React.FC<HeaderProps> = ({
 }) => {
   const [showQuickDropdown, setShowQuickDropdown] = useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
-  const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
   const activeBranch = branches.find(b => b.id === activeBranchId) || branches[0];
@@ -331,12 +322,12 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             )}
           </div>
 
-          {/* 3-dots Menu Button on Desktop */}
+          {/* 3-dots Menu Button on Desktop: Opens dedicated full page */}
           <button
             type="button"
-            onClick={() => setShowMobileMenu(prev => !prev)}
+            onClick={() => onQuickAction('open_quick_menu')}
             className="p-2 text-slate-800 hover:text-black bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 transition-colors cursor-pointer relative"
-            title="القائمة السريعة ومركز الأدوات (ثلاث نقاط)"
+            title="القائمة السريعة ومركز العمليات (ثلاث نقاط)"
             aria-label="القائمة السريعة والأدوات"
           >
             <MoreVertical className="w-5 h-5 text-slate-900" />
@@ -367,12 +358,12 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             {currentUser?.name ? currentUser.name.charAt(0) : 'م'}
           </div>
 
-          {/* The 3 Vertical Dots (⋮) Menu Button - Organizes all mobile actions without overflow */}
+          {/* The 3 Vertical Dots (⋮) Menu Button - Opens dedicated full page */}
           <button
             type="button"
-            onClick={() => setShowMobileMenu(prev => !prev)}
+            onClick={() => onQuickAction('open_quick_menu')}
             className="p-1.5 text-slate-800 hover:text-black bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 transition-colors cursor-pointer relative"
-            title="القائمة السريعة والأدوات (ثلاث نقاط)"
+            title="القائمة السريعة ومركز العمليات (ثلاث نقاط)"
             aria-label="خيارات وأدوات الهيدر"
           >
             <MoreVertical className="w-5 h-5 text-slate-900" />
@@ -382,353 +373,6 @@ const HeaderComponent: React.FC<HeaderProps> = ({
           </button>
         </div>
       </div>
-
-      {/* COMPREHENSIVE FLOATING MODAL MENU (Opened via the 3 Vertical Dots ⋮ on mobile & desktop) */}
-      {showMobileMenu && (
-        <div 
-          className="fixed inset-0 z-[120] bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 text-right animate-in fade-in duration-150"
-          onClick={() => setShowMobileMenu(false)}
-        >
-          <div 
-            className="bg-white rounded-3xl w-full max-w-xl max-h-[90vh] overflow-y-auto p-4 sm:p-6 shadow-2xl border border-slate-200 space-y-4 animate-in zoom-in-95 duration-200"
-            onClick={e => e.stopPropagation()}
-          >
-            {/* Menu Header with Close Button */}
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-              <div className="flex items-center gap-2.5">
-                <img
-                  src="/logo.png"
-                  alt="حساباتي"
-                  className="w-10 h-10 rounded-xl object-contain shadow-xs border border-slate-200 bg-white p-0.5"
-                />
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-sm font-black text-slate-900">حساباتي ERP</span>
-                    <span className="text-[10px] bg-slate-900 text-amber-400 font-bold px-1.5 py-0.5 rounded font-mono">
-                      {settings.companyCode || 'COMP-101'}
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-500 font-medium mt-0.5">
-                    {currentUser?.name || 'مدير النظام'} • {currentUser?.role || 'مدير'} • {settings.company}
-                  </div>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setShowMobileMenu(false)}
-                className="p-2 text-slate-400 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-full cursor-pointer transition-colors"
-                aria-label="إغلاق"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Retroactive Invoice Vouchers Generator (User Request: انشاء سندات بالفواتير المدخلة مسبقا) */}
-            <div className="p-3 bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-50 border-2 border-emerald-400 rounded-2xl shadow-xs">
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <div className="flex items-center gap-1.5 font-black text-xs text-emerald-950">
-                  <Sparkles className="w-4 h-4 text-emerald-600 animate-pulse" />
-                  <span>توليد سندات الفواتير المدخلة مسبقاً:</span>
-                </div>
-                <span className="text-[9.5px] bg-emerald-600 text-white font-bold px-2 py-0.5 rounded-full">
-                  ربط مالي شامل
-                </span>
-              </div>
-              <p className="text-[11px] text-emerald-900 mb-2.5 leading-relaxed">
-                يقوم بفحص كافة فواتير المبيعات والمشتريات المسجلة سابقاً في النظام وتوليد سندات قبض وصرف فورية لأي مبالغ مسددة دون تكرار.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowMobileMenu(false);
-                  onQuickAction('sync_past_vouchers');
-                }}
-                className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-xl text-xs font-black shadow transition-all flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>فحص وتوليد سندات الفواتير السابقة الآن</span>
-              </button>
-            </div>
-
-            {/* Quick Actions Grid */}
-            <div>
-              <div className="text-xs font-black text-slate-700 mb-2 flex items-center gap-1.5">
-                <PlusCircle className="w-4 h-4 text-blue-600" />
-                <span>العمليات والفواتير الأكثر استخداماً:</span>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('new_sale');
-                  }}
-                  className="p-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-xl border border-emerald-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <ShoppingCart className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">+ فاتورة بيع جديدة</span>
-                    <span className="text-[9px] text-emerald-700 font-mono">اختصار F2</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('new_purchase');
-                  }}
-                  className="p-2.5 bg-blue-50 hover:bg-blue-100 text-blue-900 rounded-xl border border-blue-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <ShoppingBag className="w-4 h-4 text-blue-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">+ فاتورة شراء جديدة</span>
-                    <span className="text-[9px] text-blue-700 font-mono">اختصار F3</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('new_wholesale');
-                  }}
-                  className="p-2.5 bg-amber-50 hover:bg-amber-100 text-amber-900 rounded-xl border border-amber-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <Boxes className="w-4 h-4 text-amber-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">+ مبيعات جملة</span>
-                    <span className="text-[9px] text-amber-700 font-mono">سعر الجملة</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('new_receipt');
-                  }}
-                  className="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-800 rounded-xl border border-slate-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <ArrowDownLeft className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">+ سند قبض نقدية</span>
-                    <span className="text-[9px] text-slate-500">تحصيل من عميل</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('new_payment');
-                  }}
-                  className="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-800 rounded-xl border border-slate-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <ArrowUpRight className="w-4 h-4 text-rose-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">- سند صرف نقدية</span>
-                    <span className="text-[9px] text-slate-500">سداد لمورد/مصروف</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('new_product');
-                  }}
-                  className="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-800 rounded-xl border border-slate-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <Boxes className="w-4 h-4 text-slate-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">+ صنف جديد بالمخزون</span>
-                    <span className="text-[9px] text-slate-500">دليل الأصناف</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('new_customer');
-                  }}
-                  className="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-800 rounded-xl border border-slate-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <Users className="w-4 h-4 text-blue-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">+ إضافة عميل جديد</span>
-                    <span className="text-[9px] text-slate-500">دليل العملاء</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('new_supplier');
-                  }}
-                  className="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-800 rounded-xl border border-slate-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <Building2 className="w-4 h-4 text-amber-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">+ إضافة مورد جديد</span>
-                    <span className="text-[9px] text-slate-500">دليل الموردين</span>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onQuickAction('view_reports');
-                  }}
-                  className="p-2.5 bg-slate-50 hover:bg-slate-100 text-slate-800 rounded-xl border border-slate-200 font-bold flex items-center gap-2 cursor-pointer transition-colors text-right"
-                >
-                  <FileText className="w-4 h-4 text-indigo-600 shrink-0" />
-                  <div className="min-w-0">
-                    <span className="block font-black text-[11px]">التقارير المالية</span>
-                    <span className="text-[9px] text-slate-500">كشوف الحسابات</span>
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            {/* Branch Switcher & Management */}
-            <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
-              <label className="text-xs font-black text-slate-700 flex items-center justify-between">
-                <span className="flex items-center gap-1.5">
-                  <Building2 className="w-4 h-4 text-blue-600" />
-                  <span>فرع العمل النشط:</span>
-                </span>
-                <span className="text-[10px] text-slate-500">{branches.length} فروع مفعلة</span>
-              </label>
-              <div className="flex gap-2">
-                <select
-                  value={activeBranchId}
-                  onChange={(e) => {
-                    if (e.target.value === '__add_new__') {
-                      setShowMobileMenu(false);
-                      onOpenCreateBranch();
-                    } else {
-                      onSelectBranch(e.target.value);
-                    }
-                  }}
-                  className="flex-1 p-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 outline-none focus:border-blue-500"
-                >
-                  {(branches || []).map(b => (
-                    <option key={b.id} value={b.id}>
-                      {b.isMain ? '🏢 ' : '🔒 '}{b.name} {b.isMain ? '(المقر الرئيسي)' : '(محمي برقم سري)'}
-                    </option>
-                  ))}
-                  <option value="__add_new__">+ إنشاء فرع جديد...</option>
-                </select>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onOpenCreateBranch();
-                  }}
-                  className="px-3 py-2 bg-slate-900 hover:bg-black text-white text-xs font-bold rounded-xl whitespace-nowrap cursor-pointer transition-colors"
-                >
-                  + فرع جديد
-                </button>
-              </div>
-            </div>
-
-            {/* Cloud Realtime Sync & Backup */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-              <button
-                type="button"
-                onClick={async () => {
-                  setShowMobileMenu(false);
-                  await handleSyncClick();
-                }}
-                className="p-3 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-950 rounded-2xl text-xs font-black flex items-center justify-between cursor-pointer transition-colors shadow-2xs"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="relative flex h-2.5 w-2.5">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-                  </span>
-                  <span>مزامنة سحابية لحظية</span>
-                </div>
-                <RefreshCw className={`w-4 h-4 text-emerald-600 ${isSyncing ? 'animate-spin' : ''}`} />
-              </button>
-
-              {onOpenDriveBackup && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onOpenDriveBackup();
-                  }}
-                  className="p-3 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 rounded-2xl text-xs font-black flex items-center justify-between cursor-pointer transition-colors shadow-2xs"
-                >
-                  <div className="flex items-center gap-2">
-                    <Cloud className="w-4 h-4 text-emerald-600" />
-                    <span>نسخ احتياطي (Drive)</span>
-                  </div>
-                  <span className="text-[10px] text-slate-500 font-normal">حماية البيانات</span>
-                </button>
-              )}
-            </div>
-
-            {/* Low stock alert badge */}
-            {lowStockCount > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  setShowMobileMenu(false);
-                  onQuickAction('view_low_stock');
-                }}
-                className="w-full p-2.5 bg-amber-50 border border-amber-300 text-amber-950 rounded-2xl text-xs font-bold flex items-center justify-between cursor-pointer"
-              >
-                <div className="flex items-center gap-2">
-                  <Bell className="w-4 h-4 text-amber-600" />
-                  <span>تنبيه: {lowStockCount} أصناف قاربت على النفاد بالمخزون</span>
-                </div>
-                <span className="bg-amber-600 text-white text-[10px] px-2 py-0.5 rounded-full font-bold">
-                  فحص الأصناف
-                </span>
-              </button>
-            )}
-
-            {/* User Account & Logout */}
-            <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
-              {onOpenLogin && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onOpenLogin();
-                  }}
-                  className="flex-1 py-2.5 px-3 bg-slate-900 hover:bg-black text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
-                >
-                  <User className="w-4 h-4 text-blue-400" />
-                  <span>تبديل المستخدم (تسجيل دخول)</span>
-                </button>
-              )}
-
-              {onLogout && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileMenu(false);
-                    onLogout();
-                  }}
-                  className="py-2.5 px-4 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-                >
-                  <LogOut className="w-4 h-4" />
-                  <span>خروج</span>
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </header>
   );
 };

@@ -343,11 +343,14 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               </label>
               <input
                 type="number"
-                min="0"
                 step="any"
                 value={initialQty}
                 onChange={e => setInitialQty(parseFloat(e.target.value) || 0)}
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-black text-blue-700"
+                className={`w-full px-2.5 py-1.5 bg-slate-50 border rounded-lg text-xs font-mono font-black ${
+                  initialQty < 0
+                    ? 'border-red-400 text-red-600 bg-red-50/50'
+                    : 'border-slate-200 text-blue-700'
+                }`}
               />
             </div>
             <div>
@@ -361,6 +364,35 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               />
             </div>
           </div>
+
+          {/* Quick Reconciliation Helper if Stock is Negative */}
+          {initialQty < 0 && (
+            <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900 space-y-1.5">
+              <div className="flex items-center justify-between font-bold">
+                <span>⚠️ الصنف مباع/منصرف بالسالب: ({initialQty})</span>
+                <span className="text-[10px] text-amber-700">كمية منصرفة قبل الشراء</span>
+              </div>
+              <div className="text-[11px] text-amber-800">
+                عند شراء أو توريد نفس الكمية المنصرفة ({Math.abs(initialQty)}) سيتساوى الرصيد إلى صفر، وإذا زادت الكمية عن ({Math.abs(initialQty)}) سيزيد الرصيد بالموجب.
+              </div>
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setInitialQty(0)}
+                  className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10.5px] font-bold cursor-pointer transition-colors"
+                >
+                  ✓ تسوية الرصيد إلى (0) لمساواة المنصرف
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInitialQty(prev => prev + Math.abs(prev) + 5)}
+                  className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10.5px] font-bold cursor-pointer transition-colors"
+                >
+                  + شراء ({Math.abs(initialQty) + 5}) ليصبح الرصيد (+5)
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
             <button

@@ -1338,8 +1338,9 @@ export function getProductForBranch(product: Product, branchId?: string): Produc
     };
   }
 
-  // If this is the main branch and product hasn't migrated to branchesData yet:
-  if (targetBranch === 'br_main' && (!product.branchesData || Object.keys(product.branchesData).length === 0)) {
+  // If this is a primary branch (br_main or br_mawan) and product hasn't migrated to branchesData yet:
+  const isPrimaryBranch = targetBranch === 'br_main' || targetBranch === 'br_mawan' || !product.branchesData || Object.keys(product.branchesData).length === 0;
+  if (isPrimaryBranch) {
     return {
       ...product,
       branchQty: product.currentQty ?? 0,
@@ -1347,7 +1348,6 @@ export function getProductForBranch(product: Product, branchId?: string): Produc
   }
 
   // For any other branch without custom entered data yet:
-  // "ويكون كل فرع فيهم به كل الاصناف ويكون منعزل عن الفرع الاخر في كل شي مهما كان من فواتير ومستخدمين وتقارير وسندات ومخزون وخزينه والخ"
   return {
     ...product,
     currentQty: 0,
@@ -1370,15 +1370,17 @@ export function updateProductBranchData(
 ): Product {
   const targetBranch = branchId || 'br_main';
   const existingBranchesData = { ...(product.branchesData || {}) };
+  const isPrimaryBranch = targetBranch === 'br_main' || targetBranch === 'br_mawan' || !product.branchesData || Object.keys(product.branchesData).length <= 1;
 
-  // Current branch numbers (or initial 0 for other branches)
+  // Current branch numbers (or initial product values for primary branches)
   const currentBranchData: BranchProductData = existingBranchesData[targetBranch] || {
-    currentQty: targetBranch === 'br_main' ? (product.currentQty || 0) : 0,
-    buyPrice: targetBranch === 'br_main' ? (product.buyPrice || 0) : 0,
-    sellPrice: targetBranch === 'br_main' ? (product.sellPrice || 0) : 0,
-    wholesalePrice: targetBranch === 'br_main' ? (product.wholesalePrice || 0) : 0,
-    minStock: targetBranch === 'br_main' ? (product.minStock || 5) : 5,
-    avgCost: targetBranch === 'br_main' ? (product.avgCost || product.buyPrice || 0) : 0,
+    branchId: targetBranch,
+    currentQty: isPrimaryBranch ? (product.currentQty || 0) : 0,
+    buyPrice: isPrimaryBranch ? (product.buyPrice || 0) : 0,
+    sellPrice: isPrimaryBranch ? (product.sellPrice || 0) : 0,
+    wholesalePrice: isPrimaryBranch ? (product.wholesalePrice || 0) : 0,
+    minStock: isPrimaryBranch ? (product.minStock || 5) : 5,
+    avgCost: isPrimaryBranch ? (product.avgCost || product.buyPrice || 0) : 0,
   };
 
   const updatedBranchData: BranchProductData = {
@@ -1393,8 +1395,8 @@ export function updateProductBranchData(
     branchesData: existingBranchesData,
   };
 
-  // If updating the main branch, keep top-level fields mirrored for backwards compatibility
-  if (targetBranch === 'br_main') {
+  // If updating the primary branch, keep top-level fields mirrored for backwards compatibility
+  if (isPrimaryBranch) {
     if (updatedBranchData.currentQty !== undefined) updatedProduct.currentQty = updatedBranchData.currentQty;
     if (updatedBranchData.buyPrice !== undefined) updatedProduct.buyPrice = updatedBranchData.buyPrice;
     if (updatedBranchData.sellPrice !== undefined) updatedProduct.sellPrice = updatedBranchData.sellPrice;
@@ -1404,6 +1406,51 @@ export function updateProductBranchData(
   }
 
   return updatedProduct;
+}
+
+/**
+ * Union & merge invoices safely by ID to prevent any loss across phones and concurrent updates
+ */
+export function mergeInvoices(existingList: Invoice[] = [], incomingList: Invoice[] = []): Invoice[] {
+  const map = new Map<string, Invoice>();
+  (existingList || []).forEach(inv => {
+    if (inv && inv.id) {
+      map.set(inv.id, inv);
+    }
+  });
+  (incomingList || []).forEach(inv => {
+    if (inv && inv.id) {
+      const existing = map.get(inv.id);
+      if (!existing) {
+        map.set(inv.id, inv);
+      } else {
+        const existingTime = new Date(existing.updatedAt || existing.createdAt || existing.date || 0).getTime();
+        const incomingTime = new Date(inv.updatedAt || inv.createdAt || inv.date || 0).getTime();
+        if (incomingTime >= existingTime) {
+          map.set(inv.id, inv);
+        }
+      }
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => (b.createdAt || b.date || '').localeCompare(a.createdAt || a.date || ''));
+}
+
+/**
+ * Union & merge vouchers safely by ID to prevent loss across phones
+ */
+export function mergeVouchers(existingList: Voucher[] = [], incomingList: Voucher[] = []): Voucher[] {
+  const map = new Map<string, Voucher>();
+  (existingList || []).forEach(v => {
+    if (v && v.id) {
+      map.set(v.id, v);
+    }
+  });
+  (incomingList || []).forEach(v => {
+    if (v && v.id) {
+      map.set(v.id, v);
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 }
 
 /**

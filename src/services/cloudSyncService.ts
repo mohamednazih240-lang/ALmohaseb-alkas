@@ -9,7 +9,7 @@ import {
 } from 'firebase/firestore';
 import { auth } from './firebaseAuth';
 import { AccountingDB, User as AppUser, Branch } from '../types/accounting';
-import { saveDatabase, loadDatabase, ensurePrimaryBranches, sanitizeCompanyDatabase, isCompanyMawan, loadTenantDatabase } from './accountingStorage';
+import { saveDatabase, loadDatabase, ensurePrimaryBranches, sanitizeCompanyDatabase, isCompanyMawan, loadTenantDatabase, mergeInvoices, mergeVouchers } from './accountingStorage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { getCompanyByCode } from './tenantService';
 
@@ -180,14 +180,15 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
                                    (!db.suppliers || db.suppliers.length === 0) &&
                                    (!db.users || db.users.length <= 1);
 
-      if (isUninitializedClient) {
-        try {
-          const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
-          const checkSnap = await getDoc(compDocRef);
-          if (checkSnap.exists()) {
-            const val = checkSnap.data();
-            if (val?.data) {
-              const parsed = JSON.parse(val.data) as AccountingDB;
+      // Merge with latest cloud database if available to prevent dropping concurrent invoices across devices
+      try {
+        const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
+        const checkSnap = await withTimeout(getDoc(compDocRef), 1500);
+        if (checkSnap && checkSnap.exists()) {
+          const val = checkSnap.data();
+          if (val?.data) {
+            const parsed = JSON.parse(val.data) as AccountingDB;
+            if (isUninitializedClient) {
               const hasCloudData = (parsed.invoices && parsed.invoices.length > 0) ||
                                    (parsed.users && parsed.users.length > 1) ||
                                    (parsed.customers && parsed.customers.length > 0) ||
@@ -197,11 +198,19 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
                 updateSyncState({ status: 'connected' });
                 return false;
               }
+            } else {
+              // Merge invoices & vouchers by ID so newly added invoices from other phones are never dropped
+              if (parsed.invoices && parsed.invoices.length > 0) {
+                db.invoices = mergeInvoices(db.invoices || [], parsed.invoices);
+              }
+              if (parsed.vouchers && parsed.vouchers.length > 0) {
+                db.vouchers = mergeVouchers(db.vouchers || [], parsed.vouchers);
+              }
             }
           }
-        } catch (checkErr) {
-          console.warn('Safeguard check note:', checkErr);
         }
+      } catch (checkErr) {
+        console.warn('Safeguard/merge check note:', checkErr);
       }
 
       const payload = {

@@ -7,7 +7,9 @@ import {
   loadFromIndexedDB,
   isCompanyMawan,
   sanitizeCompanyDatabase,
-  syncAllExistingInvoiceVouchers
+  syncAllExistingInvoiceVouchers,
+  mergeInvoices,
+  mergeVouchers
 } from './services/accountingStorage';
 import {
   AccountingDB,
@@ -57,6 +59,7 @@ import { LoginView } from './components/LoginView';
 import { GoogleDriveBackupModal } from './components/GoogleDriveBackupModal';
 import { BranchPinModal } from './components/BranchPinModal';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
+import { QuickMenuPage } from './components/QuickMenuPage';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { getStoredAuthSession, logoutUser, AuthSession } from './services/firebaseAuth';
 import { mergeCatalogIntoDb } from './data/defaultCatalog1001';
@@ -88,6 +91,15 @@ export default function App() {
   const [activeBranchId, setActiveBranchId] = useState<string>(() => {
     return db.branches?.[0]?.id || 'br_main';
   });
+
+  // Synchronize activeBranchId whenever db.branches changes (e.g. switching between الأخوة and الموان)
+  useEffect(() => {
+    if (db.branches && db.branches.length > 0) {
+      if (!db.branches.some(b => b.id === activeBranchId)) {
+        setActiveBranchId(db.branches[0].id);
+      }
+    }
+  }, [db.branches, activeBranchId]);
 
   // Cloud Sync state
   const [syncState, setSyncState] = useState<CloudSyncState>({
@@ -186,8 +198,12 @@ export default function App() {
           const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
           const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
           const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
+          const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || []);
+          const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
           const merged: AccountingDB = {
             ...ensuredCloud,
+            invoices: mergedInvoices,
+            vouchers: mergedVouchers,
             currentUser: effectiveUser || ensuredCloud.currentUser || ensuredCloud.users[0]
           };
           saveDatabase(merged);
@@ -259,8 +275,12 @@ export default function App() {
           setActiveBranchId(effectiveUser.branchId);
         }
 
+        const mergedInvoices = mergeInvoices(prevDb.invoices || [], remoteDb.invoices || []);
+        const mergedVouchers = mergeVouchers(prevDb.vouchers || [], remoteDb.vouchers || []);
         const merged: AccountingDB = {
           ...remoteDb,
+          invoices: mergedInvoices,
+          vouchers: mergedVouchers,
           currentUser: effectiveUser || remoteDb.currentUser || remoteDb.users[0]
         };
         saveDatabase(merged);
@@ -272,6 +292,58 @@ export default function App() {
       unsubCloud();
     };
   }, [db.settings.companyCode, authSession?.user?.id]);
+
+  // Periodic heartbeat & on-focus sync: guarantees Mohamed Nazih and Ahmed Nazih see updates within seconds
+  useEffect(() => {
+    const currentCompanyCode = normalizeCompanyCode(db.settings.companyCode);
+
+    const pullLatest = async () => {
+      try {
+        const cloudDb = await fetchDatabaseFromCloud(currentCompanyCode);
+        if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
+          setDb(prevDb => {
+            const prevInvoicesCount = prevDb.invoices?.length || 0;
+            const cloudInvoicesCount = cloudDb.invoices?.length || 0;
+            const prevAuditCount = prevDb.audit?.length || 0;
+            const cloudAuditCount = cloudDb.audit?.length || 0;
+
+            if (cloudInvoicesCount !== prevInvoicesCount || cloudAuditCount !== prevAuditCount) {
+              const storedSession = getStoredAuthSession();
+              const currentLocalUser = storedSession?.user || prevDb.currentUser;
+              const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
+              const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
+              const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
+              const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || []);
+              const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
+              const merged: AccountingDB = {
+                ...ensuredCloud,
+                invoices: mergedInvoices,
+                vouchers: mergedVouchers,
+                currentUser: effectiveUser || ensuredCloud.currentUser || ensuredCloud.users[0]
+              };
+              saveDatabase(merged);
+              return merged;
+            }
+            return prevDb;
+          });
+        }
+      } catch (e) {
+        // silent
+      }
+    };
+
+    const handleFocus = () => pullLatest();
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('visibilitychange', handleFocus);
+
+    const intervalId = setInterval(pullLatest, 7000);
+
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('visibilitychange', handleFocus);
+      clearInterval(intervalId);
+    };
+  }, [db.settings.companyCode]);
 
   // Save changes to IndexedDB, localStorage, and Firestore Cloud Realtime
   const handleUpdateDb = useCallback((updated: AccountingDB) => {
@@ -287,7 +359,8 @@ export default function App() {
     'bank_reconciliation', 'cost_centers', 'currencies', 'fixed_assets',
     'expenses', 'revenues', 'accounts', 'journals', 'ledger',
     'daily_closing', 'profits',
-    'reports', 'closing', 'branches', 'users', 'audit', 'periods', 'backup', 'settings'
+    'reports', 'closing', 'branches', 'users', 'audit', 'periods', 'backup', 'settings',
+    'quick_menu'
   ];
 
   // Sync with window.location.hash and mobile browser back button (popstate/hashchange)
@@ -423,6 +496,7 @@ export default function App() {
       case 'periods': return 'الفترات المحاسبية';
       case 'backup': return 'النسخ الاحتياطي والبيانات';
       case 'settings': return 'إعدادات النظام والمنشأة';
+      case 'quick_menu': return 'مركز العمليات والأدوات السريعة';
       default: return 'النظام المحاسبي';
     }
   };
@@ -465,7 +539,8 @@ export default function App() {
           }
         }}
         onQuickAction={(action) => {
-          if (action === 'new_sale') navigateToPage('sales');
+          if (action === 'open_quick_menu') navigateToPage('quick_menu');
+          else if (action === 'new_sale') navigateToPage('sales');
           else if (action === 'new_purchase') navigateToPage('purchases');
           else if (action === 'new_receipt') navigateToPage('receipts');
           else if (action === 'new_payment') navigateToPage('payments');
@@ -502,6 +577,54 @@ export default function App() {
 
         {/* Main Workspace Content Area */}
         <main className="flex-1 min-w-0 lg:mr-64 p-2.5 sm:p-6 max-w-7xl mx-auto w-full max-w-full overflow-x-clip transition-all">
+          {currentPage === 'quick_menu' && (
+            <QuickMenuPage
+              db={db}
+              onNavigate={navigateToPage}
+              onQuickAction={(action) => {
+                if (action === 'new_sale') navigateToPage('sales');
+                else if (action === 'new_purchase') navigateToPage('purchases');
+                else if (action === 'new_receipt') navigateToPage('receipts');
+                else if (action === 'new_payment') navigateToPage('payments');
+                else if (action === 'new_wholesale') navigateToPage('sales');
+                else if (action === 'new_product') setProductModalState({ isOpen: true, product: null });
+                else if (action === 'new_customer') navigateToPage('customers');
+                else if (action === 'new_supplier') navigateToPage('suppliers');
+                else if (action === 'view_reports') navigateToPage('reports');
+                else if (action === 'view_low_stock') navigateToPage('products');
+                else if (action === 'sync_past_vouchers') {
+                  const res = syncAllExistingInvoiceVouchers(db);
+                  setDb(res.db);
+                  saveDatabase(res.db);
+                  pushDatabaseToCloud(res.db, true);
+                  alert(`تم بنجاح! تم فحص كافة فواتير النظام وتوليد (${res.createdCount}) سند قبض وصرف للفواتير السابقة وربطها بالخزينة والحسابات.`);
+                }
+              }}
+              onOpenProductModal={() => setProductModalState({ isOpen: true, product: null })}
+              onOpenPartyModal={(type) => navigateToPage(type === 'customer' ? 'customers' : 'suppliers')}
+              onOpenCreateBranch={() => navigateToPage('branches')}
+              onSelectBranch={handleRequestBranchSwitch}
+              activeBranchId={activeBranchId}
+              onManualSync={async () => {
+                const cloudDb = await fetchDatabaseFromCloud();
+                if (cloudDb) {
+                  setDb(cloudDb);
+                  saveDatabase(cloudDb);
+                } else {
+                  await pushDatabaseToCloud(db, true);
+                }
+              }}
+              onOpenDriveBackup={() => setShowDriveBackupModal(true)}
+              onOpenLogin={() => setShowLoginView(true)}
+              onLogout={() => {
+                logoutUser();
+                setAuthSession(null);
+                setShowLoginView(true);
+              }}
+              onBack={handleGoBack}
+            />
+          )}
+
           {currentPage === 'dashboard' && (
             <DashboardView
               db={db}
