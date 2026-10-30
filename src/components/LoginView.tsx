@@ -115,16 +115,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
   });
 
   // 1. Company Code / Multi-Device State
-  const defaultCode = currentDb.settings.companyCode || 'COMP-101';
+  const defaultCode = 'COMP-102';
   const [companyCodeInput, setCompanyCodeInput] = useState<string>(() => {
     try {
       const devRaw = localStorage.getItem('hesabaty_device_profile');
       if (devRaw) {
         const dev = JSON.parse(devRaw);
-        if (dev.companyCode) return normalizeCompanyCode(dev.companyCode);
+        if (dev.companyCode && dev.companyCode !== 'COMP-101') return normalizeCompanyCode(dev.companyCode);
       }
     } catch {}
-    return defaultCode;
+    return 'COMP-102';
   });
   const [loadedCompany, setLoadedCompany] = useState<CompanyAccountData | null>(null);
   const [selectedUserId, setSelectedUserId] = useState<string>(() => {
@@ -604,18 +604,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
   };
 
   const registeredTenants = getCompaniesList();
-  const ekhwaTenant: CompanyTenant = registeredTenants.find(c => c.code === EKHWA_CODE || c.id === EKHWA_TENANT_ID || c.name.includes('الأخوة')) || {
-    id: EKHWA_TENANT_ID,
-    code: EKHWA_CODE,
-    name: 'شركة الأخوة',
-    activityType: 'تجارة وتوزيع عام',
-    adminName: 'مدير شركة الأخوة',
-    adminUsername: 'admin',
-    password: EKHWA_DEFAULT_PIN,
-    currency: 'ج.م',
-    createdAt: new Date().toISOString()
-  };
-
   const mawanTenant: CompanyTenant = registeredTenants.find(c => c.code === MAWAN_CODE || c.id === MAWAN_TENANT_ID || c.name.includes('الموان')) || {
     id: MAWAN_TENANT_ID,
     code: MAWAN_CODE,
@@ -628,8 +616,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
     createdAt: new Date().toISOString()
   };
 
-  const primaryCompanies: CompanyTenant[] = [ekhwaTenant, mawanTenant];
-  const isCurrentCompanyUnlocked = unlockedCompanyCodes.includes(normalizeCompanyCode(companyCodeInput));
+  const primaryCompanies: CompanyTenant[] = [mawanTenant];
+  const isCurrentCompanyUnlocked = unlockedCompanyCodes.includes(normalizeCompanyCode(companyCodeInput)) || unlockedCompanyCodes.includes('COMP-102');
   const selectedUserObj = isCurrentCompanyUnlocked ? companyUsers.find(u => u.id === selectedUserId) : undefined;
 
   return (
@@ -864,19 +852,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                  <div className="pt-1">
                     <button
                       type="button"
                       onClick={() => handleCompanyCardClick(primaryCompanies[0])}
-                      className="w-full py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold rounded-xl text-xs border border-slate-600 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
-                    >
-                      <Lock className="w-3.5 h-3.5" />
-                      <span>فتح شركة الأخوة (COMP-101)</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleCompanyCardClick(primaryCompanies[1])}
-                      className="w-full py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold rounded-xl text-xs border border-slate-600 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                      className="w-full py-2.5 px-3 bg-blue-900/60 hover:bg-blue-800 text-blue-200 font-bold rounded-xl text-xs border border-blue-500/40 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
                     >
                       <Lock className="w-3.5 h-3.5" />
                       <span>فتح شركة الموان (COMP-102)</span>

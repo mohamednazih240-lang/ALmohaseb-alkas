@@ -91,11 +91,11 @@ export const QuickMenuPage: React.FC<QuickMenuPageProps> = ({
               <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
                 مركز العمليات والأدوات السريعة
               </h1>
-              <span className="text-xs bg-slate-900 text-amber-400 font-bold px-2 py-0.5 rounded font-mono">
-                {db.settings.companyCode || 'COMP-101'}
+              <span className="text-xs bg-slate-900 text-blue-300 font-bold px-2 py-0.5 rounded font-mono">
+                {db.settings.companyCode || 'COMP-102'}
               </span>
               <span className="text-xs bg-emerald-50 text-emerald-800 font-bold px-2 py-0.5 rounded border border-emerald-200">
-                {db.settings.company}
+                {db.settings.company || 'شركة الموان'}
               </span>
             </div>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
@@ -132,7 +132,7 @@ export const QuickMenuPage: React.FC<QuickMenuPageProps> = ({
               <div className="text-xs text-slate-300 font-medium mt-0.5 flex items-center gap-2 flex-wrap">
                 <span>الفرع النشط: {currentBranch.name}</span>
                 <span>•</span>
-                <span>كود الشركة: {db.settings.companyCode || 'COMP-101'}</span>
+                <span>كود الشركة: {db.settings.companyCode || 'COMP-102'}</span>
               </div>
             </div>
           </div>

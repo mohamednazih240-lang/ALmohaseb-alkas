@@ -112,9 +112,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       const invBranch = inv.branchId || 'br_main';
       let invoiceCost = 0;
       inv.items.forEach(it => {
-        const prod = db.products.find(p => p.id === it.productId);
+        const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode || p.name === it.productName);
         const branchProd = prod ? getProductForBranch(prod, invBranch) : null;
-        const costPrice = it.costPrice || branchProd?.buyPrice || 0;
+        const costPrice = (it.costPrice && it.costPrice > 0)
+          ? it.costPrice
+          : (branchProd?.buyPrice || prod?.buyPrice || 0);
         invoiceCost += it.qty * costPrice;
       });
 
@@ -172,9 +174,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     sales.forEach(inv => {
       const invBranch = inv.branchId || 'br_main';
       inv.items.forEach(it => {
-        const prod = db.products.find(p => p.id === it.productId);
+        const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode || p.name === it.productName);
         const branchProd = prod ? getProductForBranch(prod, invBranch) : null;
-        const costPrice = it.costPrice || branchProd?.buyPrice || 0;
+        const costPrice = (it.costPrice && it.costPrice > 0)
+          ? it.costPrice
+          : (branchProd?.buyPrice || prod?.buyPrice || 0);
         const itemRev = it.total;
         const itemCost = it.qty * costPrice;
 

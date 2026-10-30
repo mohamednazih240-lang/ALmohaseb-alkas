@@ -174,7 +174,9 @@ export function defaultCurrencies(baseCurrencySymbol: string = 'ج.م'): Currenc
 
 export function defaultSettings(): AppSettings {
   return {
-    company: 'الشركة التجارية للتوزيع',
+    company: 'شركة الموان',
+    companyCode: 'COMP-102',
+    companyPin: '2919',
     phone: '',
     address: 'المقر الرئيسي',
     currency: 'ج.م',
@@ -195,27 +197,16 @@ export function defaultSettings(): AppSettings {
 
 export function defaultBranches(): Branch[] {
   return [
-    { id: 'br_main', name: 'فرع الأخوة', code: 'BR-01', isMain: true, pin: '1234' },
-    { id: 'br_mawan', name: 'فرع الموان', code: 'BR-02', isMain: true, pin: '1272000' }
+    { id: 'br_mawan', name: 'الفرع الرئيسي - شركة الموان', code: 'BR-01', isMain: true, pin: '2919' }
   ];
 }
 
 export function isBranchMawan(b: Branch | null | undefined): boolean {
-  if (!b) return false;
-  return (
-    b.id === 'br_mawan' ||
-    (b.name && b.name.includes('الموان')) ||
-    b.code === 'BR-02'
-  );
+  return true;
 }
 
 export function isBranchEkhwa(b: Branch | null | undefined): boolean {
-  if (!b) return false;
-  return (
-    b.id === 'br_main' ||
-    (b.name && (b.name.includes('الأخوة') || b.name.includes('الرئيسي'))) ||
-    b.code === 'BR-01'
-  );
+  return false;
 }
 
 export function getBranchExpectedPin(b: Branch | null | undefined): string {
@@ -248,206 +239,106 @@ export function isCompanyMawan(identifier?: string | null): boolean {
  * - شركة الموان: contains ONLY الموان users, warehouse, and branches. Never shows الأخوة users!
  * - Manager can edit company PIN in settings (defaults: 1234 for الأخوة, 2919 for الموان).
  */
-export function sanitizeCompanyDatabase(db: AccountingDB, identifier?: string): AccountingDB {
+export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string): AccountingDB {
   if (!db) return db;
 
-  const codeOrId = identifier || db.settings.companyCode || db.settings.company || '';
-  const isMawan = isCompanyMawan(codeOrId);
+  // ==========================================
+  // 🏢 شركة الموان (COMP-102) - النظام مخصص حصرياً لشركة الموان
+  // ==========================================
+  db.settings.company = 'شركة الموان';
+  db.settings.companyCode = 'COMP-102';
+  db.settings.invoiceTitle = db.settings.invoiceTitle || 'بيان';
+  if (!db.settings.companyPin || db.settings.companyPin === '1234' || db.settings.companyPin === '1272000') {
+    db.settings.companyPin = '2919';
+  }
 
-  if (isMawan) {
-    // ==========================================
-    // 🏢 شركة الموان (COMP-102) - PIN: 2919
-    // ==========================================
-    db.settings.company = 'شركة الموان';
-    db.settings.companyCode = 'COMP-102';
-    if (!db.settings.companyPin || db.settings.companyPin === '1234' || db.settings.companyPin === '1272000') {
-      db.settings.companyPin = '2919';
-    }
+  if (!db.users) db.users = [];
 
-    if (!db.users) db.users = [];
+  // Filter out any stale dummy placeholders
+  db.users = db.users.filter(u => u.username !== 'mawan' && u.username !== 'mawan_admin' && u.username !== 'admin');
 
-    // Filter out dummy/stray users if real users exist
-    db.users = db.users.filter(u => u.username !== 'mawan' && u.username !== 'mawan_admin');
-
-    // Clean up names for real users in Mawan
-    for (const u of db.users) {
-      if (u.username === 'mohamed nazih' || u.username === 'mohamednazih') {
-        u.name = 'محمد نزيه';
-        u.role = 'مدير';
-        u.branchId = 'br_mawan';
-      } else if (u.username === 'ahmed nazih' || u.username === 'ahmednazih') {
-        u.name = 'أحمد نزيه';
-        u.role = 'مدير';
-        u.branchId = 'br_mawan';
-      }
-    }
-
-    // Deduplicate by username or id
-    const seenMawanUsers = new Set<string>();
-    const cleanMawanUsers: User[] = [];
-    for (const u of db.users) {
-      const key = (u.username || u.id).toLowerCase();
-      if (!seenMawanUsers.has(key)) {
-        seenMawanUsers.add(key);
-        cleanMawanUsers.push(u);
-      }
-    }
-
-    // If completely empty, provide the actual managers of Mawan
-    if (cleanMawanUsers.length === 0) {
-      cleanMawanUsers.push(
-        {
-          id: 'usr_mvnj47xi',
-          name: 'محمد نزيه',
-          username: 'mohamed nazih',
-          password: '1272',
-          role: 'مدير',
-          branchId: 'br_mawan',
-          branchName: 'المقر الرئيسي - شركة الموان',
-          active: true
-        },
-        {
-          id: 'usr_mvnj6i7d_vhlqh',
-          name: 'أحمد نزيه',
-          username: 'ahmed nazih',
-          password: '1234',
-          role: 'مدير',
-          branchId: 'br_mawan',
-          branchName: 'المقر الرئيسي - شركة الموان',
-          active: true
-        }
-      );
-    }
-
-    db.users = cleanMawanUsers;
-
-    // Branches for الموان
-    db.branches = [
-      {
-        id: 'br_mawan',
-        name: 'المقر الرئيسي - شركة الموان',
-        code: 'BR-01',
-        isMain: true,
-        pin: db.settings.companyPin || '2919'
-      }
-    ];
-
-    // Warehouses for الموان
-    if (!db.warehouses || db.warehouses.length === 0 || !db.warehouses.some(w => w.id === 'wh_mawan')) {
-      db.warehouses = [
-        {
-          id: 'wh_mawan',
-          name: 'مخزن شركة الموان الرئيسي',
-          location: 'المقر الرئيسي',
-          isDefault: true
-        }
-      ];
-    }
-
-    // Default currentUser for الموان
-    if (!db.currentUser || !db.users.some(u => u.id === db.currentUser.id)) {
-      db.currentUser = db.users[0];
-    }
-
-  } else {
-    // ==========================================
-    // 🏢 شركة الأخوة (COMP-101) - PIN: 1234
-    // ==========================================
-    if (!db.settings.company || db.settings.company === 'الشركة التجارية للتوزيع' || db.settings.company.includes('الأخوة')) {
-      db.settings.company = 'شركة الأخوة';
-    }
-    db.settings.companyCode = 'COMP-101';
-    if (!db.settings.companyPin) {
-      db.settings.companyPin = '1234';
-    }
-
-    if (!db.users) db.users = [];
-
-    // Strictly الأخوة users ONLY: Filter out any Mawan users!
-    db.users = db.users.filter(u => 
-      u.username !== 'mawan' && 
-      u.username !== 'mawan_admin' && 
-      u.username !== 'mohamed nazih' &&
-      u.username !== 'ahmed nazih' &&
-      !u.name.includes('الموان') && 
-      u.id !== 'usr_mvnj47xi' &&
-      u.id !== 'usr_mvnj6i7d_vhlqh' &&
-      u.branchId !== 'br_mawan'
-    );
-
-    // Deduplicate الأخوة users
-    const seenEkhwaUsers = new Set<string>();
-    const cleanEkhwaUsers: User[] = [];
-    for (const u of db.users) {
-      const key = (u.username || u.id).toLowerCase();
-      if (!seenEkhwaUsers.has(key)) {
-        seenEkhwaUsers.add(key);
-        cleanEkhwaUsers.push(u);
-      }
-    }
-
-    if (cleanEkhwaUsers.length === 0) {
-      cleanEkhwaUsers.push({
-        id: 'usr_admin',
-        name: 'مدير شركة الأخوة',
-        username: 'admin',
-        password: '123',
-        role: 'مدير',
-        branchId: 'br_main',
-        branchName: 'شركة الأخوة',
-        active: true
-      });
-    }
-
-    db.users = cleanEkhwaUsers;
-
-    // Branches for الأخوة (exclude Mawan)
-    if (!db.branches || db.branches.length === 0) {
-      db.branches = [
-        {
-          id: 'br_main',
-          name: 'المقر الرئيسي - فرع الأخوة',
-          code: 'BR-01',
-          isMain: true,
-          pin: db.settings.companyPin || '1234'
-        }
-      ];
-    } else {
-      db.branches = db.branches.filter(b => !isBranchMawan(b));
-      if (db.branches.length === 0) {
-        db.branches = [
-          {
-            id: 'br_main',
-            name: 'المقر الرئيسي - فرع الأخوة',
-            code: 'BR-01',
-            isMain: true,
-            pin: db.settings.companyPin || '1234'
-          }
-        ];
-      }
-    }
-
-    // Warehouses for الأخوة
-    if (!db.warehouses || db.warehouses.length === 0) {
-      db.warehouses = [
-        {
-          id: 'wh_main',
-          name: 'مخزن شركة الأخوة الرئيسي',
-          location: 'المقر الرئيسي',
-          isDefault: true
-        }
-      ];
-    } else {
-      db.warehouses = db.warehouses.filter(w => w.id !== 'wh_mawan');
-    }
-
-    // Default currentUser for الأخوة
-    if (!db.currentUser || !db.users.some(u => u.id === db.currentUser.id)) {
-      db.currentUser = db.users[0];
+  // Clean up and ensure actual managers of شركة الموان
+  for (const u of db.users) {
+    if (u.username === 'mohamed nazih' || u.username === 'mohamednazih' || u.name?.includes('محمد')) {
+      u.name = 'Mohamed Nazih';
+      u.role = 'مدير';
+      u.branchId = 'br_mawan';
+      u.branchName = 'الفرع الرئيسي - شركة الموان';
+    } else if (u.username === 'ahmed nazih' || u.username === 'ahmednazih' || u.name?.includes('أحمد')) {
+      u.name = 'Ahmed Nazih';
+      u.role = 'مدير';
+      u.branchId = 'br_mawan';
+      u.branchName = 'الفرع الرئيسي - شركة الموان';
     }
   }
 
-  // Retroactively ensure all previously recorded invoices with payments have their linked vouchers
+  const seenUsers = new Set<string>();
+  const cleanUsers: User[] = [];
+  for (const u of db.users) {
+    const key = (u.username || u.name || u.id).toLowerCase();
+    if (!seenUsers.has(key)) {
+      seenUsers.add(key);
+      cleanUsers.push(u);
+    }
+  }
+
+  // Ensure both Ahmed Nazih and Mohamed Nazih exist
+  if (!cleanUsers.some(u => u.name === 'Mohamed Nazih' || u.username === 'mohamed nazih')) {
+    cleanUsers.push({
+      id: 'usr_mvnj47xi',
+      name: 'Mohamed Nazih',
+      username: 'mohamed nazih',
+      password: '1272',
+      role: 'مدير',
+      branchId: 'br_mawan',
+      branchName: 'الفرع الرئيسي - شركة الموان',
+      active: true
+    });
+  }
+  if (!cleanUsers.some(u => u.name === 'Ahmed Nazih' || u.username === 'ahmed nazih')) {
+    cleanUsers.push({
+      id: 'usr_mvnj6i7d_vhlqh',
+      name: 'Ahmed Nazih',
+      username: 'ahmed nazih',
+      password: '1234',
+      role: 'مدير',
+      branchId: 'br_mawan',
+      branchName: 'الفرع الرئيسي - شركة الموان',
+      active: true
+    });
+  }
+
+  db.users = cleanUsers;
+
+  // Single unified branch: الفرع الرئيسي - شركة الموان
+  db.branches = [
+    {
+      id: 'br_mawan',
+      name: 'الفرع الرئيسي - شركة الموان',
+      code: 'BR-01',
+      isMain: true,
+      pin: db.settings.companyPin || '2919'
+    }
+  ];
+
+  // Warehouses for شركة الموان
+  if (!db.warehouses || db.warehouses.length === 0 || !db.warehouses.some(w => w.id === 'wh_mawan')) {
+    db.warehouses = [
+      {
+        id: 'wh_mawan',
+        name: 'مخزن شركة الموان الرئيسي',
+        location: 'المقر الرئيسي',
+        isDefault: true
+      }
+    ];
+  }
+
+  // Default currentUser
+  if (!db.currentUser || !db.users.some(u => u.id === db.currentUser.id)) {
+    db.currentUser = db.users[0];
+  }
+
+  // Retroactively ensure all invoices with payments match their linked vouchers down to the millimeter
   if (db.invoices && db.invoices.length > 0) {
     db = syncAllExistingInvoiceVouchers(db).db;
   }
@@ -935,7 +826,14 @@ export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
   const totalCOGS = branchInvoices
     .filter(i => i.type === 'sale')
     .reduce((acc, i) => {
-      const invoiceCogs = i.items.reduce((s, it) => s + (it.qty * (it.costPrice || 0)), 0);
+      const invoiceCogs = i.items.reduce((s, it) => {
+        const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode);
+        const bp = prod ? getProductForBranch(prod, i.branchId || 'br_mawan') : null;
+        const unitCost = (it.costPrice && it.costPrice > 0)
+          ? it.costPrice
+          : (bp?.avgCost && bp.avgCost > 0 ? bp.avgCost : (bp?.buyPrice && bp.buyPrice > 0 ? bp.buyPrice : (prod?.buyPrice || 0)));
+        return s + (it.qty * unitCost);
+      }, 0);
       return acc + invoiceCogs;
     }, 0);
 
@@ -1838,48 +1736,70 @@ export function syncInvoiceVouchers(
 
   const invoiceId = invoice.id;
   const invoiceNumber = invoice.number;
-
-  // 1. Remove existing linked vouchers for this invoice to prevent duplication
-  updated.vouchers = updated.vouchers.filter(v => {
-    const isLinked = (v as any).invoiceId === invoiceId ||
-                     (v as any).referenceNumber === invoiceNumber ||
-                     (v as any).sourceId === invoiceId ||
-                     (v.description && v.description.includes(invoiceNumber));
-    return !isLinked;
-  });
-
   const finalPaid = Number(invoice.paid) || 0;
-  if (finalPaid <= 0) {
-    return updated;
-  }
 
   const isSale = invoice.type === 'sale' || invoice.invoiceKind === 'sale' || invoice.invoiceKind === 'wholesale';
   const isPurchaseReturn = invoice.invoiceKind === 'purchase_return';
 
   // Money incoming -> 'receipt': Sales, Wholesale, Purchase Return
   // Money outgoing -> 'payment': Purchase, Sale Return
-  let voucherType: 'receipt' | 'payment' = 'receipt';
-  if (isSale || isPurchaseReturn) {
-    voucherType = 'receipt';
-  } else {
-    voucherType = 'payment';
+  const voucherType: 'receipt' | 'payment' = (isSale || isPurchaseReturn) ? 'receipt' : 'payment';
+
+  // If paid is 0 or less, remove any previously linked voucher
+  if (finalPaid <= 0) {
+    updated.vouchers = updated.vouchers.filter(v => {
+      const isLinked = (v as any).invoiceId === invoiceId ||
+                       (v as any).sourceId === invoiceId ||
+                       ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
+                       (v.description && v.description.includes(invoiceNumber) && v.type === voucherType);
+      return !isLinked;
+    });
+    return updated;
   }
 
-  const paymentLines = (invoice.payments && invoice.payments.length > 0)
-    ? invoice.payments.filter(p => (Number(p.amount) || 0) > 0 && p.method !== 'آجل')
-    : [{ method: invoice.paymentMethod || 'نقدي', amount: finalPaid }];
+  const paymentMethod = invoice.paymentMethod || 'نقدي';
+  const desc = voucherType === 'receipt'
+    ? `سند قبض مقابل فاتورة ${isSale ? 'مبيعات' : 'مرتجع'} رقم ${invoice.number} (${invoice.partyName}) عبر ${paymentMethod}`
+    : `سند صرف مقابل فاتورة ${!isSale ? 'مشتريات' : 'مرتجع'} رقم ${invoice.number} (${invoice.partyName}) عبر ${paymentMethod}`;
 
-  paymentLines.forEach(pLine => {
-    const amt = Number(pLine.amount) || 0;
-    if (amt <= 0) return;
+  // Find existing linked voucher to UPDATE IN PLACE (preventing number changes or duplicates)
+  const existingVoucher = updated.vouchers.find(v => {
+    return (v as any).invoiceId === invoiceId ||
+           (v as any).sourceId === invoiceId ||
+           ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
+           (v.description && v.description.includes(invoiceNumber) && v.type === voucherType);
+  });
 
+  if (existingVoucher) {
+    // 1. Update in place down to the exact millimeter
+    existingVoucher.type = voucherType;
+    existingVoucher.amount = finalPaid;
+    existingVoucher.date = invoice.date;
+    existingVoucher.partyId = invoice.partyId;
+    existingVoucher.partyName = invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
+    existingVoucher.paymentMethod = paymentMethod;
+    existingVoucher.description = desc;
+    existingVoucher.branchId = invoice.branchId || 'br_mawan';
+    existingVoucher.branchName = invoice.branchName || 'الفرع الرئيسي - شركة الموان';
+    existingVoucher.invoiceId = invoice.id;
+    existingVoucher.referenceNumber = invoice.number;
+    existingVoucher.updatedAt = new Date().toISOString();
+    existingVoucher.updatedBy = currentUserName;
+
+    // 2. Filter out any secondary duplicate vouchers for this same invoice
+    updated.vouchers = updated.vouchers.filter(v => {
+      if (v.id === existingVoucher.id) return true;
+      const isDuplicate = (v as any).invoiceId === invoiceId ||
+                          (v as any).sourceId === invoiceId ||
+                          ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
+                          (v.description && v.description.includes(invoiceNumber) && v.type === voucherType);
+      return !isDuplicate;
+    });
+  } else {
+    // Create new linked voucher with guaranteed unique sequential number
     const { number: vNum, nextSeq } = getNextUniqueVoucherNumber(updated, voucherType);
     const settingKey = voucherType === 'receipt' ? 'nextReceipt' : 'nextPayment';
     updated.settings[settingKey] = Math.max(updated.settings[settingKey] || 1, nextSeq + 1);
-
-    const desc = voucherType === 'receipt'
-      ? `سند قبض مقابل فاتورة ${isSale ? 'مبيعات' : 'مرتجع'} رقم ${invoice.number} (${invoice.partyName}) عبر ${pLine.method}`
-      : `سند صرف مقابل فاتورة ${!isSale ? 'مشتريات' : 'مرتجع'} رقم ${invoice.number} (${invoice.partyName}) عبر ${pLine.method}`;
 
     const newVoucher: Voucher = {
       id: generateId(voucherType === 'receipt' ? 'rec' : 'pay'),
@@ -1888,28 +1808,30 @@ export function syncInvoiceVouchers(
       date: invoice.date,
       partyId: invoice.partyId,
       partyName: invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام'),
-      amount: amt,
-      paymentMethod: pLine.method,
+      amount: finalPaid,
+      paymentMethod,
       description: desc,
       referenceNumber: invoice.number,
       invoiceId: invoice.id,
-      branchId: invoice.branchId || 'br_main',
-      branchName: invoice.branchName || 'الفرع الرئيسي',
+      branchId: invoice.branchId || 'br_mawan',
+      branchName: invoice.branchName || 'الفرع الرئيسي - شركة الموان',
       journalEntryId: invoice.journalEntryId,
       createdAt: invoice.createdAt || new Date().toISOString(),
       createdBy: invoice.createdBy || currentUserName,
     };
 
     updated.vouchers.unshift(newVoucher);
-  });
+  }
 
   return updated;
 }
 
 /**
  * Retroactively synchronizes linked financial vouchers (سندات قبض وسندات صرف)
- * for all previously entered invoices that had a paid amount (paid > 0).
- * Ensures every paid invoice in the system has its corresponding voucher.
+ * for all previously entered invoices. Ensures:
+ * 1. Every paid invoice (paid > 0) has an exact voucher matching down to the millimeter
+ * 2. If voucher already existed, its amount matches paid exactly
+ * 3. Any duplicate vouchers for the same invoice are deduplicated
  */
 export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: AccountingDB; createdCount: number } {
   if (!db.vouchers) db.vouchers = [];
@@ -1918,24 +1840,49 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
   let createdCount = 0;
   const currentUserName = db.currentUser?.name || 'مدير النظام';
 
-  // Sort invoices chronologically so vouchers are generated in order
+  // Sort invoices chronologically
   const sortedInvoices = [...db.invoices].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
   sortedInvoices.forEach(inv => {
     const paid = Number(inv.paid) || 0;
-    if (paid <= 0) return;
+    const isSale = inv.type === 'sale';
+    const expectedType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
 
-    // Check if this invoice already has any linked voucher
-    const alreadyLinked = db.vouchers.some(v => {
+    if (paid <= 0) {
+      // Remove any lingering linked voucher
+      db.vouchers = db.vouchers.filter(v => (v as any).invoiceId !== inv.id && (v as any).referenceNumber !== inv.number);
+      return;
+    }
+
+    // Find linked voucher
+    const linkedVouchers = db.vouchers.filter(v => {
       return (v as any).invoiceId === inv.id ||
-             (v as any).referenceNumber === inv.number ||
              (v as any).sourceId === inv.id ||
-             (v.description && v.description.includes(inv.number));
+             ((v as any).referenceNumber === inv.number && v.type === expectedType) ||
+             (v.description && v.description.includes(inv.number) && v.type === expectedType);
     });
 
-    if (!alreadyLinked) {
+    if (linkedVouchers.length === 0) {
+      // Create missing voucher
       syncInvoiceVouchers(db, inv, inv.createdBy || currentUserName);
       createdCount++;
+    } else {
+      // Pick first, update amount to match invoice paid exactly
+      const primaryVoucher = linkedVouchers[0];
+      if (primaryVoucher.amount !== paid || !primaryVoucher.invoiceId) {
+        primaryVoucher.amount = paid;
+        primaryVoucher.invoiceId = inv.id;
+        primaryVoucher.referenceNumber = inv.number;
+        primaryVoucher.date = inv.date;
+        primaryVoucher.partyName = inv.partyName || (isSale ? 'عميل نقدي' : 'مورد عام');
+        primaryVoucher.paymentMethod = inv.paymentMethod || 'نقدي';
+      }
+
+      // If duplicate vouchers existed for this invoice, delete duplicates
+      if (linkedVouchers.length > 1) {
+        const extraIds = new Set(linkedVouchers.slice(1).map(v => v.id));
+        db.vouchers = db.vouchers.filter(v => !extraIds.has(v.id));
+      }
     }
   });
 

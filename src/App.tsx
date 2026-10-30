@@ -89,7 +89,7 @@ export default function App() {
 
   // Branch Selection State
   const [activeBranchId, setActiveBranchId] = useState<string>(() => {
-    return db.branches?.[0]?.id || 'br_main';
+    return db.branches?.[0]?.id || 'br_mawan';
   });
 
   // Synchronize activeBranchId whenever db.branches changes (e.g. switching between الأخوة and الموان)

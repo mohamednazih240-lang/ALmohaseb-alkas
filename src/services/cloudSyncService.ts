@@ -60,14 +60,15 @@ const LOCAL_DEVICE_ID_KEY = 'hesabaty_device_instance_id';
  * Handles unicode dashes, whitespace, 'COMP - 101' -> 'COMP-101', digits '101' -> 'COMP-101'
  */
 export function normalizeCompanyCode(code?: string): string {
-  if (!code) return 'COMP-101';
+  if (!code || code === 'COMP-101') return 'COMP-102';
   let clean = code.trim().toUpperCase();
   clean = clean.replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-');
   clean = clean.replace(/\s*-\s*/g, '-').replace(/\s+/g, '');
   if (/^\d+$/.test(clean)) {
     clean = `COMP-${clean}`;
   }
-  return clean || 'COMP-101';
+  if (clean === 'COMP-101') return 'COMP-102';
+  return clean || 'COMP-102';
 }
 
 /**
@@ -145,7 +146,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
     syncDebounceTimer = null;
   }
 
-  const rawCode = db.settings.companyCode || 'COMP-101';
+  const rawCode = db.settings.companyCode || 'COMP-102';
   const cleanCode = normalizeCompanyCode(rawCode);
 
   // Instantly broadcast locally across browser tabs/PWA instances in 0ms
@@ -229,8 +230,8 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
       const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
       await setDoc(compDocRef, payload, { merge: true });
 
-      // 2. Also save to main database doc for COMP-101 / primary
-      if (cleanCode === 'COMP-101') {
+      // 2. Also save to main database doc for COMP-102
+      if (cleanCode === 'COMP-102' || cleanCode === 'COMP-101') {
         const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
         await setDoc(docRef, payload, { merge: true });
       }

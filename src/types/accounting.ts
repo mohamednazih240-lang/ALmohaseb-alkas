@@ -259,6 +259,8 @@ export interface Voucher {
   invoiceId?: string;
   createdAt?: string;
   createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
   status?: 'معتمد' | 'مسودة' | 'ملغي';
 }
 

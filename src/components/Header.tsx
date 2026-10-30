@@ -114,10 +114,10 @@ const HeaderComponent: React.FC<HeaderProps> = ({
           <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 text-white rounded-xl text-xs font-bold shadow-2xs shrink-0 border border-slate-700">
             <Building2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
             <span className="font-black truncate max-w-[120px] sm:max-w-[160px]">
-              {settings.company || (settings.companyCode === 'COMP-102' ? 'شركة الموان' : 'شركة الأخوة')}
+              {settings.company || 'شركة الموان'}
             </span>
-            <span className="text-[9.5px] font-mono bg-amber-500 text-slate-950 px-1.5 py-0.2 rounded font-bold">
-              {settings.companyCode || 'COMP-101'}
+            <span className="text-[9.5px] font-mono bg-blue-500 text-white px-1.5 py-0.2 rounded font-bold">
+              {settings.companyCode || 'COMP-102'}
             </span>
           </div>
         </div>

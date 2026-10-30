@@ -94,7 +94,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
       styleEl.innerHTML = `
-        @page { size: A4 portrait; margin: 8mm 10mm; }
+        @page { size: A4 portrait; margin: 6mm 8mm; }
         @media print {
           html, body {
             width: 100% !important;
@@ -104,24 +104,33 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             overflow: visible !important;
             background: #ffffff !important;
           }
-          #invoice-printable-content, .invoice-container {
+          #invoice-printable-content {
             width: 100% !important;
-            max-width: 190mm !important;
-            height: auto !important;
+            max-width: 194mm !important;
             margin: 0 auto !important;
-            padding: 6mm 8mm !important;
-            border: 2px solid #000000 !important;
+            padding: 0 !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+          .invoice-container {
+            width: 100% !important;
+            max-width: 194mm !important;
+            min-height: auto !important;
+            margin: 0 auto !important;
+            padding: 5mm 6mm !important;
+            border: 1.5px solid #000000 !important;
             box-sizing: border-box !important;
             page-break-inside: avoid !important;
             break-inside: avoid !important;
+            page-break-after: avoid !important;
+            break-after: avoid !important;
             overflow: visible !important;
             background: #ffffff !important;
           }
-          tr, td, th {
+          tr, td, th, table, thead, tbody, .totals-section, .company-header, .invoice-info-box {
             page-break-inside: avoid !important;
             break-inside: avoid !important;
           }
-          /* خلفية بيضاء نقية 100% بدون أي تظليل */
           table, th, td, tr, .info-box, .header, .invoice-header {
             background: #ffffff !important;
             background-color: #ffffff !important;
@@ -133,7 +142,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
       `;
     } else if (paperSize === 'A5') {
       styleEl.innerHTML = `
-        @page { size: A5 portrait; margin: 6mm 7mm; }
+        @page { size: A5 portrait; margin: 4mm 5mm; }
         @media print {
           html, body {
             width: 100% !important;
@@ -143,20 +152,42 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             overflow: visible !important;
             background: #ffffff !important;
           }
-          #invoice-printable-content, .invoice-container {
+          #invoice-printable-content {
             width: 100% !important;
-            max-width: 135mm !important;
-            height: auto !important;
+            max-width: 138mm !important;
             margin: 0 auto !important;
-            padding: 4mm 5mm !important;
-            border: 1.5px solid #000000 !important;
+            padding: 0 !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+          .invoice-container {
+            width: 100% !important;
+            max-width: 138mm !important;
+            min-height: auto !important;
+            margin: 0 auto !important;
+            padding: 3mm 4mm !important;
+            border: 1.2px solid #000000 !important;
             box-sizing: border-box !important;
             page-break-inside: avoid !important;
             break-inside: avoid !important;
+            page-break-after: avoid !important;
+            break-after: avoid !important;
             overflow: visible !important;
             background: #ffffff !important;
           }
-          tr, td, th {
+          .company-header { padding-bottom: 2px !important; margin-bottom: 3px !important; }
+          .company-header h2 { font-size: 13px !important; margin: 0 !important; }
+          .company-header p { font-size: 8.5px !important; margin: 0 !important; }
+          .header-left { font-size: 8.5px !important; }
+          .invoice-info-box { font-size: 8.5px !important; padding: 2.5px 5px !important; margin-bottom: 3px !important; }
+          .invoice-statement-box { font-size: 8.5px !important; padding: 2px 4px !important; margin-bottom: 3px !important; }
+          table { font-size: 8.5px !important; margin-bottom: 3px !important; }
+          th, td { padding: 2px 3px !important; }
+          .totals-section { font-size: 8.5px !important; padding-top: 2px !important; margin-bottom: 2px !important; }
+          .total-row { padding: 1px 0 !important; }
+          .invoice-bottom-notes { font-size: 7.5px !important; padding-top: 2px !important; }
+          .copyright-footer { font-size: 7px !important; margin-top: 2px !important; }
+          tr, td, th, table, thead, tbody, .totals-section, .company-header, .invoice-info-box {
             page-break-inside: avoid !important;
             break-inside: avoid !important;
           }
@@ -524,6 +555,11 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
 
                 {/* 5. قسم الإجماليات وتفاصيل الدفع */}
                 <div className="totals-section">
+                  <div className="total-row" style={{ color: '#475569', fontSize: '10px' }}>
+                    <span>إجمالي عدد الأصناف / الكميات:</span>
+                    <strong className="font-mono text-slate-800">{formatMoneyClean(invoice.items.reduce((s, it) => s + (Number(it.qty) || 0), 0))}</strong>
+                  </div>
+
                   <div className="total-row">
                     <span>إجمالي الفاتورة:</span>
                     <span>{formatMoneyClean(invoice.total)} {settings.currency || 'ج.م'}</span>
@@ -568,11 +604,11 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
               <div className="invoice-bottom-notes">
                 <p>{settings.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً للشروط والأحكام'}</p>
               </div>
-            </div>
 
-            {/* 7. حقوق الملكية الفكرية المعتمدة للمطور */}
-            <div className="copyright-footer">
-              حقوق الملكية الفكرية محفوظة لمطور النظام Mohamed Nazih ت01029190615
+              {/* 7. حقوق الملكية الفكرية المعتمدة للمطور */}
+              <div className="copyright-footer">
+                حقوق الملكية الفكرية محفوظة لمطور النظام Mohamed Nazih ت01029190615
+              </div>
             </div>
           </div>
         </div>

@@ -17,70 +17,29 @@ export interface CompanyTenant {
   googleEmail?: string;
 }
 
-export const EKHWA_TENANT_ID = 'comp_ekhwa';
-export const EKHWA_CODE = 'COMP-101';
-export const EKHWA_DEFAULT_PIN = '1234';
-
+// شركة الموان (COMP-102) - الشركة المعتمدة والوحيدة للنظام
 export const MAWAN_TENANT_ID = 'comp_mawan';
 export const MAWAN_CODE = 'COMP-102';
 export const MAWAN_DEFAULT_PIN = '2919';
+
+// Legacy compatibility exports
+export const EKHWA_TENANT_ID = 'comp_mawan';
+export const EKHWA_CODE = 'COMP-102';
+export const EKHWA_DEFAULT_PIN = '2919';
 
 const TENANTS_REGISTRY_KEY = 'hesabaty_companies_registry';
 const ACTIVE_TENANT_KEY = 'hesabaty_active_tenant_id';
 
 /**
- * Ensures the two primary independent companies (الأخوة and الموان) exist in the registry with their secret PINs
+ * Ensures شركة الموان (COMP-102) is the sole dedicated company tenant in the registry
  */
 export function ensurePrimaryCompanies(existingList: CompanyTenant[]): CompanyTenant[] {
-  // Purge any stale dummy test companies like "الشركة التجارية للتوزيع" or legacy IDs
-  const filteredList = (existingList || []).filter(c => {
-    const name = c.name || '';
-    const code = c.code || '';
-    const id = c.id || '';
-    if (
-      name.includes('الشركة التجارية للتوزيع') ||
-      code.includes('MV6L2JBE') ||
-      id.includes('MV6L2JBE') ||
-      name.includes('الشركة_التجارية')
-    ) {
-      return false;
-    }
-    return true;
-  });
-
-  // 1. شركة الأخوة (COMP-101) - Secret PIN: 1234
-  let ekhwa = filteredList.find(c => c.id === EKHWA_TENANT_ID || c.code === EKHWA_CODE || c.name.includes('الأخوة') || c.id === 'comp_primary');
-  if (ekhwa) {
-    ekhwa.id = EKHWA_TENANT_ID;
-    ekhwa.code = EKHWA_CODE;
-    ekhwa.name = 'شركة الأخوة';
-    if (!ekhwa.password) ekhwa.password = EKHWA_DEFAULT_PIN;
-  } else {
-    ekhwa = {
-      id: EKHWA_TENANT_ID,
-      code: EKHWA_CODE,
-      name: 'شركة الأخوة',
-      activityType: 'تجارة وتوزيع عام',
-      adminName: 'مدير شركة الأخوة',
-      adminUsername: 'admin',
-      password: EKHWA_DEFAULT_PIN,
-      currency: 'ج.م',
-      phone: '',
-      address: 'المقر الرئيسي',
-      createdAt: new Date().toISOString()
-    };
-  }
-
-  // 2. شركة الموان (COMP-102) - Secret PIN: 2919
-  let mawan = filteredList.find(c => c.id === MAWAN_TENANT_ID || c.code === MAWAN_CODE || c.name.includes('الموان'));
+  let mawan = (existingList || []).find(c => c.id === MAWAN_TENANT_ID || c.code === MAWAN_CODE || c.name.includes('الموان'));
   if (mawan) {
     mawan.id = MAWAN_TENANT_ID;
     mawan.code = MAWAN_CODE;
     mawan.name = 'شركة الموان';
-    // If PIN was previously default 1234 or 1272000, set to user-mandated 2919
-    if (!mawan.password || mawan.password === '1272000' || mawan.password === '1234') {
-      mawan.password = MAWAN_DEFAULT_PIN;
-    }
+    mawan.password = MAWAN_DEFAULT_PIN;
   } else {
     mawan = {
       id: MAWAN_TENANT_ID,
@@ -97,24 +56,8 @@ export function ensurePrimaryCompanies(existingList: CompanyTenant[]): CompanyTe
     };
   }
 
-  // Strict order: ALWAYS ekhwa at index 0, mawan at index 1
-  const cleanList: CompanyTenant[] = [ekhwa, mawan];
-
-  // Any other company that isn't ekhwa or mawan
-  for (const c of filteredList) {
-    if (
-      c.id !== EKHWA_TENANT_ID &&
-      c.code !== EKHWA_CODE &&
-      c.id !== MAWAN_TENANT_ID &&
-      c.code !== MAWAN_CODE &&
-      !c.name.includes('الأخوة') &&
-      !c.name.includes('الموان')
-    ) {
-      cleanList.push(c);
-    }
-  }
-
-  return cleanList;
+  // System is exclusively dedicated to شركة الموان
+  return [mawan];
 }
 
 /**
@@ -151,20 +94,25 @@ export function saveCompaniesList(list: CompanyTenant[]): void {
 }
 
 /**
- * Returns current active tenant ID
+ * Returns current active tenant ID (Always defaults to comp_mawan)
  */
-export function getActiveTenantId(): string | null {
-  return localStorage.getItem(ACTIVE_TENANT_KEY);
+export function getActiveTenantId(): string {
+  const current = localStorage.getItem(ACTIVE_TENANT_KEY);
+  if (!current || current === 'comp_ekhwa' || current === 'comp_primary') {
+    localStorage.setItem(ACTIVE_TENANT_KEY, MAWAN_TENANT_ID);
+    return MAWAN_TENANT_ID;
+  }
+  return current;
 }
 
 /**
  * Sets current active tenant ID
  */
 export function setActiveTenantId(id: string | null): void {
-  if (id) {
+  if (id && id !== 'comp_ekhwa' && id !== 'comp_primary') {
     localStorage.setItem(ACTIVE_TENANT_KEY, id);
   } else {
-    localStorage.removeItem(ACTIVE_TENANT_KEY);
+    localStorage.setItem(ACTIVE_TENANT_KEY, MAWAN_TENANT_ID);
   }
 }
 
@@ -172,10 +120,8 @@ export function setActiveTenantId(id: string | null): void {
  * Returns current active company tenant
  */
 export function getActiveCompany(): CompanyTenant | null {
-  const activeId = getActiveTenantId();
-  if (!activeId) return null;
   const list = getCompaniesList();
-  return list.find(c => c.id === activeId) || null;
+  return list[0] || null;
 }
 
 /**
