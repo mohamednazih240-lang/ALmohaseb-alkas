@@ -366,11 +366,6 @@ export default function App() {
   // Sync with window.location.hash and mobile browser back button (popstate/hashchange)
   useEffect(() => {
     const handlePopState = (e: PopStateEvent) => {
-      // Ignore submodal internal pops so invoice editor or current page is never interrupted
-      if ((window as any).__hesabaty_suppress_popstate || (e.state && (e.state.subModal || e.state.modalId))) {
-        return;
-      }
-
       // If back was pressed and state has a page, transition to it
       if (e.state && e.state.page && validPages.includes(e.state.page)) {
         setCurrentPage(e.state.page);

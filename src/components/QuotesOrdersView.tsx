@@ -58,13 +58,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
   const [showOrderModal, setShowOrderModal] = useState(false);
 
   // Mobile back buttons: exit quote editor or close order modal
-  useModalBackHandler(viewSubTab === 'editor', () => {
-    if ((window as any).__hesabaty_has_open_modal && typeof (window as any).__hesabaty_close_topmost_modal === 'function') {
-      const closed = (window as any).__hesabaty_close_topmost_modal();
-      if (closed) return;
-    }
-    setViewSubTab('list');
-  }, 'quotes_editor');
+  useModalBackHandler(viewSubTab === 'editor', () => setViewSubTab('list'), 'quotes_editor');
   useModalBackHandler(showOrderModal, () => setShowOrderModal(false), 'order_modal');
 
   // Order form state

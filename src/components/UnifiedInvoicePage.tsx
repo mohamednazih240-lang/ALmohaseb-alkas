@@ -32,6 +32,7 @@ import {
   CreditCard,
   AlertTriangle
 } from 'lucide-react';
+import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
   AccountingDB,
   Invoice,
@@ -340,95 +341,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
   const [unsavedDraftData, setUnsavedDraftData] = useState<any>(null);
 
-  // Internal submodal management: Coordinates submodals (e.g. rapid item card, options/revenues, lookup, etc.)
-  // without pushing rogue history states that kick the user out of the invoice!
-  const hasAnyOpenSubmodal = Boolean(
-    showRapidItemModal ||
-    showOptionsModal ||
-    showItemCardModal ||
-    showLookupModal ||
-    showFastCreateModal ||
-    showCustDropdown ||
-    showModifyModal ||
-    showEditItemModal ||
-    showAuditModal
-  );
-
-  const closeTopmostSubmodal = () => {
-    if (showRapidItemModal) {
-      setShowRapidItemModal(false);
-      setRapidEditingIndex(null);
-      return true;
-    }
-    if (showOptionsModal) {
-      setShowOptionsModal(false);
-      return true;
-    }
-    if (showItemCardModal) {
-      setShowItemCardModal(false);
-      setSelectedCardProduct(null);
-      return true;
-    }
-    if (showLookupModal) {
-      setShowLookupModal(false);
-      return true;
-    }
-    if (showFastCreateModal) {
-      setShowFastCreateModal(false);
-      return true;
-    }
-    if (showCustDropdown) {
-      setShowCustDropdown(false);
-      return true;
-    }
-    if (showModifyModal) {
-      setShowModifyModal(false);
-      return true;
-    }
-    if (showEditItemModal) {
-      setShowEditItemModal(false);
-      return true;
-    }
-    if (showAuditModal) {
-      setShowAuditModal(false);
-      return true;
-    }
-    return false;
-  };
-
-  // Expose to window so parent views (PurchasesView / SalesView) know a submodal is active
-  useEffect(() => {
-    (window as any).__hesabaty_has_open_modal = hasAnyOpenSubmodal;
-    (window as any).__hesabaty_close_topmost_modal = closeTopmostSubmodal;
-    return () => {
-      (window as any).__hesabaty_has_open_modal = false;
-      (window as any).__hesabaty_close_topmost_modal = null;
-    };
-  }, [
-    hasAnyOpenSubmodal,
-    showRapidItemModal,
-    showOptionsModal,
-    showItemCardModal,
-    showLookupModal,
-    showFastCreateModal,
-    showCustDropdown,
-    showModifyModal,
-    showEditItemModal,
-    showAuditModal
-  ]);
-
-  // Handle escape key to close open submodals safely without exiting invoice
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && hasAnyOpenSubmodal) {
-        e.preventDefault();
-        e.stopPropagation();
-        closeTopmostSubmodal();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [hasAnyOpenSubmodal]);
+  // Submodal back handlers: Prevents Android Back button from kicking user out of invoice!
+  useModalBackHandler(showCustDropdown, () => setShowCustDropdown(false), 'invoice_party_dropdown');
+  useModalBackHandler(showLookupModal, () => setShowLookupModal(false), 'invoice_lookup_modal');
+  useModalBackHandler(showItemCardModal, () => setShowItemCardModal(false), 'invoice_item_card_modal');
+  useModalBackHandler(showRapidItemModal, () => setShowRapidItemModal(false), 'invoice_rapid_item_modal');
+  useModalBackHandler(showFastCreateModal, () => setShowFastCreateModal(false), 'invoice_fast_create_modal');
+  useModalBackHandler(showOptionsModal, () => setShowOptionsModal(false), 'invoice_options_modal');
+  useModalBackHandler(showModifyModal, () => setShowModifyModal(false), 'invoice_modify_modal');
+  useModalBackHandler(showEditItemModal, () => setShowEditItemModal(false), 'invoice_edit_item_modal');
+  useModalBackHandler(showAuditModal, () => setShowAuditModal(false), 'invoice_audit_modal');
 
   // Browser beforeunload protection
   useEffect(() => {
@@ -4057,15 +3979,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </div>
 
               {/* Discount & Tax Grid - Clean Touch-Friendly Responsive Design */}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-2.5">
                 {/* Item Discount */}
-                <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-2 flex flex-col gap-1.5">
+                <div className="flex flex-col gap-1">
                   <div className="flex items-center justify-between">
-                    <span className="text-[10.5px] text-slate-200 font-bold">
-                      الخصم
-                    </span>
-                    {/* Clear Segmented Type Toggle */}
-                    <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
+                    <label className="text-[10px] text-[#94a3b8] font-semibold">
+                      خصم الصنف
+                    </label>
+                    {/* Segmented Type Toggle */}
+                    <div className="inline-flex rounded border border-[#273754] p-0.5 bg-[#0b1120]">
                       <button
                         type="button"
                         onClick={(e) => {
@@ -4073,12 +3995,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           setRapidItemDiscountType('fixed');
                           calculateRapidItemTotal('forward', { overrideDiscType: 'fixed' });
                         }}
-                        className={`px-2 py-0.5 text-[9.5px] font-bold rounded transition-colors ${
+                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
                           rapidItemDiscountType === 'fixed'
-                            ? 'bg-blue-600 text-white shadow-xs'
-                            : 'text-slate-400 hover:text-white'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-[#94a3b8] hover:text-white'
                         }`}
-                        title="خصم بمبلغ ثابت (ج.م)"
                       >
                         ج.م
                       </button>
@@ -4089,12 +4010,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           setRapidItemDiscountType('percent');
                           calculateRapidItemTotal('forward', { overrideDiscType: 'percent' });
                         }}
-                        className={`px-2 py-0.5 text-[9.5px] font-bold rounded transition-colors ${
+                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
                           rapidItemDiscountType === 'percent'
-                            ? 'bg-blue-600 text-white shadow-xs'
-                            : 'text-slate-400 hover:text-white'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-[#94a3b8] hover:text-white'
                         }`}
-                        title="خصم بنسبة مئوية (%)"
                       >
                         %
                       </button>
@@ -4104,25 +4024,25 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     ref={rapidDiscRef}
                     type="text"
                     value={rapidItemDiscount}
-                    placeholder={rapidItemDiscountType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
+                    placeholder="الخصم..."
                     onChange={e => {
                       const converted = toWesternNumerals(e.target.value);
                       setRapidItemDiscount(converted);
                       calculateRapidItemTotal('forward', { overrideDisc: converted });
                     }}
                     onKeyDown={e => handleRapidKeyDown(e, rapidTaxRef)}
-                    className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
+                    className="w-full bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs font-mono outline-none focus:border-blue-500 text-center"
                   />
                 </div>
 
                 {/* Item Tax */}
-                <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-2 flex flex-col gap-1.5">
+                <div className="flex flex-col gap-1">
                   <div className="flex items-center justify-between">
-                    <span className="text-[10.5px] text-slate-200 font-bold">
-                      الضريبة
-                    </span>
-                    {/* Clear Segmented Type Toggle */}
-                    <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
+                    <label className="text-[10px] text-[#94a3b8] font-semibold">
+                      ضريبة الصنف
+                    </label>
+                    {/* Segmented Type Toggle */}
+                    <div className="inline-flex rounded border border-[#273754] p-0.5 bg-[#0b1120]">
                       <button
                         type="button"
                         onClick={(e) => {
@@ -4130,12 +4050,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           setRapidItemTaxType('fixed');
                           calculateRapidItemTotal('forward', { overrideTaxType: 'fixed' });
                         }}
-                        className={`px-2 py-0.5 text-[9.5px] font-bold rounded transition-colors ${
+                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
                           rapidItemTaxType === 'fixed'
-                            ? 'bg-blue-600 text-white shadow-xs'
-                            : 'text-slate-400 hover:text-white'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-[#94a3b8] hover:text-white'
                         }`}
-                        title="ضريبة بمبلغ ثابت (ج.م)"
                       >
                         ج.م
                       </button>
@@ -4146,12 +4065,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           setRapidItemTaxType('percent');
                           calculateRapidItemTotal('forward', { overrideTaxType: 'percent' });
                         }}
-                        className={`px-2 py-0.5 text-[9.5px] font-bold rounded transition-colors ${
+                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
                           rapidItemTaxType === 'percent'
-                            ? 'bg-blue-600 text-white shadow-xs'
-                            : 'text-slate-400 hover:text-white'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-[#94a3b8] hover:text-white'
                         }`}
-                        title="ضريبة بنسبة مئوية (%)"
                       >
                         %
                       </button>
@@ -4161,14 +4079,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     ref={rapidTaxRef}
                     type="text"
                     value={rapidItemTax}
-                    placeholder={rapidItemTaxType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
+                    placeholder="الضريبة..."
                     onChange={e => {
                       const converted = toWesternNumerals(e.target.value);
                       setRapidItemTax(converted);
                       calculateRapidItemTotal('forward', { overrideTax: converted });
                     }}
                     onKeyDown={e => handleRapidKeyDown(e, rapidTotalRef)}
-                    className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
+                    className="w-full bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs font-mono outline-none focus:border-blue-500 text-center"
                   />
                 </div>
               </div>

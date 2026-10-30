@@ -21,7 +21,7 @@ function ensureGlobalListener() {
 
   window.addEventListener('popstate', (e) => {
     // If this pop was triggered programmatically to clean up a closed modal, ignore it completely
-    if (isSilentPop || (window as any).__hesabaty_suppress_popstate) {
+    if (isSilentPop) {
       isSilentPop = false;
       return;
     }
@@ -63,15 +63,10 @@ export function useModalBackHandler(
 
       if (isPushedRef.current) {
         isPushedRef.current = false;
-        // Cleanly pop the history state without triggering any modal's onClose or App page router
+        // Cleanly pop the history state without triggering any modal's onClose
         if (window.history.state && window.history.state.subModal === modalId) {
           isSilentPop = true;
-          (window as any).__hesabaty_suppress_popstate = true;
           window.history.back();
-          setTimeout(() => {
-            (window as any).__hesabaty_suppress_popstate = false;
-            isSilentPop = false;
-          }, 150);
         }
       }
       return;
@@ -103,12 +98,7 @@ export function useModalBackHandler(
         isPushedRef.current = false;
         if (window.history.state && window.history.state.subModal === modalId) {
           isSilentPop = true;
-          (window as any).__hesabaty_suppress_popstate = true;
           window.history.back();
-          setTimeout(() => {
-            (window as any).__hesabaty_suppress_popstate = false;
-            isSilentPop = false;
-          }, 150);
         }
       }
     };
