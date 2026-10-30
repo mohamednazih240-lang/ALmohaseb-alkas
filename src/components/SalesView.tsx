@@ -96,6 +96,12 @@ export const SalesView: React.FC<SalesViewProps> = ({
   useModalBackHandler(
     activeTab === 'editor',
     () => {
+      // If a submodal (e.g. item card, rapid modal, extra income) is open inside the invoice editor, close it first and DO NOT exit!
+      if ((window as any).__hesabaty_has_open_modal && typeof (window as any).__hesabaty_close_topmost_modal === 'function') {
+        const closed = (window as any).__hesabaty_close_topmost_modal();
+        if (closed) return;
+      }
+
       // Check if draft or uncommitted invoice has items
       const draftStr = localStorage.getItem('hesabaty_draft_sale') || localStorage.getItem('hesabaty_last_uncommitted_invoice');
       let hasItems = false;

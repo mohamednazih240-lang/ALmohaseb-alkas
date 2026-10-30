@@ -58,7 +58,13 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   const [printDocTitle, setPrintDocTitle] = useState('سند مرتجع');
 
   // Mobile back button: exit returns editor to list
-  useModalBackHandler(activeTab === 'editor', () => setActiveTab('list'), 'returns_editor');
+  useModalBackHandler(activeTab === 'editor', () => {
+    if ((window as any).__hesabaty_has_open_modal && typeof (window as any).__hesabaty_close_topmost_modal === 'function') {
+      const closed = (window as any).__hesabaty_close_topmost_modal();
+      if (closed) return;
+    }
+    setActiveTab('list');
+  }, 'returns_editor');
 
   const isTargetBranch = (bId?: string) => {
     if (branchFilter === 'all') return true;
