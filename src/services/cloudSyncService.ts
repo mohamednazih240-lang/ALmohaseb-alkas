@@ -207,6 +207,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
               if (parsed.vouchers && parsed.vouchers.length > 0) {
                 db.vouchers = mergeVouchers(db.vouchers || [], parsed.vouchers);
               }
+              db = sanitizeCompanyDatabase(db);
             }
           }
         }

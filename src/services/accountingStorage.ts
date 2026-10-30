@@ -46,6 +46,20 @@ const IDB_NAME = 'hesabaty_accounting_db';
 const IDB_STORE = 'erp_storage';
 const IDB_KEY = 'main_database_state';
 
+// Whitelist / Blacklist protection: Strictly purge all invoices and records belonging to Ekhwa
+export const PURGED_EKHWA_INVOICE_IDS = new Set<string>([
+  'inv_mvt8tz8g_bdbs8',
+  'inv_mvt8m7y6_b60qr',
+  'inv_mvt7x4uk_0llcd',
+  'inv_mvobnimq_4pxcf',
+  'inv_mvob1d3h_4g7xe',
+  'inv_mvnuoaar_6fiye',
+  'inv_mvnsulgb_3d4sv',
+  'inv_mvcqzqlx_yq274',
+  'inv_mvcrfi1p_z3y8d',
+  'inv_mvcqlpcp_or9qr'
+]);
+
 function openIndexedDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === 'undefined') {
@@ -336,6 +350,35 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   // Default currentUser
   if (!db.currentUser || !db.users.some(u => u.id === db.currentUser.id)) {
     db.currentUser = db.users[0];
+  }
+
+  // Strictly purge all Ekhwa invoices and their vouchers/movements from local state
+  if (db.invoices) {
+    db.invoices = db.invoices.filter(i => {
+      if (!i) return false;
+      if (PURGED_EKHWA_INVOICE_IDS.has(i.id)) return false;
+      if (i.partyName === 'شركة السلاب' || i.partyName === 'محل الفتح عنابة' || i.partyName === 'شركة عطاالله للإستيراد' || i.partyName === 'محل المهندس التجمع الأول' || i.partyName === 'محل تيجر عنابة' || i.partyName === 'شركة Zak' || i.partyName === 'شركة الرحمة للحدايد والبويات') return false;
+      return true;
+    });
+  }
+
+  if (db.vouchers) {
+    db.vouchers = db.vouchers.filter(v => {
+      if (!v) return false;
+      if (v.invoiceId && PURGED_EKHWA_INVOICE_IDS.has(v.invoiceId)) return false;
+      if (v.partyName === 'شركة السلاب' || v.partyName === 'محل الفتح عنابة' || v.partyName === 'شركة عطاالله للإستيراد' || v.partyName === 'محل المهندس التجمع الأول' || v.partyName === 'محل تيجر عنابة' || v.partyName === 'شركة Zak' || v.partyName === 'شركة الرحمة للحدايد والبويات') return false;
+      return true;
+    });
+  }
+
+  if (db.stockMovements) {
+    db.stockMovements = db.stockMovements.filter(sm => !sm.sourceId || !PURGED_EKHWA_INVOICE_IDS.has(sm.sourceId));
+  }
+  if (db.treasury) {
+    db.treasury = db.treasury.filter(tr => !tr.sourceId || !PURGED_EKHWA_INVOICE_IDS.has(tr.sourceId));
+  }
+  if (db.journals) {
+    db.journals = db.journals.filter(j => !j.sourceId || !PURGED_EKHWA_INVOICE_IDS.has(j.sourceId));
   }
 
   // Retroactively ensure all invoices with payments match their linked vouchers down to the millimeter
@@ -1309,15 +1352,33 @@ export function updateProductBranchData(
 /**
  * Union & merge invoices safely by ID to prevent any loss across phones and concurrent updates
  */
+export function isPurgedEkhwaInvoice(inv: Invoice | null | undefined): boolean {
+  if (!inv || !inv.id) return true;
+  if (PURGED_EKHWA_INVOICE_IDS.has(inv.id)) return true;
+  const p = inv.partyName || '';
+  if (
+    p === 'شركة السلاب' ||
+    p === 'محل الفتح عنابة' ||
+    p === 'شركة عطاالله للإستيراد' ||
+    p === 'محل المهندس التجمع الأول' ||
+    p === 'محل تيجر عنابة' ||
+    p === 'شركة Zak' ||
+    p === 'شركة الرحمة للحدايد والبويات'
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function mergeInvoices(existingList: Invoice[] = [], incomingList: Invoice[] = []): Invoice[] {
   const map = new Map<string, Invoice>();
   (existingList || []).forEach(inv => {
-    if (inv && inv.id) {
+    if (inv && inv.id && !isPurgedEkhwaInvoice(inv)) {
       map.set(inv.id, inv);
     }
   });
   (incomingList || []).forEach(inv => {
-    if (inv && inv.id) {
+    if (inv && inv.id && !isPurgedEkhwaInvoice(inv)) {
       const existing = map.get(inv.id);
       if (!existing) {
         map.set(inv.id, inv);
@@ -1338,13 +1399,31 @@ export function mergeInvoices(existingList: Invoice[] = [], incomingList: Invoic
  */
 export function mergeVouchers(existingList: Voucher[] = [], incomingList: Voucher[] = []): Voucher[] {
   const map = new Map<string, Voucher>();
+  const isPurgedVoucher = (v: Voucher) => {
+    if (!v || !v.id) return true;
+    if (v.invoiceId && PURGED_EKHWA_INVOICE_IDS.has(v.invoiceId)) return true;
+    const p = v.partyName || '';
+    if (
+      p === 'شركة السلاب' ||
+      p === 'محل الفتح عنابة' ||
+      p === 'شركة عطاالله للإستيراد' ||
+      p === 'محل المهندس التجمع الأول' ||
+      p === 'محل تيجر عنابة' ||
+      p === 'شركة Zak' ||
+      p === 'شركة الرحمة للحدايد والبويات'
+    ) {
+      return true;
+    }
+    return false;
+  };
+
   (existingList || []).forEach(v => {
-    if (v && v.id) {
+    if (v && v.id && !isPurgedVoucher(v)) {
       map.set(v.id, v);
     }
   });
   (incomingList || []).forEach(v => {
-    if (v && v.id) {
+    if (v && v.id && !isPurgedVoucher(v)) {
       map.set(v.id, v);
     }
   });
@@ -1547,38 +1626,41 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
  * Strict Duplicate Prevention Helpers
  * Ensures no duplicate invoice numbers, vouchers, customers, suppliers, products, or codes across the entire ERP.
  */
-export function isDuplicateInvoiceNumber(db: AccountingDB, number: string, excludeId?: string): boolean {
+export function isDuplicateInvoiceNumber(db: AccountingDB, number: string, excludeId?: string, mode?: string): boolean {
   if (!number || !number.trim()) return false;
-  const target = number.trim().toLowerCase();
-  return (db.invoices || []).some(
-    inv => (!excludeId || inv.id !== excludeId) && inv.number.trim().toLowerCase() === target
-  );
+  const target = number.trim();
+  const isPurchaseMode = mode === 'purchase' || mode === 'purchase_return';
+  return (db.invoices || []).some(inv => {
+    if (excludeId && inv.id === excludeId) return false;
+    const isInvPurchase = inv.type === 'purchase' || inv.invoiceKind === 'purchase' || inv.invoiceKind === 'purchase_return';
+    if (mode && isPurchaseMode !== isInvPurchase) return false;
+    return String(inv.number).trim() === target;
+  });
 }
 
-export function getNextUniqueInvoiceNumber(db: AccountingDB, _mode?: string): { number: string; nextSeq: number } {
-  // Pure integer numbering starting from 1 with NO letter prefixes
+export function getNextUniqueInvoiceNumber(db: AccountingDB, mode?: string): { number: string; nextSeq: number } {
+  // Pure integer numbering starting from 1 with NO letter prefixes, independent per section
+  const isPurchaseMode = mode === 'purchase' || mode === 'purchase_return';
+  const sectionInvoices = (db.invoices || []).filter(inv => {
+    const isInvPurchase = inv.type === 'purchase' || inv.invoiceKind === 'purchase' || inv.invoiceKind === 'purchase_return';
+    return isPurchaseMode ? isInvPurchase : !isInvPurchase;
+  });
+
   let maxSeq = 0;
-  (db.invoices || []).forEach(inv => {
+  sectionInvoices.forEach(inv => {
     const raw = String(inv.number || '').trim();
-    if (/^\d+$/.test(raw)) {
-      const n = parseInt(raw, 10);
+    const digits = raw.replace(/\D/g, '');
+    if (digits) {
+      const n = parseInt(digits, 10);
       if (!isNaN(n) && n > maxSeq) {
         maxSeq = n;
-      }
-    } else {
-      const match = raw.match(/\d+$/);
-      if (match) {
-        const n = parseInt(match[0], 10);
-        if (!isNaN(n) && n > maxSeq) {
-          maxSeq = n;
-        }
       }
     }
   });
 
   let seq = Math.max(1, maxSeq + 1);
   let candidate = String(seq);
-  while (isDuplicateInvoiceNumber(db, candidate)) {
+  while (sectionInvoices.some(inv => String(inv.number).trim() === candidate)) {
     seq += 1;
     candidate = String(seq);
   }
@@ -1643,11 +1725,11 @@ export function getNextUniquePartyCode(db: AccountingDB, type: 'customer' | 'sup
   return code;
 }
 
-export function isDuplicateVoucherNumber(db: AccountingDB, number: string, excludeId?: string): boolean {
+export function isDuplicateVoucherNumber(db: AccountingDB, number: string, type?: 'receipt' | 'payment', excludeId?: string): boolean {
   if (!number || !number.trim()) return false;
-  const target = number.trim().toLowerCase();
+  const target = number.trim();
   return (db.vouchers || []).some(
-    v => (!excludeId || v.id !== excludeId) && v.number.trim().toLowerCase() === target
+    v => (!excludeId || v.id !== excludeId) && (!type || v.type === type) && String(v.number).trim() === target
   );
 }
 
@@ -1655,13 +1737,25 @@ export function getNextUniqueVoucherNumber(
   db: AccountingDB,
   type: 'receipt' | 'payment'
 ): { number: string; nextSeq: number } {
-  const prefix = type === 'receipt' ? 'REC-' : 'PAY-';
-  const currentSeq = type === 'receipt' ? (db.settings.nextReceipt || 1) : (db.settings.nextPayment || 1);
-  let seq = currentSeq;
-  let candidate = `${prefix}${String(seq).padStart(6, '0')}`;
-  while (isDuplicateVoucherNumber(db, candidate)) {
+  // Independent pure numeric sequence for each voucher type starting from 1
+  const sectionVouchers = (db.vouchers || []).filter(v => v.type === type);
+  let maxSeq = 0;
+  sectionVouchers.forEach(v => {
+    const raw = String(v.number || '').trim();
+    const digits = raw.replace(/\D/g, '');
+    if (digits) {
+      const n = parseInt(digits, 10);
+      if (!isNaN(n) && n > maxSeq) {
+        maxSeq = n;
+      }
+    }
+  });
+
+  let seq = Math.max(1, maxSeq + 1);
+  let candidate = String(seq);
+  while (sectionVouchers.some(v => String(v.number).trim() === candidate)) {
     seq += 1;
-    candidate = `${prefix}${String(seq).padStart(6, '0')}`;
+    candidate = String(seq);
   }
   return { number: candidate, nextSeq: seq };
 }

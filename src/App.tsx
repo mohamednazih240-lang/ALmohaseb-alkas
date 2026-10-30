@@ -277,12 +277,12 @@ export default function App() {
 
         const mergedInvoices = mergeInvoices(prevDb.invoices || [], remoteDb.invoices || []);
         const mergedVouchers = mergeVouchers(prevDb.vouchers || [], remoteDb.vouchers || []);
-        const merged: AccountingDB = {
+        const merged: AccountingDB = sanitizeCompanyDatabase({
           ...remoteDb,
           invoices: mergedInvoices,
           vouchers: mergedVouchers,
           currentUser: effectiveUser || remoteDb.currentUser || remoteDb.users[0]
-        };
+        });
         saveDatabase(merged);
         return merged;
       });
