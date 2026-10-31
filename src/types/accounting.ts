@@ -596,4 +596,5 @@ export interface AccountingDB {
   dailyClosings?: DailyClosing[];
   branches?: Branch[];
   audit: AuditLog[];
+  cleanGeneration?: number;
 }

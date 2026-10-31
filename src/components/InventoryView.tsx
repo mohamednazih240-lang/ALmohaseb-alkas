@@ -550,9 +550,14 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     const smList = db.stockMovements.filter(sm => sm.productId === product.id);
     if (smList.length > 0) {
       smList.forEach(sm => {
+        const typeArabic = (sm.type as string) === 'purchase' ? 'شراء' :
+                           (sm.type as string) === 'sale' ? 'بيع' :
+                           ((sm.type as string) === 'purchase_return' || (sm.type as string) === 'sale_return') ? 'مرتجع' :
+                           (sm.type as string) === 'opening' ? 'رصيد افتتاحي' : 'تسوية جردية';
+        const docDesc = sm.refNumber ? `فاتورة ${typeArabic} رقم ${sm.refNumber}` : `حركة ${typeArabic}`;
         moves.push({
           date: sm.date,
-          desc: `${sm.refNumber ? `[${sm.refNumber}] ` : ''}${sm.warehouseName || 'المخزن'} - حركة ${sm.type}`,
+          desc: docDesc,
           type: sm.type,
           inQty: sm.qtyChange > 0 ? sm.qtyChange : 0,
           outQty: sm.qtyChange < 0 ? Math.abs(sm.qtyChange) : 0,
@@ -641,15 +646,18 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     const totalOut = moves.reduce((s, m) => s + m.outQty, 0);
 
     const doc: MovementPrintBlock = {
-      title: `كارت حركة صنف: ${product.name}`,
-      serialNo: `#CARD-${product.code}-${today}`,
+      title: 'كارت حركة صنف',
+      typeTitle: 'كارت حركة صنف',
+      serialNo: product.code,
       date: today,
-      partyLabel: 'الصنف / الكود:',
-      partyName: `${product.name} (${product.code})`,
+      partyCode: product.code,
+      partyLabel: 'اسم الصنف',
+      partyName: product.name,
+      partySubId: product.barcode ? `باركود: ${product.barcode}` : undefined,
       badge: 'سجل حركة صنف',
       tableHeaders: [
-        { label: 'التاريخ', width: '14%', align: 'center' },
-        { label: 'البيان والمستند', width: '38%', align: 'right' },
+        { label: 'التاريخ', width: '18%', align: 'center' },
+        { label: 'البيان والمستند', width: '34%', align: 'right' },
         { label: 'الوارد (+)', width: '12%', align: 'center' },
         { label: 'المنصرف (-)', width: '12%', align: 'center' },
         { label: 'السعر', width: '12%', align: 'center' },

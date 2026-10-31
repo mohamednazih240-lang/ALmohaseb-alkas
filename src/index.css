@@ -149,29 +149,35 @@
   justify-content: space-between;
   align-items: center;
   flex-wrap: nowrap;
-  gap: 5px;
+  gap: 6px;
   width: 100%;
 }
 
 .info-col-right {
   flex: 1.3;
   text-align: right;
-  line-height: 1.5;
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .info-col-center {
   flex: 1;
   text-align: center;
-  line-height: 1.5;
+  min-width: 0;
+  line-height: 1.4;
   border-right: 1px dashed #666666;
   border-left: 1px dashed #666666;
   padding: 0 4px;
+  word-break: break-word;
 }
 
 .info-col-left {
   flex: 1.1;
   text-align: left;
-  line-height: 1.5;
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 /* 3. مستطيل البيان (يختفي تماماً إذا ترك فارغاً) */
@@ -184,6 +190,8 @@
   background-color: #ffffff;
   width: 100%;
   box-sizing: border-box;
+  word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 .invoice-statement-box:empty {
@@ -193,7 +201,7 @@
   margin: 0 !important;
 }
 
-/* 4. جدول الأصناف والبيانات (أفقي متناسق بدون أي تمرير) */
+/* 4. جدول الأصناف والبيانات (أفقي متناسق بدون أي تمرير أو تداخل) */
 .table-wrapper {
   width: 100%;
   margin-bottom: 10px;
@@ -210,24 +218,27 @@
 .invoice-container table th,
 .invoice-container table td {
   border: 1.5px solid #000000;
-  padding: 5px 3px;
+  padding: 4px 4px;
   text-align: center;
   vertical-align: middle;
   font-weight: 600;
   word-wrap: break-word;
+  word-break: break-word;
+  overflow-wrap: break-word;
   background-color: #ffffff;
+  box-sizing: border-box;
 }
 
 .invoice-container table th {
   background-color: #e6e6e6 !important;
   color: #000000;
   font-weight: 800;
-  font-size: 11.5px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
-.col-item-name  { width: 34%; text-align: right; padding-right: 5px; font-weight: 700; }
-.col-item-note  { width: 22%; font-size: 10px; }
+.col-item-name  { width: 34%; text-align: right; padding-right: 5px; font-weight: 700; word-break: break-word; }
+.col-item-note  { width: 22%; font-size: 10px; word-break: break-word; }
 .col-item-qty   { width: 10%; font-size: 11px; white-space: nowrap; }
 .col-item-price { width: 16%; font-size: 11px; white-space: nowrap; }
 .col-item-total { width: 18%; font-size: 11.5px; font-weight: 800; white-space: nowrap; }
@@ -374,10 +385,45 @@ body[data-paper-size="thermal"] .header-left,
 }
 
 /* ----------------------------------------------------
-   2. إعدادات الطباعة الرسمية الخالية من أي انكسار أو قص للهوامش
-   مطابقة لمعايير الأنظمة العالمية (المحاسب سوفت / المحاسب المحترف 2000 / أودو)
+   2. محرك الطباعة المعزول الصارم (ضمان 100% صفحة واحدة فقط بدون أي خوارج أو صفحات بيضاء)
 ---------------------------------------------------- */
 @media print {
+  /* في حالة تفعيل وضع الطباعة المعزول، يتم إخفاء شجرة التطبيق بالكامل وطباعة المستند المستهدف فقط */
+  body.is-printing-isolated {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  body.is-printing-isolated > *:not(#isolated-print-root) {
+    display: none !important;
+    height: 0 !important;
+    overflow: hidden !important;
+  }
+  body.is-printing-isolated #root {
+    display: none !important;
+    height: 0 !important;
+    overflow: hidden !important;
+  }
+  body.is-printing-isolated #isolated-print-root {
+    display: block !important;
+    width: 100% !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    position: static !important;
+  }
+  body.is-printing-isolated #isolated-print-root .invoice-container {
+    margin: 0 auto !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+    box-shadow: none !important;
+  }
+
   html, body { 
     background: #ffffff !important; 
     padding: 0 !important; 
@@ -388,8 +434,14 @@ body[data-paper-size="thermal"] .header-left,
     overflow: visible !important;
   }
 
-  /* إخفاء عناصر واجهة التطبيق والتحكم */
-  .no-print {
+  /* إخفاء عناصر واجهة التطبيق والتحكم العلوية والجانبية نهائياً */
+  .no-print,
+  header,
+  aside,
+  nav,
+  .pwa-banner,
+  #hesabaty-header,
+  .sidebar-container {
     display: none !important;
   }
 

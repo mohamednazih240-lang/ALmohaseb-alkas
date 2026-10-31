@@ -200,12 +200,12 @@ export function defaultSettings(): AppSettings {
     tax: 'disabled',
     taxRate: 14,
     notes: 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية',
-    nextSale: 1001,
-    nextPurchase: 2001,
-    nextReceipt: 3001,
-    nextPayment: 4001,
-    nextQuote: 5001,
-    nextOrder: 6001
+    nextSale: 1,
+    nextPurchase: 1,
+    nextReceipt: 1,
+    nextPayment: 1,
+    nextQuote: 1,
+    nextOrder: 1
   };
 }
 
@@ -264,6 +264,30 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   db.settings.invoiceTitle = db.settings.invoiceTitle || 'بيان';
   if (!db.settings.companyPin || db.settings.companyPin === '1234' || db.settings.companyPin === '1272000') {
     db.settings.companyPin = '2919';
+  }
+
+  // Enforce Generation 2 clean state (system fully purged of all past sample/merged items and invoices)
+  if (db.cleanGeneration !== 2) {
+    db.products = [];
+    db.invoices = [];
+    db.vouchers = [];
+    db.stockMovements = [];
+    db.returns = [];
+    db.adjustments = [];
+    db.transfers = [];
+    db.treasury = [];
+    db.journals = [];
+    db.quotes = [];
+    db.orders = [];
+    db.customers = [];
+    db.suppliers = [];
+    db.settings.nextPurchase = 1;
+    db.settings.nextSale = 1;
+    db.settings.nextPayment = 1;
+    db.settings.nextReceipt = 1;
+    db.settings.nextQuote = 1;
+    db.settings.nextOrder = 1;
+    db.cleanGeneration = 2;
   }
 
   if (!db.users) db.users = [];

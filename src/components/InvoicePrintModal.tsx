@@ -85,161 +85,56 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     : [];
 
   const handlePrint = () => {
-    // 1. Remove any previous dynamic print styles
+    // 1. Remove any previous dynamic print styles or isolated roots
     const prevStyle = document.getElementById('dynamic-paper-print-style');
     if (prevStyle) prevStyle.remove();
+    const oldRoot = document.getElementById('isolated-print-root');
+    if (oldRoot) oldRoot.remove();
 
-    // 2. Inject exact dynamic @page rule and container rules calibrated to fit strictly without cutting borders or rows
+    // 2. Clone the printable content into an isolated top-level container on document.body
+    const contentEl = document.getElementById('invoice-printable-content');
+    if (!contentEl) return;
+
+    const printRoot = document.createElement('div');
+    printRoot.id = 'isolated-print-root';
+    printRoot.innerHTML = contentEl.innerHTML;
+    document.body.appendChild(printRoot);
+
+    // 3. Inject exact dynamic @page rule
     const styleEl = document.createElement('style');
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
       styleEl.innerHTML = `
         @page { size: A4 portrait; margin: 6mm 8mm; }
-        @media print {
-          html, body {
-            width: 100% !important;
-            height: auto !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: visible !important;
-            background: #ffffff !important;
-          }
-          #invoice-printable-content {
-            width: 100% !important;
-            max-width: 194mm !important;
-            margin: 0 auto !important;
-            padding: 0 !important;
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-          }
-          .invoice-container {
-            width: 100% !important;
-            max-width: 194mm !important;
-            min-height: auto !important;
-            margin: 0 auto !important;
-            padding: 5mm 6mm !important;
-            border: 1.5px solid #000000 !important;
-            box-sizing: border-box !important;
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-            page-break-after: avoid !important;
-            break-after: avoid !important;
-            overflow: visible !important;
-            background: #ffffff !important;
-          }
-          tr, td, th, table, thead, tbody, .totals-section, .company-header, .invoice-info-box {
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-          }
-          table, th, td, tr, .info-box, .header, .invoice-header {
-            background: #ffffff !important;
-            background-color: #ffffff !important;
-            color: #000000 !important;
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
-          }
-        }
       `;
     } else if (paperSize === 'A5') {
       styleEl.innerHTML = `
         @page { size: A5 portrait; margin: 4mm 5mm; }
-        @media print {
-          html, body {
-            width: 100% !important;
-            height: auto !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: visible !important;
-            background: #ffffff !important;
-          }
-          #invoice-printable-content {
-            width: 100% !important;
-            max-width: 138mm !important;
-            margin: 0 auto !important;
-            padding: 0 !important;
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-          }
-          .invoice-container {
-            width: 100% !important;
-            max-width: 138mm !important;
-            min-height: auto !important;
-            margin: 0 auto !important;
-            padding: 3mm 4mm !important;
-            border: 1.2px solid #000000 !important;
-            box-sizing: border-box !important;
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-            page-break-after: avoid !important;
-            break-after: avoid !important;
-            overflow: visible !important;
-            background: #ffffff !important;
-          }
-          .company-header { padding-bottom: 2px !important; margin-bottom: 3px !important; }
-          .company-header h2 { font-size: 13px !important; margin: 0 !important; }
-          .company-header p { font-size: 8.5px !important; margin: 0 !important; }
-          .header-left { font-size: 8.5px !important; }
-          .invoice-info-box { font-size: 8.5px !important; padding: 2.5px 5px !important; margin-bottom: 3px !important; }
-          .invoice-statement-box { font-size: 8.5px !important; padding: 2px 4px !important; margin-bottom: 3px !important; }
-          table { font-size: 8.5px !important; margin-bottom: 3px !important; }
-          th, td { padding: 2px 3px !important; }
-          .totals-section { font-size: 8.5px !important; padding-top: 2px !important; margin-bottom: 2px !important; }
-          .total-row { padding: 1px 0 !important; }
-          .invoice-bottom-notes { font-size: 7.5px !important; padding-top: 2px !important; }
-          .copyright-footer { font-size: 7px !important; margin-top: 2px !important; }
-          tr, td, th, table, thead, tbody, .totals-section, .company-header, .invoice-info-box {
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-          }
-          table, th, td, tr, .info-box, .header, .invoice-header {
-            background: #ffffff !important;
-            background-color: #ffffff !important;
-            color: #000000 !important;
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
-          }
-        }
       `;
     } else {
       styleEl.innerHTML = `
         @page { size: 80mm auto; margin: 0; }
-        @media print {
-          html, body {
-            width: 80mm !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            background: #ffffff !important;
-          }
-          #invoice-printable-content, .invoice-container {
-            width: 76mm !important;
-            max-width: 76mm !important;
-            margin: 0 auto !important;
-            padding: 3mm 2mm !important;
-            border: 1px dashed #000000 !important;
-            box-sizing: border-box !important;
-            overflow: visible !important;
-            background: #ffffff !important;
-          }
-          tr, td, th {
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-          }
-        }
       `;
     }
     document.head.appendChild(styleEl);
 
-    // 3. Set attribute for paper size
+    // 4. Set attributes for paper size & isolation
+    document.body.classList.add('is-printing-isolated');
     document.body.setAttribute('data-paper-size', paperSize);
     
-    // 4. Trigger print
+    // 5. Trigger print
     window.print();
 
-    // 5. Cleanup after print dialog
-    setTimeout(() => {
+    // 6. Cleanup after print dialog
+    const cleanup = () => {
+      document.body.classList.remove('is-printing-isolated');
       document.body.removeAttribute('data-paper-size');
+      printRoot.remove();
       styleEl.remove();
-    }, 1500);
+    };
+
+    window.addEventListener('afterprint', cleanup, { once: true });
+    setTimeout(cleanup, 2000);
   };
 
   const handleDownloadPdf = async () => {

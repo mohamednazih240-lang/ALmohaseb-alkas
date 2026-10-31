@@ -86,99 +86,56 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
     : [];
 
   const handlePrint = () => {
-    // 1. Remove any previous dynamic print styles
+    // 1. Remove any previous dynamic print styles or isolated roots
     const prevStyle = document.getElementById('dynamic-paper-print-style');
     if (prevStyle) prevStyle.remove();
+    const oldRoot = document.getElementById('isolated-print-root');
+    if (oldRoot) oldRoot.remove();
 
-    // 2. Inject exact dynamic @page rule and single page container constraints without any row shading
+    // 2. Clone the printable content into an isolated top-level container on document.body
+    const contentEl = document.getElementById('universal-printable-content');
+    if (!contentEl) return;
+
+    const printRoot = document.createElement('div');
+    printRoot.id = 'isolated-print-root';
+    printRoot.innerHTML = contentEl.innerHTML;
+    document.body.appendChild(printRoot);
+
+    // 3. Inject exact dynamic @page rule
     const styleEl = document.createElement('style');
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
       styleEl.innerHTML = `
         @page { size: A4 portrait; margin: 6mm 8mm; }
-        @media print {
-          html, body {
-            width: 100% !important;
-            height: 100% !important;
-            max-height: 100% !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: hidden !important;
-            background: #ffffff !important;
-          }
-          #universal-printable-content, .invoice-container {
-            width: 100% !important;
-            max-width: 196mm !important;
-            max-height: 283mm !important;
-            height: auto !important;
-            margin: 0 auto !important;
-            page-break-inside: avoid !important;
-            page-break-after: avoid !important;
-            page-break-before: avoid !important;
-            break-inside: avoid !important;
-            break-after: avoid !important;
-            break-before: avoid !important;
-            overflow: hidden !important;
-            background: #ffffff !important;
-          }
-          table, th, td, tr, .info-box, .header, .invoice-header {
-            background: #ffffff !important;
-            background-color: #ffffff !important;
-            color: #000000 !important;
-          }
-        }
       `;
     } else if (paperSize === 'A5') {
       styleEl.innerHTML = `
         @page { size: A5 portrait; margin: 4mm 5mm; }
-        @media print {
-          html, body {
-            width: 100% !important;
-            height: 100% !important;
-            max-height: 100% !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: hidden !important;
-            background: #ffffff !important;
-          }
-          #universal-printable-content, .invoice-container {
-            width: 100% !important;
-            max-width: 139mm !important;
-            max-height: 200mm !important;
-            height: auto !important;
-            margin: 0 auto !important;
-            page-break-inside: avoid !important;
-            page-break-after: avoid !important;
-            page-break-before: avoid !important;
-            break-inside: avoid !important;
-            break-after: avoid !important;
-            break-before: avoid !important;
-            overflow: hidden !important;
-            background: #ffffff !important;
-          }
-          table, th, td, tr, .info-box, .header, .invoice-header {
-            background: #ffffff !important;
-            background-color: #ffffff !important;
-            color: #000000 !important;
-          }
-        }
       `;
     } else {
-      styleEl.innerHTML = `@page { size: 80mm auto; margin: 0; }`;
+      styleEl.innerHTML = `
+        @page { size: 80mm auto; margin: 0; }
+      `;
     }
     document.head.appendChild(styleEl);
 
-    // 3. Set attribute for paper size
+    // 4. Set attributes for paper size & isolation
+    document.body.classList.add('is-printing-isolated');
     document.body.setAttribute('data-paper-size', paperSize);
 
-    // 4. Trigger print
+    // 5. Trigger print
     window.print();
 
-    // 5. Cleanup after print
-    setTimeout(() => {
+    // 6. Cleanup after print dialog
+    const cleanup = () => {
+      document.body.classList.remove('is-printing-isolated');
       document.body.removeAttribute('data-paper-size');
+      printRoot.remove();
       styleEl.remove();
-    }, 1500);
+    };
+
+    window.addEventListener('afterprint', cleanup, { once: true });
+    setTimeout(cleanup, 2000);
   };
 
   const handleDownloadPdf = async () => {
@@ -450,19 +407,31 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                         <tbody>
                           {doc.tableRows.map((tr, trIdx) => (
                             <tr key={trIdx} className={tr.highlight ? 'bg-amber-50/50' : ''}>
-                              {tr.cols.map((col, cIdx) => (
-                                <td
-                                  key={cIdx}
-                                  style={{
-                                    fontWeight: tr.isBold || cIdx === 0 ? 700 : 600,
-                                    textAlign: doc.tableHeaders[cIdx]?.align || 'center',
-                                    whiteSpace: cIdx > 0 && typeof col === 'string' && /[\d]+/.test(col) ? 'nowrap' : 'normal',
-                                    wordBreak: 'break-word'
-                                  }}
-                                >
-                                  {col}
-                                </td>
-                              ))}
+                              {tr.cols.map((col, cIdx) => {
+                                const headerLabel = (doc.tableHeaders[cIdx]?.label || '').trim();
+                                const isTextCol = headerLabel.includes('بيان') || headerLabel.includes('مستند') || headerLabel.includes('اسم') || headerLabel.includes('وصف') || headerLabel.includes('مواصفات') || headerLabel.includes('تفاصيل');
+                                const isDateCol = headerLabel.includes('تاريخ');
+                                const isNumericCol = !isTextCol && !isDateCol && (typeof col === 'number' || /[\d]/.test(String(col)));
+
+                                return (
+                                  <td
+                                    key={cIdx}
+                                    style={{
+                                      fontWeight: tr.isBold || cIdx === 0 ? 700 : 600,
+                                      textAlign: doc.tableHeaders[cIdx]?.align || 'center',
+                                      whiteSpace: isTextCol ? 'normal' : isDateCol || isNumericCol ? 'nowrap' : 'normal',
+                                      wordBreak: isTextCol ? 'break-word' : 'normal',
+                                      overflowWrap: 'break-word',
+                                      fontVariantNumeric: isNumericCol || isDateCol ? 'tabular-nums' : 'normal',
+                                      padding: '4px 4px',
+                                      fontSize: paperSize === 'A5' ? '10px' : '11px',
+                                      lineHeight: isTextCol ? 1.35 : 1.2
+                                    }}
+                                  >
+                                    {col}
+                                  </td>
+                                );
+                              })}
                             </tr>
                           ))}
                         </tbody>
