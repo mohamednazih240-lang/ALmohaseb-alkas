@@ -2141,8 +2141,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   type="number"
                   min="0.01"
                   step="any"
-                  value={transferQty}
-                  onChange={e => setTransferQty(parseFloat(e.target.value) || 0)}
+                  value={transferQty === 0 ? '' : transferQty}
+                  placeholder="0"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setTransferQty(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                   className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold"
                 />
               </div>
@@ -2183,8 +2185,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   type="number"
                   min="0"
                   step="any"
-                  value={actualQty}
-                  onChange={e => setActualQty(parseFloat(e.target.value) || 0)}
+                  value={actualQty === 0 ? '' : actualQty}
+                  placeholder="0"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setActualQty(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                   className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-black"
                 />
               </div>

@@ -74,13 +74,7 @@ import {
 
 export default function App() {
   const [db, setDb] = useState<AccountingDB>(() => {
-    const loaded = loadDatabase();
-    if (!loaded.products || loaded.products.length < 1000) {
-      const merged = mergeCatalogIntoDb(loaded);
-      saveDatabase(merged.db);
-      return merged.db;
-    }
-    return loaded;
+    return loadDatabase();
   });
   const [currentPage, setCurrentPage] = useState<PageId>('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -165,13 +159,8 @@ export default function App() {
   useEffect(() => {
     // 1. Hydrate from IndexedDB on startup
     loadFromIndexedDB().then(idbData => {
-      if (idbData && idbData.invoices && idbData.settings) {
-        let readyDb = idbData;
-        if (!readyDb.products || readyDb.products.length < 1000) {
-          const merged = mergeCatalogIntoDb(readyDb);
-          readyDb = merged.db;
-        }
-        readyDb = sanitizeCompanyDatabase(readyDb);
+      if (idbData && idbData.settings) {
+        let readyDb = sanitizeCompanyDatabase(idbData);
         setDb(readyDb);
         saveDatabase(readyDb);
       }

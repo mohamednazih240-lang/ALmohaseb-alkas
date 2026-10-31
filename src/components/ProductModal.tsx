@@ -1,9 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   X,
   Package,
   Building2,
-  Info
+  Info,
+  Calculator,
+  Check,
+  CheckCircle2,
+  Sparkles,
+  ArrowRight,
+  TrendingDown,
+  Percent,
+  Boxes
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -48,6 +56,20 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   const [minStock, setMinStock] = useState<number>(5);
   const [initialQty, setInitialQty] = useState<number>(0);
 
+  // Success Notification for continuous entry
+  const [continuousNotification, setContinuousNotification] = useState<string | null>(null);
+
+  // Reverse Calculation State for Purchase Price / Cost
+  const [showReverseCalc, setShowReverseCalc] = useState(false);
+  const [reverseMode, setReverseMode] = useState<'carton' | 'margin'>('carton');
+  const [cartonTotalCost, setCartonTotalCost] = useState('');
+  const [cartonUnitsCount, setCartonUnitsCount] = useState('');
+  const [cartonShippingCost, setCartonShippingCost] = useState('');
+  const [marginBaseSellPrice, setMarginBaseSellPrice] = useState('');
+  const [marginPercentage, setMarginPercentage] = useState('20');
+
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
   // Sync selected branch if activeBranchId changes
   useEffect(() => {
     if (activeBranchId) {
@@ -70,6 +92,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       setWholesalePrice(branchProd.wholesalePrice);
       setMinStock(branchProd.minStock);
       setInitialQty(branchProd.currentQty);
+      setContinuousNotification(null);
     } else {
       const nextCode = `PRD-${100 + db.products.length + 1}`;
       setName('');
@@ -84,13 +107,44 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     }
   }, [product, isOpen, db.products.length, selectedBranchId]);
 
+  // Auto-focus name field whenever modal opens or resets
+  useEffect(() => {
+    if (isOpen) {
+      const timer = setTimeout(() => {
+        nameInputRef.current?.focus();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen]);
+
+  // Reverse Calculations computed on the fly
+  const calculatedCartonUnitCost = useMemo(() => {
+    const total = (parseFloat(cartonTotalCost) || 0) + (parseFloat(cartonShippingCost) || 0);
+    const count = parseFloat(cartonUnitsCount) || 0;
+    if (count <= 0 || total <= 0) return 0;
+    return total / count;
+  }, [cartonTotalCost, cartonShippingCost, cartonUnitsCount]);
+
+  const calculatedMarginBuyPrice = useMemo(() => {
+    const retail = parseFloat(marginBaseSellPrice) || sellPrice || 0;
+    const margin = parseFloat(marginPercentage) || 0;
+    if (retail <= 0) return 0;
+    if (margin >= 100) return 0;
+    // Buy cost = Retail ÷ (1 + Margin% / 100)
+    return retail / (1 + margin / 100);
+  }, [marginBaseSellPrice, sellPrice, marginPercentage]);
+
   if (!isOpen) return null;
 
   const currentBranch = branches.find(b => b.id === selectedBranchId) || branches[0];
 
-  const handleSave = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return alert('اكتب اسم الصنف');
+  const handleSave = (e?: React.FormEvent, shouldClose: boolean = false) => {
+    if (e) e.preventDefault();
+    if (!name.trim()) {
+      alert('يرجى كتابة اسم الصنف');
+      nameInputRef.current?.focus();
+      return;
+    }
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
@@ -104,6 +158,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     const branchName = currentBranch?.name || 'الفرع الرئيسي';
 
     if (product) {
+      // Editing existing product
       const idx = updated.products.findIndex(p => p.id === product.id);
       if (idx !== -1) {
         // 1. Update master metadata (name, code, barcode, unit)
@@ -128,9 +183,12 @@ export const ProductModal: React.FC<ProductModalProps> = ({
         updated.products[idx] = targetProd;
         logAudit(updated, `تعديل صنف في ${branchName}`, `${name.trim()} (سعر: ${sellPrice} | مخزون: ${initialQty})`);
       }
+      onUpdateDb(updated);
+      onClose();
     } else {
+      // Adding NEW product
       const newProdId = generateId('prod');
-      let newProduct: Product = {
+      const newProduct: Product = {
         id: newProdId,
         name: name.trim(),
         code: code.trim(),
@@ -202,28 +260,85 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       }
 
       logAudit(updated, `إضافة صنف جديد بفرع ${branchName}`, `${name} (${initialQty} ${unit})`);
-    }
 
-    onUpdateDb(updated);
-    onClose();
+      // Update parent DB state
+      onUpdateDb(updated);
+
+      if (shouldClose) {
+        onClose();
+        return;
+      }
+
+      // Continuous entry: Do NOT close the modal, clear fields completely and prepare for next item
+      const savedItemName = name.trim();
+      setName('');
+      const nextCode = `PRD-${100 + updated.products.length + 1}`;
+      setCode(nextCode);
+      setBarcode('');
+      setUnit('قطعة');
+      setBuyPrice(0);
+      setSellPrice(0);
+      setWholesalePrice(0);
+      setMinStock(5);
+      setInitialQty(0);
+      setShowReverseCalc(false);
+      setCartonTotalCost('');
+      setCartonUnitsCount('');
+      setCartonShippingCost('');
+      setMarginBaseSellPrice('');
+
+      setContinuousNotification(`✓ تم حفظ الصنف "${savedItemName}" بنجاح! تم تفريغ الكارت وجاهز لإدخال صنف جديد.`);
+      setTimeout(() => {
+        nameInputRef.current?.focus();
+      }, 50);
+    }
   };
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-3 overflow-y-auto">
-      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[92vh] flex flex-col shadow-2xl border border-slate-200">
+      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+        {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl">
           <div className="flex items-center gap-2">
-            <Package className="w-5 h-5 text-blue-600" />
-            <h2 className="text-base font-black text-slate-900">
-              {product ? 'تعديل بيانات الصنف والتسعير' : 'إضافة صنف جديد للنظام'}
-            </h2>
+            <div className="p-1.5 bg-blue-600 text-white rounded-lg shadow-2xs">
+              <Package className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-black text-slate-900">
+                {product ? 'تعديل بيانات الصنف والتسعير' : 'إضافة صنف جديد للنظام'}
+              </h2>
+              <span className="text-[11px] text-slate-500 font-medium">
+                {!product ? 'إدخال مستمر وسريع بدون مغادرة النافذة' : 'تحديث أسعار وتكاليف الصنف'}
+              </span>
+            </div>
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-slate-200 rounded">
-            <X className="w-5 h-5 text-slate-500" />
+          <button
+            onClick={onClose}
+            className="p-1 hover:bg-slate-200 text-slate-500 hover:text-slate-900 rounded-lg transition-colors cursor-pointer"
+            title="إغلاق"
+          >
+            <X className="w-5 h-5" />
           </button>
         </div>
 
-        <form onSubmit={handleSave} className="p-4 space-y-3.5 overflow-y-auto flex-1">
+        <form onSubmit={e => handleSave(e, false)} className="p-4 space-y-3.5 overflow-y-auto flex-1">
+          {/* Continuous addition success banner */}
+          {continuousNotification && (
+            <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between text-xs text-emerald-900 animate-in fade-in duration-200">
+              <div className="flex items-center gap-2 font-bold">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{continuousNotification}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setContinuousNotification(null)}
+                className="text-emerald-700 hover:text-emerald-950 p-1 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* Branch Specificity Selector & Notice */}
           <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between">
@@ -251,18 +366,21 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             </div>
           </div>
 
+          {/* Product Name */}
           <div>
             <label className="block text-[11px] font-bold text-slate-700 mb-1">اسم الصنف الكامل *</label>
             <input
+              ref={nameInputRef}
               type="text"
               required
               value={name}
               onChange={e => setName(e.target.value)}
               placeholder="مثال: شاشة سامسونج 27 بوصة"
-              className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold"
+              className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold focus:bg-white focus:border-blue-500 outline-none transition-colors"
             />
           </div>
 
+          {/* Code, Barcode, Unit */}
           <div className="grid grid-cols-3 gap-2.5">
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">كود الصنف</label>
@@ -271,7 +389,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                 required
                 value={code}
                 onChange={e => setCode(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono"
+                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
             <div>
@@ -281,7 +399,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                 value={barcode}
                 onChange={e => setBarcode(e.target.value)}
                 placeholder="622..."
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono"
+                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
             <div>
@@ -290,15 +408,203 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                 type="text"
                 value={unit}
                 onChange={e => setUnit(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
           </div>
 
-          <div className="pt-2 border-t border-slate-100">
-            <span className="block text-[11px] font-black text-slate-900 mb-2">
-              تسعير الصنف الخاص بـ ({currentBranch.name}):
-            </span>
+          {/* Pricing Section with Reverse Cost Calculation */}
+          <div className="pt-2 border-t border-slate-100 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="block text-[11px] font-black text-slate-900">
+                تسعير الصنف الخاص بـ ({currentBranch.name}):
+              </span>
+              {/* Backward / Reverse calculation button */}
+              <button
+                type="button"
+                onClick={() => setShowReverseCalc(prev => !prev)}
+                className={`text-[11px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1.5 transition-all cursor-pointer ${
+                  showReverseCalc
+                    ? 'bg-blue-600 text-white shadow-2xs'
+                    : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200'
+                }`}
+                title="حساب سعر الشراء والتكلفة عكسياً من إجمالي الفاتورة أو الكرتونة أو نسبة الربح"
+              >
+                <Calculator className="w-3.5 h-3.5" />
+                <span>الحساب العكسي لسعر الشراء 🧮</span>
+              </button>
+            </div>
+
+            {/* REVERSE CALCULATION PANEL */}
+            {showReverseCalc && (
+              <div className="p-3 bg-gradient-to-br from-blue-50/90 to-indigo-50/70 border border-blue-300/80 rounded-xl space-y-2.5 shadow-xs animate-in fade-in duration-150">
+                <div className="flex items-center justify-between border-b border-blue-200 pb-1.5">
+                  <div className="flex items-center gap-1.5 text-xs font-black text-blue-950">
+                    <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                    <span>أداة الحساب العكسي لتكلفة شراء الصنف:</span>
+                  </div>
+                  {/* Segmented Mode Selector */}
+                  <div className="inline-flex rounded-lg border border-blue-200 bg-white p-0.5 text-[10px]">
+                    <button
+                      type="button"
+                      onClick={() => setReverseMode('carton')}
+                      className={`px-2 py-0.5 rounded font-bold transition-all cursor-pointer ${
+                        reverseMode === 'carton' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      من إجمالي الكرتونة / الدفعة
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReverseMode('margin')}
+                      className={`px-2 py-0.5 rounded font-bold transition-all cursor-pointer ${
+                        reverseMode === 'margin' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      من سعر البيع وهامش الربح
+                    </button>
+                  </div>
+                </div>
+
+                {reverseMode === 'carton' ? (
+                  <div className="space-y-2 text-xs">
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                          إجمالي سعر الكرتونة / الدفعة
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          placeholder="مثال: 1200"
+                          value={cartonTotalCost}
+                          onFocus={e => e.target.select()}
+                          onChange={e => setCartonTotalCost(e.target.value)}
+                          className="w-full px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-mono font-bold text-center focus:border-blue-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                          عدد القطع بالكرتونة
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="1"
+                          placeholder="مثال: 24"
+                          value={cartonUnitsCount}
+                          onFocus={e => e.target.select()}
+                          onChange={e => setCartonUnitsCount(e.target.value)}
+                          className="w-full px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-mono font-bold text-center focus:border-blue-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                          مصاريف نقل وشحن إضافية
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          placeholder="0.00"
+                          value={cartonShippingCost}
+                          onFocus={e => e.target.select()}
+                          onChange={e => setCartonShippingCost(e.target.value)}
+                          className="w-full px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-mono font-bold text-center focus:border-blue-500 outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1 border-t border-blue-200/50">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-600 font-bold text-xs">سعر شراء القطعة المحسوب:</span>
+                        <span className="font-mono font-black text-blue-900 text-sm bg-white px-2 py-0.5 rounded border border-blue-200">
+                          {calculatedCartonUnitCost > 0 ? calculatedCartonUnitCost.toFixed(2) : '0.00'} {db.settings.currency}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={calculatedCartonUnitCost <= 0}
+                        onClick={() => {
+                          if (calculatedCartonUnitCost > 0) {
+                            setBuyPrice(Number(calculatedCartonUnitCost.toFixed(2)));
+                            setShowReverseCalc(false);
+                          }
+                        }}
+                        className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 shadow-2xs cursor-pointer"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>✓ اعتماد كسعر شراء للقطعة</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2 text-xs">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                          سعر البيع قطاعي المستهدف
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          placeholder="مثال: 100"
+                          value={marginBaseSellPrice || (sellPrice > 0 ? String(sellPrice) : '')}
+                          onFocus={e => e.target.select()}
+                          onChange={e => setMarginBaseSellPrice(e.target.value)}
+                          className="w-full px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-mono font-bold text-center focus:border-blue-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
+                          نسبة هامش الربح المطلوب (%)
+                        </label>
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          placeholder="مثال: 20"
+                          value={marginPercentage}
+                          onFocus={e => e.target.select()}
+                          onChange={e => setMarginPercentage(e.target.value)}
+                          className="w-full px-2 py-1 bg-white border border-slate-300 rounded-md text-xs font-mono font-bold text-center focus:border-blue-500 outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1 border-t border-blue-200/50">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-slate-600 font-bold text-xs">سعر الشراء المستنتج:</span>
+                        <span className="font-mono font-black text-blue-900 text-sm bg-white px-2 py-0.5 rounded border border-blue-200">
+                          {calculatedMarginBuyPrice > 0 ? calculatedMarginBuyPrice.toFixed(2) : '0.00'} {db.settings.currency}
+                        </span>
+                        <span className="text-[10px] text-emerald-700 font-bold mr-1">
+                          (ربح: {(Number(marginBaseSellPrice || sellPrice) - calculatedMarginBuyPrice).toFixed(2)})
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={calculatedMarginBuyPrice <= 0}
+                        onClick={() => {
+                          if (calculatedMarginBuyPrice > 0) {
+                            setBuyPrice(Number(calculatedMarginBuyPrice.toFixed(2)));
+                            setShowReverseCalc(false);
+                          }
+                        }}
+                        className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 shadow-2xs cursor-pointer"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>✓ اعتماد كسعر شراء للقطعة</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Price Inputs Grid */}
             <div className="grid grid-cols-3 gap-2.5">
               <div>
                 <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر الشراء / التكلفة</label>
@@ -306,9 +612,11 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                   type="number"
                   min="0"
                   step="any"
-                  value={buyPrice}
-                  onChange={e => setBuyPrice(parseFloat(e.target.value) || 0)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold"
+                  value={buyPrice === 0 ? '' : buyPrice}
+                  placeholder="0.00"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setBuyPrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
@@ -317,9 +625,11 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                   type="number"
                   min="0"
                   step="any"
-                  value={sellPrice}
-                  onChange={e => setSellPrice(parseFloat(e.target.value) || 0)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-emerald-700"
+                  value={sellPrice === 0 ? '' : sellPrice}
+                  placeholder="0.00"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setSellPrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center text-emerald-700 focus:bg-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
@@ -328,14 +638,17 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                   type="number"
                   min="0"
                   step="any"
-                  value={wholesalePrice}
-                  onChange={e => setWholesalePrice(parseFloat(e.target.value) || 0)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono"
+                  value={wholesalePrice === 0 ? '' : wholesalePrice}
+                  placeholder="0.00"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setWholesalePrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
                 />
               </div>
             </div>
           </div>
 
+          {/* Stock Quantities */}
           <div className="grid grid-cols-2 gap-3 pt-2">
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
@@ -344,9 +657,11 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               <input
                 type="number"
                 step="any"
-                value={initialQty}
-                onChange={e => setInitialQty(parseFloat(e.target.value) || 0)}
-                className={`w-full px-2.5 py-1.5 bg-slate-50 border rounded-lg text-xs font-mono font-black ${
+                value={initialQty === 0 ? '' : initialQty}
+                placeholder="0"
+                onFocus={e => e.target.select()}
+                onChange={e => setInitialQty(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
+                className={`w-full px-2.5 py-1.5 bg-slate-50 border rounded-lg text-xs font-mono font-black text-center focus:bg-white focus:border-blue-500 outline-none ${
                   initialQty < 0
                     ? 'border-red-400 text-red-600 bg-red-50/50'
                     : 'border-slate-200 text-blue-700'
@@ -358,9 +673,11 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               <input
                 type="number"
                 min="0"
-                value={minStock}
-                onChange={e => setMinStock(parseInt(e.target.value) || 0)}
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold"
+                value={minStock === 0 || minStock === 5 ? '' : minStock}
+                placeholder="5"
+                onFocus={e => e.target.select()}
+                onChange={e => setMinStock(e.target.value === '' ? 5 : parseInt(e.target.value) || 0)}
+                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
           </div>
@@ -394,20 +711,44 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             </div>
           )}
 
-          <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+          {/* Modal Actions */}
+          <div className="pt-3 border-t border-slate-200 flex items-center justify-between gap-2">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors"
+              className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors cursor-pointer"
             >
               إلغاء
             </button>
-            <button
-              type="submit"
-              className="px-5 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-colors"
-            >
-              حفظ بيانات الصنف ({currentBranch.name})
-            </button>
+
+            <div className="flex items-center gap-2">
+              {!product ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={e => handleSave(e, true)}
+                    className="px-3.5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                    title="حفظ هذا الصنف والخروج من النافذة"
+                  >
+                    حفظ وإغلاق
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>حفظ وتفريغ لإدخال صنف جديد</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                >
+                  حفظ تعديل بيانات الصنف
+                </button>
+              )}
+            </div>
           </div>
         </form>
       </div>

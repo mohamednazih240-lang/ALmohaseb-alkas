@@ -266,8 +266,8 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.settings.companyPin = '2919';
   }
 
-  // Enforce Generation 2 clean state (system fully purged of all past sample/merged items and invoices)
-  if (db.cleanGeneration !== 2) {
+  // Enforce Generation 4 clean state (system fully purged of all past sample/merged items and invoices per user direct order)
+  if (db.cleanGeneration !== 4) {
     db.products = [];
     db.invoices = [];
     db.vouchers = [];
@@ -287,7 +287,7 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.settings.nextReceipt = 1;
     db.settings.nextQuote = 1;
     db.settings.nextOrder = 1;
-    db.cleanGeneration = 2;
+    db.cleanGeneration = 4;
   }
 
   if (!db.users) db.users = [];
@@ -414,6 +414,41 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
 }
 
 /**
+ * Strictly wipes all invoices from the system, resets sequential invoice numbers, and purges linked vouchers
+ */
+export function wipeAllInvoicesFromSystem(db: AccountingDB): AccountingDB {
+  const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  updated.invoices = [];
+  // Keep non-invoice vouchers (manual receipts/payments) but remove invoice vouchers
+  updated.vouchers = (updated.vouchers || []).filter(v => !v.invoiceId);
+  // Keep only opening stock movements if any, remove all invoice stock movements
+  updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.type === 'opening');
+  // Clean treasury entries linked to invoices
+  updated.treasury = (updated.treasury || []).filter(tr => tr.sourceType !== 'invoice');
+  // Clean journals linked to invoices
+  updated.journals = (updated.journals || []).filter(j => j.sourceType !== 'invoice');
+  
+  // Reset counters to 1
+  updated.settings.nextPurchase = 1;
+  updated.settings.nextSale = 1;
+  updated.settings.nextReceipt = 1;
+  updated.settings.nextPayment = 1;
+  updated.settings.nextQuote = 1;
+  updated.settings.nextOrder = 1;
+  
+  // Recalculate customer and supplier balances
+  (updated.customers || []).forEach(c => {
+    c.balance = 0;
+  });
+  (updated.suppliers || []).forEach(s => {
+    s.balance = 0;
+  });
+
+  logAudit(updated, 'تصفير شامل للفواتير', 'تم حذف وتصفير كافة فواتير المبيعات والمشتريات من النظام بالكامل');
+  return sanitizeCompanyDatabase(updated);
+}
+
+/**
  * Ensures strict company sanitization across the applet
  */
 export function ensurePrimaryBranches(db: AccountingDB): AccountingDB {
@@ -493,7 +528,7 @@ export function createSeedData(
     { id: 'wh_branch', name: 'مخزن الفرع', location: 'الفرع الإضافي', isDefault: false }
   ];
 
-  const products: Product[] = JSON.parse(JSON.stringify(DEFAULT_CATALOG_1001));
+  const products: Product[] = [];
   const customers: Party[] = [];
   const suppliers: Party[] = [];
 
@@ -618,14 +653,6 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
       }
     });
 
-    // Ensure catalog of 1001 products is populated
-    if (parsed.products.length < 1000) {
-      const merged = mergeCatalogIntoDb(parsed);
-      const readyDb = sanitizeCompanyDatabase(merged.db, normalizedTenantId);
-      saveTenantDatabase(normalizedTenantId, readyDb);
-      return readyDb;
-    }
-
     // Save back sanitized database
     saveTenantDatabase(normalizedTenantId, parsed);
     return parsed;
@@ -688,10 +715,6 @@ export function loadDatabase(): AccountingDB {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.accounts)) {
-        if (parsed.products && parsed.products.length < 1000) {
-          const merged = mergeCatalogIntoDb(parsed);
-          parsed.products = merged.db.products;
-        }
         const companyName = parsed.settings?.company || 'المنشأة الرئيسية';
         const primaryTenant = registerCompany({
           name: companyName,
@@ -1641,6 +1664,117 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     updated,
     `حذف ${invTypeName} وعكس التأثير بالكامل`,
     `تم حذف الفاتورة ${invoice.number} وعكس المخزون (${invoice.items.length} أصناف) والخزينة والقيود المحاسبية والأرصدة بالكامل`
+  );
+
+  return updated;
+}
+
+/**
+ * Deletes any voucher (receipt or payment) and cleanly reverts:
+ * - Treasury entry and balance
+ * - General journal double-entry
+ * - Party (customer/supplier) balance
+ * - Audit trail
+ */
+export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): AccountingDB {
+  const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+
+  // 1. Remove treasury entry
+  updated.treasury = updated.treasury.filter(tr => tr.sourceId !== voucher.id && tr.id !== voucher.id);
+
+  // 2. Remove journal entry
+  updated.journals = updated.journals.filter(j => j.sourceId !== voucher.id && j.id !== voucher.journalEntryId);
+
+  // 3. Remove voucher
+  updated.vouchers = updated.vouchers.filter(item => item.id !== voucher.id);
+
+  // 4. Update party balance
+  if (voucher.partyId) {
+    const cust = updated.customers.find(c => c.id === voucher.partyId);
+    if (cust) {
+      cust.balance = calculateCustomerBalance(updated, cust.id);
+    }
+    const supp = updated.suppliers.find(s => s.id === voucher.partyId);
+    if (supp) {
+      supp.balance = calculateSupplierBalance(updated, supp.id);
+    }
+  }
+
+  logAudit(
+    updated,
+    `حذف ${voucher.type === 'receipt' ? 'سند قبض' : 'سند صرف'} وعكس الأرصدة`,
+    `تم حذف السند ${voucher.number} بقيمة ${voucher.amount} وعكس الخزينة وحساب الطرف بالكامل`
+  );
+
+  return updated;
+}
+
+/**
+ * Deletes any stock adjustment and cleanly reverts:
+ * - Branch product stock quantity back to what it was before the adjustment
+ * - Stock movements log
+ * - Inventory journals
+ * - Audit trail
+ */
+export function deleteAdjustmentAndRevert(db: AccountingDB, adjustmentId: string): AccountingDB {
+  const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  const adj = (updated.adjustments || []).find(a => a.id === adjustmentId);
+  if (!adj) return updated;
+
+  // Revert product stock: adjustment applied diffQty = actualQty - systemQty
+  // To revert, subtract diffQty from currentQty
+  const prod = updated.products.find(p => p.id === adj.productId);
+  if (prod) {
+    const bId = adj.branchId || 'br_main';
+    const bp = getProductForBranch(prod, bId);
+    const revertedQty = bp.currentQty - adj.diffQty;
+    const prodUpdated = updateProductBranchData(prod, bId, { currentQty: revertedQty });
+    const pIdx = updated.products.findIndex(p => p.id === prod.id);
+    if (pIdx > -1) updated.products[pIdx] = prodUpdated;
+  }
+
+  // Remove stock movements
+  updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.sourceId !== adj.id);
+  // Remove journals
+  updated.journals = (updated.journals || []).filter(j => j.sourceId !== adj.id);
+  // Remove adjustment
+  updated.adjustments = (updated.adjustments || []).filter(a => a.id !== adj.id);
+
+  logAudit(updated, 'حذف تسوية جردية وعكس الرصيد', `تم حذف التسوية وعكس كمية المخزون بالكامل`);
+  return updated;
+}
+
+/**
+ * Deletes any manual treasury entry, expense, or revenue and cleanly reverts:
+ * - Treasury balance
+ * - Expenses / Revenues lists
+ * - Journals
+ * - Audit trail
+ */
+export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string): AccountingDB {
+  const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  const tr = updated.treasury.find(t => t.id === entryId);
+  if (!tr) return updated;
+
+  const targetSourceId = tr.sourceId || tr.id;
+
+  // If this was an expense or revenue, remove from expenses/revenues
+  if (tr.sourceType === 'expense') {
+    updated.expenses = updated.expenses.filter(e => e.id !== targetSourceId);
+  } else if (tr.sourceType === 'revenue') {
+    updated.revenues = updated.revenues.filter(r => r.id !== targetSourceId);
+  }
+
+  // Remove treasury entry
+  updated.treasury = updated.treasury.filter(t => t.id !== entryId && t.sourceId !== targetSourceId);
+
+  // Remove journals
+  updated.journals = updated.journals.filter(j => j.sourceId !== targetSourceId && j.id !== targetSourceId);
+
+  logAudit(
+    updated,
+    'حذف حركة خزينة وعكس الرصيد',
+    `تم حذف حركة ${tr.direction === 'in' ? 'وارد' : 'صادر'} بقيمة ${tr.amount} وعكس رصيد الخزينة والقيود`
   );
 
   return updated;

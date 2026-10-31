@@ -25,7 +25,8 @@ import {
   createVoucherJournal,
   logAudit,
   isDuplicateVoucherNumber,
-  getNextUniqueVoucherNumber
+  getNextUniqueVoucherNumber,
+  deleteVoucherAndRevert
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { VoucherPrintModal } from './VoucherPrintModal';
@@ -220,22 +221,11 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
       return;
     }
 
-    if (!confirm(`هل أنت متأكد من حذف ${isReceipt ? 'سند القبض' : 'سند الصرف'} "${v.number}" وعكس القيود المالية؟`)) {
+    if (!confirm(`هل أنت متأكد من حذف ${isReceipt ? 'سند القبض' : 'سند الصرف'} "${v.number}" وعكس القيود والأرصدة المالية بالكامل؟`)) {
       return;
     }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-
-    // 1. Remove treasury entry
-    updated.treasury = updated.treasury.filter(tr => tr.sourceId !== v.id);
-
-    // 2. Remove journal entry
-    updated.journals = updated.journals.filter(j => j.sourceId !== v.id);
-
-    // 3. Remove voucher
-    updated.vouchers = updated.vouchers.filter(item => item.id !== v.id);
-
-    logAudit(updated, `حذف ${isReceipt ? 'سند قبض' : 'سند صرف'}`, `تم حذف ${v.number}`);
+    const updated = deleteVoucherAndRevert(db, v);
     onUpdateDb(updated);
   };
 
@@ -586,8 +576,10 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                     min="0.01"
                     step="any"
                     required
-                    value={amount}
-                    onChange={e => setAmount(parseFloat(e.target.value) || 0)}
+                    value={amount === 0 ? '' : amount}
+                    placeholder="0.00"
+                    onFocus={e => e.target.select()}
+                    onChange={e => setAmount(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                     className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-mono font-black"
                   />
                 </div>

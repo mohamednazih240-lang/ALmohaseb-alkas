@@ -388,7 +388,12 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
 
                     {/* 4. جدول الأصناف والبيانات (أفقي متناسق بدون أي تمرير) */}
                     <div className="table-wrapper">
-                      <table>
+                      <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse' }}>
+                        <colgroup>
+                          {doc.tableHeaders.map((th, thIdx) => (
+                            <col key={thIdx} style={{ width: th.width || 'auto' }} />
+                          ))}
+                        </colgroup>
                         <thead>
                           <tr>
                             {doc.tableHeaders.map((th, thIdx) => (

@@ -60,7 +60,8 @@ import {
   getNextUniquePartyCode,
   toWesternNumerals,
   parseNum,
-  syncInvoiceVouchers
+  syncInvoiceVouchers,
+  deleteInvoiceAndRevert
 } from '../services/accountingStorage';
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
@@ -2446,6 +2447,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       step="any"
                       value={partialPaidInput}
                       onChange={e => setPartialPaidInput(e.target.value)}
+                      onFocus={e => e.target.select()}
                       placeholder="0.00"
                       className="w-16 text-center font-mono font-bold text-xs text-blue-700 outline-none"
                     />
@@ -2758,6 +2760,23 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 <span>إلغاء وخروج</span>
               </button>
             )}
+            {editingInvoice && db.currentUser?.role === 'مدير' && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!confirm(`هل أنت متأكد من حذف فاتورة "${editingInvoice.number}" نهائياً؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) return;
+                  const updated = deleteInvoiceAndRevert(db, editingInvoice);
+                  onUpdateDb(updated);
+                  if (onCloseEdit) onCloseEdit();
+                  else if (onClose) onClose();
+                }}
+                className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded font-bold text-[10px] flex items-center justify-center gap-1 transition-colors cursor-pointer shadow-2xs"
+                title="حذف الفاتورة وعكس آثارها بالكامل"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>حذف الفاتورة وعكس الأرصدة</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -2866,6 +2885,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   type="number"
                   placeholder="أدخل قيمة أو نسبة الخصم..."
                   value={globalInvDisc}
+                  onFocus={e => e.target.select()}
                   onChange={e => setGlobalInvDisc(e.target.value)}
                   className="w-full px-2 py-1 border border-slate-300 rounded text-[10px] h-[26px]"
                 />
@@ -2896,6 +2916,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   type="number"
                   placeholder="أدخل قيمة أو نسبة الضريبة..."
                   value={globalInvTax}
+                  onFocus={e => e.target.select()}
                   onChange={e => setGlobalInvTax(e.target.value)}
                   className="w-full px-2 py-1 border border-slate-300 rounded text-[10px] h-[26px]"
                 />
@@ -2918,6 +2939,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="number"
                     value={extraIncomeVal}
                     placeholder="0.00"
+                    onFocus={e => e.target.select()}
                     onChange={e => setExtraIncomeVal(e.target.value)}
                     className="w-full px-2 py-1 border border-slate-300 rounded text-[9.5px] h-[25px] font-bold"
                   />
@@ -2951,9 +2973,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       </select>
                       <input
                         type="number"
-                        value={p.amount || ''}
-                        placeholder="المبلغ..."
-                        onChange={e => updatePaymentRow(idx, 'amount', parseFloat(e.target.value) || 0)}
+                        value={p.amount === 0 ? '' : p.amount}
+                        placeholder="0.00"
+                        onFocus={e => e.target.select()}
+                        onChange={e => updatePaymentRow(idx, 'amount', e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                         className="flex-1 px-1.5 py-0.5 border border-slate-300 rounded text-[9.5px] font-mono font-bold h-6"
                       />
                       <button
@@ -3345,8 +3368,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="number"
                     min="0.01"
                     step="any"
-                    value={modifyQty}
-                    onChange={e => setModifyQty(parseFloat(e.target.value) || 0)}
+                    value={modifyQty === 0 ? '' : modifyQty}
+                    placeholder="0"
+                    onFocus={e => e.target.select()}
+                    onChange={e => setModifyQty(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                     className="w-full px-2 py-1 border border-slate-300 rounded text-[9.5px] h-6 font-mono font-bold"
                   />
                 </div>
@@ -3356,8 +3381,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="number"
                     min="0"
                     step="any"
-                    value={modifyPrice}
-                    onChange={e => setModifyPrice(parseFloat(e.target.value) || 0)}
+                    value={modifyPrice === 0 ? '' : modifyPrice}
+                    placeholder="0.00"
+                    onFocus={e => e.target.select()}
+                    onChange={e => setModifyPrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                     className="w-full px-2 py-1 border border-slate-300 rounded text-[9.5px] h-6 font-mono font-bold"
                   />
                 </div>
@@ -3595,6 +3622,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         min="0.01"
                         step="any"
                         value={itemCardQty}
+                        onFocus={e => e.target.select()}
                         onChange={e => setItemCardQty(e.target.value)}
                         onKeyDown={e => {
                           if (e.key === 'Enter') {
@@ -3668,6 +3696,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         min="0"
                         step="any"
                         value={itemCardPrice}
+                        onFocus={e => e.target.select()}
                         onChange={e => setItemCardPrice(e.target.value)}
                         onKeyDown={e => {
                           if (e.key === 'Enter') {
@@ -3840,6 +3869,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     min="0.01"
                     step="any"
                     value={fastItemQty}
+                    onFocus={e => e.target.select()}
                     onChange={e => setFastItemQty(e.target.value)}
                     placeholder="أدخل الكمية أو العدد..."
                     className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-bold font-mono text-slate-900 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 text-center"
@@ -3856,6 +3886,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       min="0"
                       step="any"
                       value={fastItemPrice}
+                      onFocus={e => e.target.select()}
                       onChange={e => setFastItemPrice(e.target.value)}
                       placeholder="أدخل السعر يدوياً..."
                       className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-bold font-mono text-emerald-700 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 text-center"
@@ -4026,6 +4057,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="text"
                     value={rapidItemQty}
                     placeholder="العدد..."
+                    onFocus={e => e.target.select()}
                     onChange={e => {
                       const converted = toWesternNumerals(e.target.value);
                       setRapidItemQty(converted);
@@ -4045,6 +4077,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="text"
                     value={rapidItemPrice}
                     placeholder="السعر..."
+                    onFocus={e => e.target.select()}
                     onChange={e => {
                       const converted = toWesternNumerals(e.target.value);
                       setRapidItemPrice(converted);
@@ -4105,6 +4138,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="text"
                     value={rapidItemDiscount}
                     placeholder={rapidItemDiscountType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
+                    onFocus={e => e.target.select()}
                     onChange={e => {
                       const converted = toWesternNumerals(e.target.value);
                       setRapidItemDiscount(converted);
@@ -4162,6 +4196,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="text"
                     value={rapidItemTax}
                     placeholder={rapidItemTaxType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
+                    onFocus={e => e.target.select()}
                     onChange={e => {
                       const converted = toWesternNumerals(e.target.value);
                       setRapidItemTax(converted);
@@ -4184,6 +4219,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   type="text"
                   value={rapidItemTotal}
                   placeholder="إجمالي الصنف..."
+                  onFocus={e => e.target.select()}
                   onChange={e => {
                     const converted = toWesternNumerals(e.target.value);
                     setRapidItemTotal(converted);

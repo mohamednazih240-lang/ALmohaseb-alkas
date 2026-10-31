@@ -34,7 +34,8 @@ import {
   generateId,
   getTodayDate,
   calculateTreasuryBalance,
-  logAudit
+  logAudit,
+  deleteTreasuryEntryAndRevert
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
@@ -385,13 +386,8 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       return;
     }
 
-    if (!confirm(`هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)}؟`)) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.treasury = updated.treasury.filter(t => t.id !== tr.id);
-    if (tr.sourceId) {
-      updated.journals = updated.journals.filter(j => j.sourceId !== tr.sourceId);
-    }
-    logAudit(updated, 'حذف حركة خزينة', `تم حذف حركة ${tr.direction === 'in' ? 'وارد' : 'صادر'} بقيمة ${tr.amount}`);
+    if (!confirm(`هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)} وعكس الأرصدة؟`)) return;
+    const updated = deleteTreasuryEntryAndRevert(db, tr.id);
     onUpdateDb(updated);
   };
 
@@ -1267,8 +1263,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                   min="0.01"
                   step="any"
                   required
-                  value={moveAmount}
-                  onChange={e => setMoveAmount(parseFloat(e.target.value) || 0)}
+                  value={moveAmount === 0 ? '' : moveAmount}
+                  placeholder="0.00"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setMoveAmount(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                   className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-black"
                 />
               </div>
@@ -1342,8 +1340,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                   min="0.01"
                   step="any"
                   required
-                  value={transferAmount}
-                  onChange={e => setTransferAmount(parseFloat(e.target.value) || 0)}
+                  value={transferAmount === 0 ? '' : transferAmount}
+                  placeholder="0.00"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setTransferAmount(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                   className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-black"
                 />
               </div>
@@ -1401,8 +1401,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                   min="0.01"
                   step="any"
                   required
-                  value={simpleAmount}
-                  onChange={e => setSimpleAmount(parseFloat(e.target.value) || 0)}
+                  value={simpleAmount === 0 ? '' : simpleAmount}
+                  placeholder="0.00"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setSimpleAmount(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                   className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-black"
                 />
               </div>
