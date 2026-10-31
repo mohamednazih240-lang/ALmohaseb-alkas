@@ -40,7 +40,6 @@ import {
   StockTransfer,
   Invoice
 } from '../types/accounting';
-import { mergeCatalogIntoDb } from '../data/defaultCatalog1001';
 import {
   formatMoney,
   generateId,
@@ -127,6 +126,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(36);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
 
   // Universal Print Modal State
   const [printModalOpen, setPrintModalOpen] = useState(false);
@@ -189,17 +189,44 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     [filteredProducts, currentSafePage, itemsPerPage]
   );
 
-  const handleMergeCatalogAction = () => {
-    const { db: updatedDb, addedCount } = mergeCatalogIntoDb(db);
-    if (addedCount > 0) {
-      logAudit(updatedDb, 'دمج كتالوج الأصناف', `تم استيراد ودمج ${addedCount} صنف من كتالوج المؤسسة بنجاح`);
-      onUpdateDb(updatedDb);
-      setToastMsg(`✓ تم دمج وإضافة ${addedCount} صنف جديد من كتالوج المؤسسة بنجاح! إجمالي الأصناف الآن: ${updatedDb.products.length} صنف.`);
-      setTimeout(() => setToastMsg(null), 5000);
+  // Multi-select & Bulk delete helpers
+  const isAllSelected = paginatedProducts.length > 0 && paginatedProducts.every(p => selectedProductIds.has(p.id));
+
+  const toggleSelectAll = () => {
+    if (isAllSelected) {
+      setSelectedProductIds(new Set());
     } else {
-      setToastMsg(`جميع أصناف الكتالوج الـ 1001 مدرجة ومحدثة بالفعل في النظام (${db.products.length} صنف).`);
-      setTimeout(() => setToastMsg(null), 4000);
+      setSelectedProductIds(new Set(paginatedProducts.map(p => p.id)));
     }
+  };
+
+  const toggleSelectProduct = (id: string) => {
+    setSelectedProductIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleBulkDeleteProducts = () => {
+    const isManager = db.currentUser?.role === 'مدير';
+    if (!isManager) {
+      alert('عذراً، لا يمكن حذف الأصناف إلا من قِبل المدير العام فقط.');
+      return;
+    }
+    const count = selectedProductIds.size;
+    if (count === 0) return;
+    if (!confirm(`هل أنت متأكد تماماً من حذف (${count}) صنف محدد نهائياً من دليل الأصناف؟`)) return;
+
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    updated.products = updated.products.filter(p => !selectedProductIds.has(p.id));
+    updated.stockMovements = (updated.stockMovements || []).filter(sm => !selectedProductIds.has(sm.productId));
+    logAudit(updated, 'حذف مجموعة أصناف', `تم حذف (${count}) صنف دفعة واحدة بواسطة ${db.currentUser?.name || 'المدير'}`);
+    onUpdateDb(updated);
+    setSelectedProductIds(new Set());
+    setToastMsg(`✓ تم حذف (${count}) صنف بنجاح من النظام.`);
+    setTimeout(() => setToastMsg(null), 4000);
   };
 
   // Save new Warehouse
@@ -410,16 +437,20 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       return;
     }
 
-    const hasMovements = db.stockMovements.some(sm => sm.productId === p.id);
-    if (hasMovements) {
-      alert('لا يمكن حذف الصنف لوجود حركات وفواتير سابقة مرتبطة به.');
-      return;
-    }
-    if (!confirm(`هل ترغب في حذف الصنف "${p.name}"؟`)) return;
+    if (!confirm(`هل أنت متأكد تماماً من حذف الصنف "${p.name}" (كود: ${p.code}) نهائياً؟`)) return;
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     updated.products = updated.products.filter(item => item.id !== p.id);
+    updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.productId !== p.id);
+    logAudit(updated, 'حذف صنف من المخزون', `${p.name} (${p.code}) بواسطة ${db.currentUser?.name || 'المدير'}`);
     onUpdateDb(updated);
+    setSelectedProductIds(prev => {
+      const next = new Set(prev);
+      next.delete(p.id);
+      return next;
+    });
+    setToastMsg(`✓ تم حذف الصنف "${p.name}" بنجاح.`);
+    setTimeout(() => setToastMsg(null), 4000);
   };
 
   // Export Products to CSV / Excel
@@ -656,10 +687,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       partySubId: product.barcode ? `باركود: ${product.barcode}` : undefined,
       badge: 'سجل حركة صنف',
       tableHeaders: [
-        { label: 'التاريخ', width: '18%', align: 'center' },
-        { label: 'البيان والمستند', width: '34%', align: 'right' },
-        { label: 'الوارد (+)', width: '12%', align: 'center' },
-        { label: 'المنصرف (-)', width: '12%', align: 'center' },
+        { label: 'التاريخ', width: '16%', align: 'center' },
+        { label: 'البيان والمستند', width: '36%', align: 'right' },
+        { label: 'الوارد', width: '12%', align: 'center' },
+        { label: 'المنصرف', width: '12%', align: 'center' },
         { label: 'السعر', width: '12%', align: 'center' },
         { label: 'الرصيد', width: '12%', align: 'center' }
       ],
@@ -750,16 +781,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               >
                 <Calculator className="w-4 h-4 text-slate-600" />
                 <span>تقييم وجرد</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleMergeCatalogAction}
-                className="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-                title="دمج كتالوج الـ 1001 صنف المرفق في ملف المؤسسة"
-              >
-                <Sparkles className="w-4 h-4 text-amber-300" />
-                <span>دمج كتالوج الـ 1001 صنف</span>
               </button>
 
               <button
@@ -908,6 +929,28 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             {/* Filter chips */}
             <div className="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-slate-100">
               <div className="flex items-center gap-1.5 flex-wrap">
+                {/* Select All Toggle */}
+                {paginatedProducts.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={toggleSelectAll}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border ${
+                      isAllSelected
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-2xs'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                    title={isAllSelected ? 'إلغاء تحديد كل الأصناف المعروضة' : 'تحديد جميع أصناف الصفحة الحالية'}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isAllSelected}
+                      onChange={() => {}}
+                      className="w-3.5 h-3.5 cursor-pointer accent-blue-600 pointer-events-none"
+                    />
+                    <span>{isAllSelected ? 'إلغاء التحديد' : 'تحديد الكل'}</span>
+                  </button>
+                )}
+
                 <span className="text-[11px] font-bold text-slate-500 ml-1">حالة الرصيد:</span>
                 <button
                   type="button"
@@ -966,6 +1009,39 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             </div>
           </div>
 
+          {/* Bulk Selection Action Toolbar */}
+          {selectedProductIds.size > 0 && (
+            <div className="bg-gradient-to-r from-rose-50 to-red-50 border-2 border-rose-300 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 shadow-xs animate-in fade-in">
+              <div className="flex items-center gap-3">
+                <span className="text-xs font-black text-rose-950 flex items-center gap-1.5">
+                  <span className="bg-rose-600 text-white px-2 py-0.5 rounded-md font-mono text-xs">
+                    {selectedProductIds.size}
+                  </span>
+                  <span>صنف محدد للحذف</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedProductIds(new Set())}
+                  className="text-xs text-slate-600 hover:text-black underline font-bold cursor-pointer"
+                >
+                  إلغاء التحديد
+                </button>
+              </div>
+
+              {db.currentUser?.role === 'مدير' && (
+                <button
+                  type="button"
+                  onClick={handleBulkDeleteProducts}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-black transition-all flex items-center gap-1.5 shadow-xs cursor-pointer active:scale-95"
+                  title="حذف جميع الأصناف المحددة نهائياً"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>حذف الأصناف المحددة ({selectedProductIds.size})</span>
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Products Responsive Card Grid */}
           {filteredProducts.length === 0 ? (
             <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
@@ -982,11 +1058,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={handleMergeCatalogAction}
-                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
+                  onClick={() => onOpenProductModal()}
+                  className="px-3.5 py-1.5 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
                 >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>دمج كتالوج الـ 1001 صنف</span>
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>إضافة صنف يدوي</span>
                 </button>
               </div>
             </div>
@@ -996,21 +1072,35 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 const isZero = p.currentQty === 0;
                 const isLow = !isZero && p.currentQty <= p.minStock;
                 const val = p.currentQty * (p.avgCost || p.buyPrice);
+                const isSelected = selectedProductIds.has(p.id);
 
                 return (
                   <div
                     key={p.id}
-                    className="bg-white rounded-xl border border-slate-200 hover:border-slate-300 shadow-2xs hover:shadow-xs transition-all flex flex-col justify-between p-3.5"
+                    className={`rounded-xl border transition-all flex flex-col justify-between p-3.5 ${
+                      isSelected
+                        ? 'bg-blue-50/40 border-blue-500 ring-2 ring-blue-400/40 shadow-xs'
+                        : 'bg-white border-slate-200 hover:border-slate-300 shadow-2xs hover:shadow-xs'
+                    }`}
                   >
                     {/* Card Header */}
                     <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-slate-100">
-                      <div>
-                        <h3 className="font-black text-sm text-slate-900 leading-snug">
-                          {p.name}
-                        </h3>
-                        <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-2">
-                          <span>كود: {p.code}</span>
-                          {p.barcode && <span>| باركود: {p.barcode}</span>}
+                      <div className="flex items-start gap-2.5 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectProduct(p.id)}
+                          className="w-4 h-4 mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer accent-blue-600 shrink-0"
+                          title="تحديد الصنف"
+                        />
+                        <div className="min-w-0">
+                          <h3 className="font-black text-sm text-slate-900 leading-snug truncate" title={p.name}>
+                            {p.name}
+                          </h3>
+                          <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-2 flex-wrap">
+                            <span>كود: {p.code}</span>
+                            {p.barcode && <span>| باركود: {p.barcode}</span>}
+                          </div>
                         </div>
                       </div>
 

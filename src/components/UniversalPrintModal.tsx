@@ -396,7 +396,13 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                 key={thIdx}
                                 style={{
                                   width: th.width,
-                                  textAlign: th.align || 'center'
+                                  textAlign: th.align || 'center',
+                                  whiteSpace: 'normal',
+                                  wordBreak: 'break-word',
+                                  overflowWrap: 'break-word',
+                                  fontSize: paperSize === 'A5' ? '10px' : paperSize === 'thermal' ? '9px' : '11px',
+                                  padding: '4px 2px',
+                                  lineHeight: 1.25
                                 }}
                               >
                                 {th.label}
@@ -419,12 +425,12 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                     style={{
                                       fontWeight: tr.isBold || cIdx === 0 ? 700 : 600,
                                       textAlign: doc.tableHeaders[cIdx]?.align || 'center',
-                                      whiteSpace: isTextCol ? 'normal' : isDateCol || isNumericCol ? 'nowrap' : 'normal',
-                                      wordBreak: isTextCol ? 'break-word' : 'normal',
+                                      whiteSpace: isDateCol ? 'nowrap' : 'normal',
+                                      wordBreak: 'break-word',
                                       overflowWrap: 'break-word',
                                       fontVariantNumeric: isNumericCol || isDateCol ? 'tabular-nums' : 'normal',
-                                      padding: '4px 4px',
-                                      fontSize: paperSize === 'A5' ? '10px' : '11px',
+                                      padding: '4px 3px',
+                                      fontSize: paperSize === 'A5' ? '10px' : paperSize === 'thermal' ? '9px' : '11px',
                                       lineHeight: isTextCol ? 1.35 : 1.2
                                     }}
                                   >
