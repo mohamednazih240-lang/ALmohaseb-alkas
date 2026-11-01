@@ -687,11 +687,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       partySubId: product.barcode ? `باركود: ${product.barcode}` : undefined,
       badge: 'سجل حركة صنف',
       tableHeaders: [
-        { label: 'التاريخ', width: '16%', align: 'center' },
-        { label: 'البيان والمستند', width: '36%', align: 'right' },
-        { label: 'الوارد', width: '12%', align: 'center' },
-        { label: 'المنصرف', width: '12%', align: 'center' },
-        { label: 'السعر', width: '12%', align: 'center' },
+        { label: 'التاريخ', width: '20%', align: 'center' },
+        { label: 'البيان والمستند', width: '35%', align: 'right' },
+        { label: 'الوارد', width: '11%', align: 'center' },
+        { label: 'المنصرف', width: '11%', align: 'center' },
+        { label: 'السعر', width: '11%', align: 'center' },
         { label: 'الرصيد', width: '12%', align: 'center' }
       ],
       tableRows: moves.map(m => ({

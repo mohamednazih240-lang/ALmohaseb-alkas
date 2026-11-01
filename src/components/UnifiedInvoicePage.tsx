@@ -1635,32 +1635,94 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       items: JSON.parse(JSON.stringify(invoiceItems))
     };
 
-    // 1. Stock movements & inventory balance update specifically for this branch
+    // 1. Stock movements, auto-register new items & inventory balance update specifically for this branch
     const whId = updated.warehouses[0]?.id || 'wh_main';
     const wh = updated.warehouses.find(w => w.id === whId);
 
     savedInvoice.items.forEach(item => {
-      const prod = updated.products.find(p => p.id === item.productId || p.code === item.productCode);
+      let prod = updated.products.find(
+        p => (item.productId && p.id === item.productId) ||
+             (item.productCode && p.code.toLowerCase() === item.productCode.toLowerCase()) ||
+             (item.productName && p.name.trim().toLowerCase() === item.productName.trim().toLowerCase())
+      );
+
+      // Auto-register brand new items entered on the fly into the products catalog
+      if (!prod && item.productName && item.productName.trim()) {
+        const rawName = item.productName.trim();
+        const newCode = (item.productCode && item.productCode.trim())
+          ? item.productCode.trim()
+          : `PRD-${100 + updated.products.length + 1}`;
+        const unitBuy = mode === 'purchase'
+          ? item.unitPrice
+          : (item.costPrice || (item.unitPrice > 0 ? item.unitPrice * 0.75 : 0));
+        const unitSell = (mode === 'sale' || mode === 'wholesale')
+          ? item.unitPrice
+          : (unitBuy > 0 ? unitBuy * 1.25 : 100);
+        const unitWholesale = unitSell * 0.9;
+        const newProdId = item.productId && item.productId.startsWith('prod_') ? item.productId : generateId('prod');
+
+        const newProd: Product = {
+          id: newProdId,
+          name: rawName,
+          code: newCode,
+          barcode: '',
+          category: 'عامة',
+          unit: item.unit || 'قطعة',
+          buyPrice: unitBuy,
+          sellPrice: unitSell,
+          wholesalePrice: unitWholesale,
+          minStock: 5,
+          currentQty: 0,
+          avgCost: unitBuy,
+          branchesData: {
+            [invoiceBranchId]: {
+              currentQty: 0,
+              buyPrice: unitBuy,
+              sellPrice: unitSell,
+              wholesalePrice: unitWholesale,
+              minStock: 5,
+              avgCost: unitBuy
+            }
+          }
+        };
+
+        updated.products.push(newProd);
+        prod = newProd;
+        item.productId = newProd.id;
+        item.productCode = newProd.code;
+        item.costPrice = unitBuy;
+      }
+
       if (prod) {
         const bp = getProductForBranch(prod, invoiceBranchId);
         let qtyChange = 0;
         let newQty = bp.currentQty;
-        let newAvgCost = bp.avgCost || bp.buyPrice;
-        let newBuyPrice = bp.buyPrice;
+        let newAvgCost = bp.avgCost || bp.buyPrice || 0;
+        let newBuyPrice = bp.buyPrice || 0;
 
         if (mode === 'sale' || mode === 'wholesale') {
           qtyChange = -item.qty;
-          newQty -= item.qty;
+          newQty -= item.qty; // Supports negative stock if sold before receiving
+          // Lock cost price on the invoice item for 100% exact profit calculation
+          const effectiveCost = (bp.avgCost && bp.avgCost > 0) ? bp.avgCost : (bp.buyPrice || prod.buyPrice || 0);
+          item.costPrice = effectiveCost;
         } else if (mode === 'purchase') {
           qtyChange = item.qty;
-          const oldQty = Math.max(0, bp.currentQty);
-          const oldCost = bp.avgCost || bp.buyPrice;
+          const oldQty = bp.currentQty;
+          const oldCost = bp.avgCost || bp.buyPrice || 0;
           const newQ = item.qty;
           const newCost = item.unitPrice;
-          const totalQ = oldQty + newQ;
-          newAvgCost = totalQ > 0 ? ((oldQty * oldCost) + (newQ * newCost)) / totalQ : newCost;
+
+          // If previous stock was zero or negative, the new cost is the purchase price
+          if (oldQty <= 0) {
+            newAvgCost = newCost;
+          } else {
+            const totalQ = oldQty + newQ;
+            newAvgCost = totalQ > 0 ? ((oldQty * oldCost) + (newQ * newCost)) / totalQ : newCost;
+          }
           newBuyPrice = newCost;
           newQty += item.qty;
+          item.costPrice = newCost;
         } else if (mode === 'sale_return') {
           qtyChange = item.qty;
           newQty += item.qty;
@@ -1686,7 +1748,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           warehouseName: wh ? wh.name : 'المخزن الرئيسي',
           qtyChange,
           balanceAfter: newQty,
-          unitCost: item.costPrice,
+          unitCost: item.costPrice || item.unitPrice,
           type: mode === 'sale' || mode === 'wholesale' ? 'sale' :
                 mode === 'purchase' ? 'purchase' :
                 mode === 'sale_return' ? 'sale_return' : 'purchase_return',
@@ -1698,18 +1760,25 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
     });
 
-    // 2. Treasury entries for each payment belonging to this branch
+    // 2. Treasury entries for each payment belonging to this branch (in for sales, out for purchases)
     if (finalPaid > 0) {
+      const isOutflow = mode === 'purchase' || mode === 'sale_return';
+      const trDirection: 'in' | 'out' = isOutflow ? 'out' : 'in';
+      const trActionDesc = mode === 'purchase' ? `سداد فاتورة مشتريات رقم ${savedInvoice.number}` :
+                           mode === 'sale_return' ? `صرف استرداد مرتجع مبيعات رقم ${savedInvoice.number}` :
+                           mode === 'purchase_return' ? `استرداد مرتجع مشتريات رقم ${savedInvoice.number}` :
+                           `تحصيل فاتورة مبيعات رقم ${savedInvoice.number}`;
+
       if (savedInvoice.payments && savedInvoice.payments.length > 0) {
         savedInvoice.payments.forEach(pLine => {
           if (pLine.amount > 0 && pLine.method !== 'آجل') {
             updated.treasury.unshift({
               id: generateId('tr'),
               date: savedInvoice.date,
-              direction: (mode === 'sale' || mode === 'wholesale' || mode === 'purchase_return') ? 'in' : 'out',
+              direction: trDirection,
               amount: pLine.amount,
               method: pLine.method,
-              description: `تحصيل فاتورة ${savedInvoice.number} (${invoiceBranch.name}) - ${partyName}`,
+              description: `${trActionDesc} (${invoiceBranch.name}) - ${partyName}`,
               sourceType: mode,
               sourceId: invId,
               branchId: invoiceBranchId,
@@ -1721,15 +1790,30 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         updated.treasury.unshift({
           id: generateId('tr'),
           date: savedInvoice.date,
-          direction: (mode === 'sale' || mode === 'wholesale' || mode === 'purchase_return') ? 'in' : 'out',
+          direction: trDirection,
           amount: finalPaid,
           method: mainPaymentMethod,
-          description: `تحصيل فاتورة ${savedInvoice.number} (${invoiceBranch.name}) - ${partyName}`,
+          description: `${trActionDesc} (${invoiceBranch.name}) - ${partyName}`,
           sourceType: mode,
           sourceId: invId,
           branchId: invoiceBranchId,
           branchName: invoiceBranch.name
         });
+      }
+    }
+
+    // 2.5 Update customer / supplier current balances
+    if (activePartyId) {
+      if (isCust) {
+        const cust = updated.customers.find(c => c.id === activePartyId);
+        if (cust) {
+          cust.balance = calculateCustomerBalance(updated, cust.id);
+        }
+      } else {
+        const supp = updated.suppliers.find(s => s.id === activePartyId);
+        if (supp) {
+          supp.balance = calculateSupplierBalance(updated, supp.id);
+        }
       }
     }
 

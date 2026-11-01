@@ -65,6 +65,7 @@
   box-sizing: border-box;
   page-break-inside: avoid;
   break-inside: avoid;
+  overflow: hidden;
 }
 
 .invoice-main-content {
@@ -227,6 +228,7 @@
   overflow-wrap: break-word;
   background-color: #ffffff;
   box-sizing: border-box;
+  overflow: hidden;
 }
 
 .invoice-container table th {

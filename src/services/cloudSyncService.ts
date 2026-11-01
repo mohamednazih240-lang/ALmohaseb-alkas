@@ -181,7 +181,6 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
                                    (!db.suppliers || db.suppliers.length === 0) &&
                                    (!db.users || db.users.length <= 1);
 
-      // Merge with latest cloud database if available to prevent dropping concurrent invoices across devices
       try {
         const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
         const checkSnap = await withTimeout(getDoc(compDocRef), 1500);
@@ -199,20 +198,13 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
                 updateSyncState({ status: 'connected' });
                 return false;
               }
-            } else {
-              // Merge invoices & vouchers by ID so newly added invoices from other phones are never dropped
-              if (parsed.invoices && parsed.invoices.length > 0) {
-                db.invoices = mergeInvoices(db.invoices || [], parsed.invoices);
-              }
-              if (parsed.vouchers && parsed.vouchers.length > 0) {
-                db.vouchers = mergeVouchers(db.vouchers || [], parsed.vouchers);
-              }
-              db = sanitizeCompanyDatabase(db);
             }
+            // Note: We do NOT re-merge parsed.invoices into db.invoices here!
+            // db.invoices already contains the user's intended state (including deletions or additions).
           }
         }
       } catch (checkErr) {
-        console.warn('Safeguard/merge check note:', checkErr);
+        console.warn('Safeguard check note:', checkErr);
       }
 
       const payload = {

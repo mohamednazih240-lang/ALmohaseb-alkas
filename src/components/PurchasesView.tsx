@@ -22,7 +22,7 @@ import {
   AccountingDB,
   Invoice
 } from '../types/accounting';
-import { formatMoney, logAudit, deleteInvoiceAndRevert } from '../services/accountingStorage';
+import { formatMoney, logAudit, deleteInvoiceAndRevert, wipeAllInvoicesFromSystem } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -317,6 +317,30 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
             <Printer className="w-4 h-4" />
             <span>طباعة وتصدير PDF ({purchaseInvoices.length})</span>
           </button>
+
+          {canDeletePurchases && db.invoices.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const ok = window.confirm(
+                  '⚠️ تنبيه هام ومؤكد:\n' +
+                  'هل أنت متأكد من رغبتك في حذف وتصفير جميع الفواتير بالكامل من النظام؟\n\n' +
+                  '• سيتم حذف كافة فواتير المشتريات والمبيعات نهائياً.\n' +
+                  '• سيتم تصفير الأرصدة المرتبطة بها وعكس حركاتها.\n' +
+                  '• ستبدأ أول فاتورة جديدة تدخلها برقم 1 فوراً.\n' +
+                  '• سيتم حفظ التعديل فورياً ومزامنته سحابياً لكافة الأجهزة.'
+                );
+                if (!ok) return;
+                const wiped = wipeAllInvoicesFromSystem(db);
+                onUpdateDb(wiped);
+              }}
+              className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+              title="تصفير وحذف جميع الفواتير من النظام نهائياً (0)"
+            >
+              <Trash2 className="w-4 h-4 text-rose-600" />
+              <span>تصفير وحذف كافة الفواتير (0)</span>
+            </button>
+          )}
 
           {canCreatePurchases && (
             <button

@@ -267,8 +267,7 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   }
 
   // Enforce Generation 4 clean state (system fully purged of all past sample/merged items and invoices per user direct order)
-  if (db.cleanGeneration !== 4) {
-    db.products = [];
+  if (!db.cleanGeneration || db.cleanGeneration < 4) {
     db.invoices = [];
     db.vouchers = [];
     db.stockMovements = [];
@@ -279,8 +278,6 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.journals = [];
     db.quotes = [];
     db.orders = [];
-    db.customers = [];
-    db.suppliers = [];
     db.settings.nextPurchase = 1;
     db.settings.nextSale = 1;
     db.settings.nextPayment = 1;
@@ -424,9 +421,9 @@ export function wipeAllInvoicesFromSystem(db: AccountingDB): AccountingDB {
   // Keep only opening stock movements if any, remove all invoice stock movements
   updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.type === 'opening');
   // Clean treasury entries linked to invoices
-  updated.treasury = (updated.treasury || []).filter(tr => tr.sourceType !== 'invoice');
+  updated.treasury = (updated.treasury || []).filter(tr => tr.sourceType !== 'purchase' && tr.sourceType !== 'sale');
   // Clean journals linked to invoices
-  updated.journals = (updated.journals || []).filter(j => j.sourceType !== 'invoice');
+  updated.journals = (updated.journals || []).filter(j => j.sourceType !== 'purchase' && j.sourceType !== 'sale');
   
   // Reset counters to 1
   updated.settings.nextPurchase = 1;

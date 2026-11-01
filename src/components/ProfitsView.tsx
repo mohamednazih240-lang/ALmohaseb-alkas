@@ -116,7 +116,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         const branchProd = prod ? getProductForBranch(prod, invBranch) : null;
         const costPrice = (it.costPrice && it.costPrice > 0)
           ? it.costPrice
-          : (branchProd?.buyPrice || prod?.buyPrice || 0);
+          : (branchProd?.avgCost || branchProd?.buyPrice || prod?.avgCost || prod?.buyPrice || 0);
         invoiceCost += it.qty * costPrice;
       });
 
@@ -178,7 +178,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         const branchProd = prod ? getProductForBranch(prod, invBranch) : null;
         const costPrice = (it.costPrice && it.costPrice > 0)
           ? it.costPrice
-          : (branchProd?.buyPrice || prod?.buyPrice || 0);
+          : (branchProd?.avgCost || branchProd?.buyPrice || prod?.avgCost || prod?.buyPrice || 0);
         const itemRev = it.total;
         const itemCost = it.qty * costPrice;
 

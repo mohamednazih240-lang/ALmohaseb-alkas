@@ -56,6 +56,19 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [exportedSuccess, setExportedSuccess] = useState(false);
   const [fitScreen, setFitScreen] = useState(true);
+  const [windowWidth, setWindowWidth] = useState<number>(() => typeof window !== 'undefined' ? window.innerWidth : 600);
+
+  React.useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const paperBaseWidth = paperSize === 'thermal' ? 300 : paperSize === 'A4' ? 794 : 560;
+  const isNarrowScreen = windowWidth < paperBaseWidth + 24;
+  const mobileScale = isNarrowScreen && fitScreen
+    ? Math.max(0.48, (windowWidth - 28) / paperBaseWidth)
+    : 1;
 
   if (!invoice) return null;
 
@@ -355,13 +368,21 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
           <div className="invoice-preview-viewport p-2 sm:p-5 overflow-y-auto overflow-x-auto flex-1 bg-slate-100 flex flex-col items-center">
           <div
             id="invoice-printable-content"
-            className={`transition-all ${
+            className={`transition-transform flex flex-col items-center ${
               paperSize === 'A4'
                 ? 'invoice-wrapper-A4'
                 : paperSize === 'A5'
                 ? 'invoice-wrapper-A5'
                 : 'invoice-wrapper-thermal'
-            } ${fitScreen ? 'max-w-full' : ''}`}
+            }`}
+            style={{
+              width: `${paperBaseWidth}px`,
+              minWidth: `${paperBaseWidth}px`,
+              maxWidth: `${paperBaseWidth}px`,
+              transformOrigin: 'top center',
+              transform: mobileScale < 1 ? `scale(${mobileScale})` : undefined,
+              marginBottom: mobileScale < 1 ? `-${Math.round((1 - mobileScale) * 650)}px` : undefined
+            }}
             data-paper-size={paperSize}
           >
             {/* حاوية المستند النظيفة بمقاس A5 الأصلي المعتمد */}
@@ -391,22 +412,44 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   </div>
                 </div>
 
-                {/* 2. مربع بيانات المستند المعتمد */}
+                {/* 2. مربع بيانات المستند المعتمد بدون أي تداخل نصوص */}
                 <div className="invoice-info-box">
                   <div className="info-grid">
-                    <div className="info-col-right">
-                      <strong>كود {isSale ? 'العميل' : 'المورد'}:</strong> <span>{invoice.partyCode || invoice.partyId || '—'}</span><br />
-                      <strong>اسم {isSale ? 'العميل' : 'المورد'}:</strong> <span>{invoice.partyName || (isSale ? 'عميل نقدي' : 'مورد عام')}</span><br />
-                      <strong>الهاتف:</strong> <span>{invoice.partyPhone || '—'}</span>
+                    <div className="info-col-right" style={{ flex: '1.4', overflow: 'hidden' }}>
+                      <div className="text-[10px] mb-0.5">
+                        <strong>كود {isSale ? 'العميل' : 'المورد'}: </strong>
+                        <bdi dir="ltr" className="font-mono font-bold mr-1">{invoice.partyCode || invoice.partyId || '—'}</bdi>
+                      </div>
+                      <div className="text-[10.5px]">
+                        <strong>اسم {isSale ? 'العميل' : 'المورد'}: </strong>
+                        <span className="font-bold">{invoice.partyName || (isSale ? 'عميل نقدي' : 'مورد عام')}</span>
+                      </div>
+                      {invoice.partyPhone ? (
+                        <div className="text-[9.5px] mt-0.5 text-slate-700">
+                          <strong>الهاتف: </strong>
+                          <span dir="ltr">{invoice.partyPhone}</span>
+                        </div>
+                      ) : null}
                     </div>
-                    <div className="info-col-center">
-                      <strong>{invoiceTypeTitle}</strong><br />
-                      <span style={{ fontSize: '13px', fontWeight: 800 }}>رقم: <span>{serialNo}</span></span>
+
+                    <div className="info-col-center" style={{ flex: '1', overflow: 'hidden' }}>
+                      <div className="font-extrabold text-[12px] text-slate-900">{invoiceTypeTitle}</div>
+                      <div className="text-[10.5px] font-bold mt-0.5">
+                        <span>رقم: </span>
+                        <bdi dir="ltr" className="font-mono font-extrabold">{serialNo}</bdi>
+                      </div>
                     </div>
-                    <div className="info-col-left">
-                      <strong>التاريخ:</strong> <span>{invoice.date}</span><br />
+
+                    <div className="info-col-left" style={{ flex: '1', overflow: 'hidden' }}>
+                      <div className="text-[10.5px]">
+                        <strong>التاريخ: </strong>
+                        <bdi dir="ltr" className="font-mono font-bold">{invoice.date}</bdi>
+                      </div>
                       {invoice.time ? (
-                        <span className="print-hide-time"><strong>الوقت:</strong> <span>{invoice.time}</span></span>
+                        <div className="print-hide-time text-[9px] mt-0.5 text-slate-600">
+                          <strong>الوقت: </strong>
+                          <span dir="ltr">{invoice.time}</span>
+                        </div>
                       ) : null}
                     </div>
                   </div>

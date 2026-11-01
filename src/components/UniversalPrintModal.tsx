@@ -75,6 +75,19 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [exportedSuccess, setExportedSuccess] = useState(false);
   const [fitScreen, setFitScreen] = useState(true);
+  const [windowWidth, setWindowWidth] = useState<number>(() => typeof window !== 'undefined' ? window.innerWidth : 600);
+
+  React.useEffect(() => {
+    const handleResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const paperBaseWidth = paperSize === 'thermal' ? 300 : paperSize === 'A4' ? 794 : 560;
+  const isNarrowScreen = windowWidth < paperBaseWidth + 24;
+  const mobileScale = isNarrowScreen && fitScreen
+    ? Math.max(0.48, (windowWidth - 28) / paperBaseWidth)
+    : 1;
 
   // Mobile Back button support
   useModalBackHandler(isOpen, onClose, 'universal_print_modal');
@@ -291,13 +304,21 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
         <div className="invoice-preview-viewport p-2 sm:p-5 overflow-y-auto overflow-x-auto flex-1 bg-slate-100 flex flex-col items-center gap-6">
           <div
             id="universal-printable-content"
-            className={`w-full flex flex-col items-center gap-6 transition-all ${
+            className={`flex flex-col items-center gap-6 transition-transform ${
               paperSize === 'A4'
                 ? 'invoice-wrapper-A4'
                 : paperSize === 'A5'
                 ? 'invoice-wrapper-A5'
                 : 'invoice-wrapper-thermal'
-            } ${fitScreen ? 'max-w-full' : ''}`}
+            }`}
+            style={{
+              width: `${paperBaseWidth}px`,
+              minWidth: `${paperBaseWidth}px`,
+              maxWidth: `${paperBaseWidth}px`,
+              transformOrigin: 'top center',
+              transform: mobileScale < 1 ? `scale(${mobileScale})` : undefined,
+              marginBottom: mobileScale < 1 ? `-${Math.round((1 - mobileScale) * 650)}px` : undefined
+            }}
             data-paper-size={paperSize}
           >
             {documents.map((doc, docIdx) => (
@@ -338,39 +359,53 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                       </div>
                     </div>
 
-                    {/* 2. صندوق البيانات المعتمد */}
+                    {/* 2. صندوق البيانات المعتمد بدون أي تداخل نصوص */}
                     <div className="invoice-info-box">
                       <div className="info-grid">
-                        <div className="info-col-right">
-                          {doc.partyCode ? (
-                            <>
-                              <strong>الكود:</strong> <span>{doc.partyCode}</span><br />
-                            </>
+                        <div className="info-col-right" style={{ flex: '1.4', overflow: 'hidden' }}>
+                          {doc.partyCode && doc.partyCode !== doc.serialNo ? (
+                            <div className="mb-0.5 text-[10px]">
+                              <strong>الكود: </strong>
+                              <bdi dir="ltr" className="font-mono font-bold mr-1">{doc.partyCode}</bdi>
+                            </div>
                           ) : null}
-                          <strong>{doc.partyLabel || 'الطرف المعني'}:</strong> <span>{doc.partyName || 'طرف نقدي عام'}</span><br />
+                          <div className="text-[10.5px]">
+                            <strong>{doc.partyLabel || 'الطرف المعني'}: </strong>
+                            <span className="font-bold">{doc.partyName || 'طرف نقدي عام'}</span>
+                          </div>
                           {doc.partySubId ? (
-                            <>
-                              <strong>الهاتف / المعرف:</strong> <span>{doc.partySubId}</span>
-                            </>
+                            <div className="text-[9.5px] mt-0.5 text-slate-700">
+                              <strong>الهاتف / المعرف: </strong>
+                              <span dir="ltr">{doc.partySubId}</span>
+                            </div>
                           ) : null}
                         </div>
 
-                        <div className="info-col-center">
-                          <strong>{doc.typeTitle || doc.title}</strong><br />
+                        <div className="info-col-center" style={{ flex: '1', overflow: 'hidden' }}>
+                          <div className="font-extrabold text-[12px] text-slate-900">{doc.typeTitle || doc.title}</div>
                           {doc.serialNo ? (
-                            <span style={{ fontSize: '13px', fontWeight: 800 }}>رقم: <span>{doc.serialNo}</span></span>
+                            <div className="text-[10.5px] font-bold mt-0.5">
+                              <span>رقم: </span>
+                              <bdi dir="ltr" className="font-mono font-extrabold">{doc.serialNo}</bdi>
+                            </div>
                           ) : null}
                           {doc.badge ? (
-                            <div style={{ marginTop: '2px' }}>
+                            <div style={{ marginTop: '3px' }}>
                               <span className="payment-status-badge">{doc.badge}</span>
                             </div>
                           ) : null}
                         </div>
 
-                        <div className="info-col-left">
-                          <strong>التاريخ:</strong> <span>{doc.date || new Date().toISOString().slice(0, 10)}</span><br />
+                        <div className="info-col-left" style={{ flex: '1', overflow: 'hidden' }}>
+                          <div className="text-[10.5px]">
+                            <strong>التاريخ: </strong>
+                            <bdi dir="ltr" className="font-mono font-bold">{doc.date || new Date().toISOString().slice(0, 10)}</bdi>
+                          </div>
                           {doc.time ? (
-                            <span className="print-hide-time"><strong>الوقت:</strong> <span>{doc.time}</span></span>
+                            <div className="print-hide-time text-[9px] mt-0.5 text-slate-600">
+                              <strong>الوقت: </strong>
+                              <span dir="ltr">{doc.time}</span>
+                            </div>
                           ) : null}
                         </div>
                       </div>
@@ -386,7 +421,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                       <div className="invoice-statement-box"></div>
                     )}
 
-                    {/* 4. جدول الأصناف والبيانات (أفقي متناسق بدون أي تمرير) */}
+                    {/* 4. جدول الأصناف والبيانات (أفقي متناسق بدون أي تمرير أو تداخل نهائياً) */}
                     <div className="table-wrapper">
                       <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse' }}>
                         <colgroup>
@@ -406,8 +441,9 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                   wordBreak: 'break-word',
                                   overflowWrap: 'break-word',
                                   fontSize: paperSize === 'A5' ? '10px' : paperSize === 'thermal' ? '9px' : '11px',
-                                  padding: '4px 2px',
-                                  lineHeight: 1.25
+                                  padding: '4px 3px',
+                                  lineHeight: 1.25,
+                                  overflow: 'hidden'
                                 }}
                               >
                                 {th.label}
@@ -430,16 +466,25 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                     style={{
                                       fontWeight: tr.isBold || cIdx === 0 ? 700 : 600,
                                       textAlign: doc.tableHeaders[cIdx]?.align || 'center',
-                                      whiteSpace: isDateCol ? 'nowrap' : 'normal',
                                       wordBreak: 'break-word',
                                       overflowWrap: 'break-word',
-                                      fontVariantNumeric: isNumericCol || isDateCol ? 'tabular-nums' : 'normal',
                                       padding: '4px 3px',
                                       fontSize: paperSize === 'A5' ? '10px' : paperSize === 'thermal' ? '9px' : '11px',
-                                      lineHeight: isTextCol ? 1.35 : 1.2
+                                      lineHeight: isTextCol ? 1.35 : 1.2,
+                                      overflow: 'hidden'
                                     }}
                                   >
-                                    {col}
+                                    {isDateCol ? (
+                                      <bdi dir="ltr" className="inline-block font-mono text-[9.5px] tabular-nums whitespace-nowrap">
+                                        {col}
+                                      </bdi>
+                                    ) : isNumericCol ? (
+                                      <span className="inline-block tabular-nums font-bold">
+                                        {col}
+                                      </span>
+                                    ) : (
+                                      col
+                                    )}
                                   </td>
                                 );
                               })}

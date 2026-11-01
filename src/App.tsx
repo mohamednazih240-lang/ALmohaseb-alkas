@@ -9,7 +9,8 @@ import {
   sanitizeCompanyDatabase,
   syncAllExistingInvoiceVouchers,
   mergeInvoices,
-  mergeVouchers
+  mergeVouchers,
+  wipeAllInvoicesFromSystem
 } from './services/accountingStorage';
 import {
   AccountingDB,
@@ -171,15 +172,17 @@ export default function App() {
     fetchDatabaseFromCloud(initialCompanyCode).then(cloudDb => {
       if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
         setDb(prevDb => {
-          // Safeguard: If local has real data (invoices/customers) and cloud is empty, don't overwrite local with empty cloud
-          const localHasData = (prevDb.invoices && prevDb.invoices.length > 0) || (prevDb.customers && prevDb.customers.length > 0);
-          const cloudHasData = (cloudDb.invoices && cloudDb.invoices.length > 0) || (cloudDb.customers && cloudDb.customers.length > 0);
+          let effectiveCloud = cloudDb;
+          if (!effectiveCloud.cleanGeneration || effectiveCloud.cleanGeneration < 4) {
+            effectiveCloud = wipeAllInvoicesFromSystem(effectiveCloud);
+            effectiveCloud.cleanGeneration = 4;
+            pushDatabaseToCloud(effectiveCloud, true);
+          }
 
-          if (localHasData && !cloudHasData) {
-            console.log('Preserving local invoices and accounts, syncing to cloud...');
-            const ensuredPrev = sanitizeCompanyDatabase(prevDb);
-            pushDatabaseToCloud(ensuredPrev, true);
-            return ensuredPrev;
+          // If local has newly entered products and cloud does not have them yet, preserve and sync them to cloud
+          if (prevDb.products && prevDb.products.length > 0 && (!effectiveCloud.products || effectiveCloud.products.length === 0)) {
+            effectiveCloud.products = prevDb.products;
+            pushDatabaseToCloud(effectiveCloud, true);
           }
 
           const storedSession = getStoredAuthSession();
@@ -187,12 +190,8 @@ export default function App() {
           const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
           const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
           const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
-          const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || []);
-          const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
           const merged: AccountingDB = {
             ...ensuredCloud,
-            invoices: mergedInvoices,
-            vouchers: mergedVouchers,
             currentUser: effectiveUser || ensuredCloud.currentUser || ensuredCloud.users[0]
           };
           saveDatabase(merged);
@@ -264,12 +263,8 @@ export default function App() {
           setActiveBranchId(effectiveUser.branchId);
         }
 
-        const mergedInvoices = mergeInvoices(prevDb.invoices || [], remoteDb.invoices || []);
-        const mergedVouchers = mergeVouchers(prevDb.vouchers || [], remoteDb.vouchers || []);
         const merged: AccountingDB = sanitizeCompanyDatabase({
           ...remoteDb,
-          invoices: mergedInvoices,
-          vouchers: mergedVouchers,
           currentUser: effectiveUser || remoteDb.currentUser || remoteDb.users[0]
         });
         saveDatabase(merged);
