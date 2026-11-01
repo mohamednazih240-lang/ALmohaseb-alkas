@@ -202,6 +202,8 @@ export function defaultSettings(): AppSettings {
     notes: 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية',
     nextSale: 1,
     nextPurchase: 1,
+    nextSaleReturn: 1,
+    nextPurchaseReturn: 1,
     nextReceipt: 1,
     nextPayment: 1,
     nextQuote: 1,
@@ -266,8 +268,11 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.settings.companyPin = '2919';
   }
 
-  // Enforce Generation 4 clean state (system fully purged of all past sample/merged items and invoices per user direct order)
-  if (!db.cleanGeneration || db.cleanGeneration < 4) {
+  // Enforce Generation 5 clean state (system fully purged of all past items, customers, suppliers, invoices, treasury per user direct order)
+  if (!db.cleanGeneration || db.cleanGeneration < 5) {
+    db.products = [];
+    db.customers = [];
+    db.suppliers = [];
     db.invoices = [];
     db.vouchers = [];
     db.stockMovements = [];
@@ -275,16 +280,20 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.adjustments = [];
     db.transfers = [];
     db.treasury = [];
+    db.expenses = [];
+    db.revenues = [];
     db.journals = [];
     db.quotes = [];
     db.orders = [];
     db.settings.nextPurchase = 1;
     db.settings.nextSale = 1;
+    db.settings.nextSaleReturn = 1;
+    db.settings.nextPurchaseReturn = 1;
     db.settings.nextPayment = 1;
     db.settings.nextReceipt = 1;
     db.settings.nextQuote = 1;
     db.settings.nextOrder = 1;
-    db.cleanGeneration = 4;
+    db.cleanGeneration = 5;
   }
 
   if (!db.users) db.users = [];
@@ -484,13 +493,15 @@ export function cleanAllDemoTransactions(db: AccountingDB): AccountingDB {
     goodsReceivedNotes: db.goodsReceivedNotes || [],
     settings: {
       ...db.settings,
-      nextSale: 1001,
-      nextPurchase: 2001,
-      nextReceipt: 3001,
-      nextPayment: 4001,
-      nextQuote: 5001,
-      nextOrder: 6001,
-      nextGRN: 7001
+      nextSale: 1,
+      nextPurchase: 1,
+      nextSaleReturn: 1,
+      nextPurchaseReturn: 1,
+      nextReceipt: 1,
+      nextPayment: 1,
+      nextQuote: 1,
+      nextOrder: 1,
+      nextGRN: 1
     },
     audit: [
       {
@@ -502,6 +513,45 @@ export function cleanAllDemoTransactions(db: AccountingDB): AccountingDB {
       }
     ]
   };
+}
+
+/**
+ * Completely purges all transactional data, customers, suppliers, inventory, products, invoices,
+ * returns, vouchers, treasury, and resets all sequences to 1 to allow starting 100% fresh
+ */
+export function wipeEntireSystemToCleanSlate(db: AccountingDB): AccountingDB {
+  const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  updated.products = [];
+  updated.customers = [];
+  updated.suppliers = [];
+  updated.invoices = [];
+  updated.returns = [];
+  updated.stockMovements = [];
+  updated.adjustments = [];
+  updated.transfers = [];
+  updated.treasury = [];
+  updated.vouchers = [];
+  updated.expenses = [];
+  updated.revenues = [];
+  updated.journals = [];
+  updated.quotes = [];
+  updated.orders = [];
+  updated.settings.nextPurchase = 1;
+  updated.settings.nextSale = 1;
+  updated.settings.nextSaleReturn = 1;
+  updated.settings.nextPurchaseReturn = 1;
+  updated.settings.nextPayment = 1;
+  updated.settings.nextReceipt = 1;
+  updated.settings.nextQuote = 1;
+  updated.settings.nextOrder = 1;
+  updated.cleanGeneration = 5;
+
+  logAudit(
+    updated,
+    'تصفير شامل وتنظيف النظام بالكامل للبدء على بياض',
+    'تم مسح وتصفير كافة الأصناف والعملاء والموردين وفواتير البيع والشراء والمرتجعات وحركات الخزينة والمخزون بنجاح لتأسيس بيانات نظيفة جديدة'
+  );
+  return sanitizeCompanyDatabase(updated);
 }
 
 export function createSeedData(
@@ -1784,21 +1834,44 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
 export function isDuplicateInvoiceNumber(db: AccountingDB, number: string, excludeId?: string, mode?: string): boolean {
   if (!number || !number.trim()) return false;
   const target = number.trim();
-  const isPurchaseMode = mode === 'purchase' || mode === 'purchase_return';
+
   return (db.invoices || []).some(inv => {
     if (excludeId && inv.id === excludeId) return false;
-    const isInvPurchase = inv.type === 'purchase' || inv.invoiceKind === 'purchase' || inv.invoiceKind === 'purchase_return';
-    if (mode && isPurchaseMode !== isInvPurchase) return false;
+    if (mode) {
+      if (mode === 'sale' || mode === 'wholesale') {
+        const isThisSale = (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') && inv.invoiceKind !== 'sale_return';
+        if (!isThisSale) return false;
+      } else if (mode === 'purchase') {
+        const isThisPurchase = (inv.type === 'purchase' || inv.invoiceKind === 'purchase') && inv.invoiceKind !== 'purchase_return';
+        if (!isThisPurchase) return false;
+      } else if (mode === 'sale_return') {
+        const isThisSaleReturn = inv.invoiceKind === 'sale_return';
+        if (!isThisSaleReturn) return false;
+      } else if (mode === 'purchase_return') {
+        const isThisPurchaseReturn = inv.invoiceKind === 'purchase_return';
+        if (!isThisPurchaseReturn) return false;
+      }
+    }
     return String(inv.number).trim() === target;
   });
 }
 
 export function getNextUniqueInvoiceNumber(db: AccountingDB, mode?: string): { number: string; nextSeq: number } {
   // Pure integer numbering starting from 1 with NO letter prefixes, independent per section
-  const isPurchaseMode = mode === 'purchase' || mode === 'purchase_return';
   const sectionInvoices = (db.invoices || []).filter(inv => {
-    const isInvPurchase = inv.type === 'purchase' || inv.invoiceKind === 'purchase' || inv.invoiceKind === 'purchase_return';
-    return isPurchaseMode ? isInvPurchase : !isInvPurchase;
+    if (mode === 'sale' || mode === 'wholesale') {
+      return (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') && inv.invoiceKind !== 'sale_return';
+    }
+    if (mode === 'purchase') {
+      return (inv.type === 'purchase' || inv.invoiceKind === 'purchase') && inv.invoiceKind !== 'purchase_return';
+    }
+    if (mode === 'sale_return') {
+      return inv.invoiceKind === 'sale_return';
+    }
+    if (mode === 'purchase_return') {
+      return inv.invoiceKind === 'purchase_return';
+    }
+    return true;
   });
 
   let maxSeq = 0;

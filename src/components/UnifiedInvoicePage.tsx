@@ -1392,8 +1392,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
-    // Strict duplicate check for invoice number
-    if (isDuplicateInvoiceNumber(updated, invNum, editingInvoice?.id)) {
+    // Strict duplicate check for invoice number within the current section
+    if (isDuplicateInvoiceNumber(updated, invNum, editingInvoice?.id, mode)) {
       alert(`⚠️ منع التكرار: رقم الفاتورة (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`);
       return;
     }
@@ -1829,6 +1829,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         updated.settings.nextSale = Math.max(updated.settings.nextSale || 1, numDigits + 1);
       } else if (mode === 'purchase') {
         updated.settings.nextPurchase = Math.max(updated.settings.nextPurchase || 1, numDigits + 1);
+      } else if (mode === 'sale_return') {
+        updated.settings.nextSaleReturn = Math.max(updated.settings.nextSaleReturn || 1, numDigits + 1);
+      } else if (mode === 'purchase_return') {
+        updated.settings.nextPurchaseReturn = Math.max(updated.settings.nextPurchaseReturn || 1, numDigits + 1);
       } else if (mode === 'quote') {
         updated.settings.nextQuote = Math.max(updated.settings.nextQuote || 1, numDigits + 1);
       }

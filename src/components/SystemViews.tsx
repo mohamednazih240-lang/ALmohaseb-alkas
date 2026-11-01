@@ -269,6 +269,7 @@ import {
   getTodayDate,
   createSeedData,
   cleanAllDemoTransactions,
+  wipeEntireSystemToCleanSlate,
   defaultSettings,
   logAudit,
   formatMoney,
@@ -276,6 +277,7 @@ import {
   getBranchExpectedPin
 } from '../services/accountingStorage';
 import { updateCompany, getActiveTenantId } from '../services/tenantService';
+import { pushDatabaseToCloud } from '../services/cloudSyncService';
 
 interface SystemViewsProps {
   subPage: 'users' | 'branches' | 'audit' | 'periods' | 'backup' | 'settings';
@@ -645,9 +647,10 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
   // Clean all transactions, invoices, products, customers, and suppliers while preserving company info and chart of accounts
   const handleCleanAllTransactions = () => {
-    if (!confirm('تأكيد هام: هل ترغب في تنظيف وتصفير النظام بالكامل من كافة الفواتير، الحركات، الأصناف، العملاء، الموردين، سندات القبض والصرف، وقيود اليومية والتقارير التجريبية؟\n\nسيتم الإبقاء على دليل الحسابات القياسي وبيانات المنشأة جاهزة للعمل الفعلي.')) return;
-    const cleaned = cleanAllDemoTransactions(db);
+    if (!confirm('تأكيد هام: هل ترغب في تنظيف وتصفير النظام بالكامل من كافة الفواتير، الحركات، الأصناف، العملاء، الموردين، سندات القبض والصرف، وقيود اليومية والتقارير للبدء على نظيف 100%؟\n\n• سيتم الإبقاء على دليل الحسابات القياسي وبيانات منشأة «شركة الموان».\n• ستبدأ كافة ترقيمات الفواتير من رقم 1 فوراً.\n• تتم المزامنة السحابية فوراً لكافة الأجهزة.')) return;
+    const cleaned = wipeEntireSystemToCleanSlate(db);
     onUpdateDb(cleaned);
+    pushDatabaseToCloud(cleaned, 'تصفير وتنظيف النظام الشامل للبدء على نظيف', true);
     alert('تم تفريغ وتنظيف النظام بالكامل بنجاح من كافة الأصناف والعملاء والموردين والحركات والفواتير! أصبح النظام نظيفاً 100% وجاهزاً للبدء الفعلي.');
   };
 
@@ -656,6 +659,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     if (!confirm('تحذير: سيتم إعادة تعيين البرنامج بالكامل إلى الحالة الأولية الفارغة النظيفة (بدون أي بيانات تجريبية). هل أنت متأكد؟')) return;
     const fresh = createSeedData();
     onUpdateDb(fresh);
+    pushDatabaseToCloud(fresh, 'إعادة ضبط المصنع إلى الحالة الأولية النظيفة', true);
     alert('تمت إعادة ضبط النظام بنجاح إلى الحالة الفارغة النظيفة الجاهزة للعمل.');
   };
 

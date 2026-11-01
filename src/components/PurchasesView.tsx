@@ -16,13 +16,22 @@ import {
   Download,
   FileSpreadsheet,
   ShieldCheck,
-  History
+  History,
+  RotateCcw
 } from 'lucide-react';
 import {
   AccountingDB,
   Invoice
 } from '../types/accounting';
-import { formatMoney, logAudit, deleteInvoiceAndRevert, wipeAllInvoicesFromSystem } from '../services/accountingStorage';
+import {
+  formatMoney,
+  logAudit,
+  deleteInvoiceAndRevert,
+  wipeAllInvoicesFromSystem,
+  wipeEntireSystemToCleanSlate,
+  getTodayDate
+} from '../services/accountingStorage';
+import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -59,6 +68,8 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   const [branchFilter, setBranchFilter] = useState<'current' | 'all'>(isManager ? 'all' : 'current');
 
   const [activeTab, setActiveTab] = useState<'editor' | 'list'>(initialTab);
+  const [purchasesSection, setPurchasesSection] = useState<'purchases' | 'returns'>('purchases');
+  const [purchasesMode, setPurchasesMode] = useState<'purchase' | 'purchase_return'>('purchase');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'مدفوع' | 'جزئي' | 'آجل'>('all');
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'month'>('all');
@@ -68,6 +79,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   React.useEffect(() => {
     if (initialEditingInvoice) {
       setEditingInvoice(initialEditingInvoice);
+      if (initialEditingInvoice.invoiceKind === 'purchase_return') {
+        setPurchasesMode('purchase_return');
+        setPurchasesSection('returns');
+      }
       setActiveTab('editor');
     }
   }, [initialEditingInvoice]);
@@ -106,7 +121,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
 
       if (hasItems || editingInvoice) {
         const ok = confirm(
-          '⚠️ تنبيه مهم: هناك فاتورة مشتريات قيد التحرير ولم يتم حفظها بعد.\n\n' +
+          '⚠️ تنبيه مهم: هناك فاتورة قيد التحرير ولم يتم حفظها بعد.\n\n' +
           'هل تريد الخروج إلى قائمة الفواتير بدون حفظ؟\n' +
           '• اضغط «موافق» للخروج (سيتم حفظ مسودة احتياطية يمكنك استعادتها فوراً).\n' +
           '• اضغط «إلغاء» للبقاء في شاشة الفاتورة لمتابعة حفظها.'
@@ -123,9 +138,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   const todayStr = new Date().toISOString().slice(0, 10);
   const currentMonthStr = todayStr.slice(0, 7);
 
-  const purchaseInvoices = useMemo(() => {
+  // 1. Regular purchases (excluding returns)
+  const regularPurchaseInvoices = useMemo(() => {
     return db.invoices
-      .filter(inv => inv.type === 'purchase')
+      .filter(inv => (inv.type === 'purchase' || inv.invoiceKind === 'purchase') && inv.invoiceKind !== 'purchase_return')
       .filter(inv => {
         const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
         if (!matchBranch) return false;
@@ -154,28 +170,103 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       });
   }, [db.invoices, branchFilter, targetBranchId, searchTerm, statusFilter, dateFilter, sortBy, todayStr, currentMonthStr]);
 
+  // 2. Purchase Returns (مرتجع المشتريات للموردين)
+  const purchaseReturnInvoices = useMemo(() => {
+    return db.invoices
+      .filter(inv => inv.invoiceKind === 'purchase_return')
+      .filter(inv => {
+        const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
+        if (!matchBranch) return false;
+
+        const s = searchTerm.trim().toLowerCase();
+        const matchSearch = !s ||
+          inv.number.toLowerCase().includes(s) ||
+          inv.partyName.toLowerCase().includes(s) ||
+          (inv.notes && inv.notes.toLowerCase().includes(s)) ||
+          inv.items.some(it => it.productName.toLowerCase().includes(s));
+
+        let matchDate = true;
+        if (dateFilter === 'today') matchDate = inv.date === todayStr;
+        else if (dateFilter === 'month') matchDate = inv.date.startsWith(currentMonthStr);
+
+        return matchSearch && matchDate;
+      })
+      .sort((a, b) => {
+        if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
+        if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
+        if (sortBy === 'highest') return b.total - a.total;
+        if (sortBy === 'lowest') return a.total - b.total;
+        return 0;
+      });
+  }, [db.invoices, branchFilter, targetBranchId, searchTerm, dateFilter, sortBy, todayStr, currentMonthStr]);
+
+  // Current active list
+  const displayedInvoices = purchasesSection === 'purchases' ? regularPurchaseInvoices : purchaseReturnInvoices;
+  const purchaseInvoices = displayedInvoices;
+
   // Statistics for this branch (memoized)
   const { totalPurchases, totalPaid, totalDue } = useMemo(() => {
     let purchases = 0;
     let paid = 0;
-    for (const i of db.invoices) {
-      if (i.type === 'purchase' && (branchFilter === 'all' || (i.branchId === targetBranchId || (!i.branchId && targetBranchId === 'br_main')))) {
-        purchases += i.total;
-        paid += i.paid;
-      }
+    for (const i of regularPurchaseInvoices) {
+      purchases += i.total;
+      paid += i.paid;
     }
     return { totalPurchases: purchases, totalPaid: paid, totalDue: purchases - paid };
-  }, [db.invoices, branchFilter, targetBranchId]);
+  }, [regularPurchaseInvoices]);
+
+  const totalReturnsAmount = useMemo(() => {
+    return purchaseReturnInvoices.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
+  }, [purchaseReturnInvoices]);
+
+  // Quick Return from an existing purchase invoice
+  const handleCreateReturnFromInvoice = (inv: Invoice) => {
+    const returnTemplate: Invoice = {
+      id: '',
+      number: '',
+      type: 'purchase',
+      invoiceKind: 'purchase_return',
+      date: getTodayDate(),
+      time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
+      partyId: inv.partyId,
+      partyCode: inv.partyCode,
+      partyName: inv.partyName,
+      partyPhone: inv.partyPhone,
+      partyVatNumber: inv.partyVatNumber,
+      partyNationalId: inv.partyNationalId,
+      branchId: inv.branchId || targetBranchId,
+      branchName: inv.branchName || currentBranch.name,
+      items: inv.items.map(it => ({ ...it })),
+      subtotal: inv.subtotal,
+      discount: inv.discount || 0,
+      tax: inv.tax || 0,
+      total: inv.total,
+      paid: inv.paid,
+      remaining: inv.remaining,
+      paymentMethod: inv.paymentMethod || 'نقدي',
+      status: 'مدفوع',
+      notes: `مرتجع مشتريات للفاتورة الأصلية رقم ${inv.number}`,
+      currency: inv.currency || db.settings.currency,
+      costTotal: 0,
+      profitTotal: 0,
+      treasuryId: inv.treasuryId
+    };
+    setPurchasesMode('purchase_return');
+    setPurchasesSection('returns');
+    setEditingInvoice(returnTemplate);
+    setActiveTab('editor');
+  };
 
   // Print all filtered purchase invoices in approved design
   const handlePrintBatch = () => {
     if (purchaseInvoices.length === 0) {
-      alert('لا توجد فواتير مشتريات للطباعة!');
+      alert(purchasesSection === 'purchases' ? 'لا توجد فواتير مشتريات للطباعة!' : 'لا توجد فواتير مرتجع مشتريات للطباعة!');
       return;
     }
 
+    const isRet = purchasesSection === 'returns';
     const docs: MovementPrintBlock[] = purchaseInvoices.map(inv => ({
-      title: 'فاتورة مشتريات وتوريد',
+      title: isRet ? 'فاتورة مرتجع مشتريات للمورد' : 'فاتورة مشتريات وتوريد',
       serialNo: inv.number,
       date: inv.date,
       time: inv.time,
@@ -185,7 +276,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       partySubId: inv.partyPhone,
       statement: inv.notes || inv.jobSite,
       badge: inv.status,
-      typeTitle: 'فاتورة مشتريات وتوريد',
+      typeTitle: isRet ? 'فاتورة مرتجع مشتريات للمورد' : 'فاتورة مشتريات وتوريد',
       tableHeaders: [
         { label: 'اسم الصنف', width: '34%', align: 'right' },
         { label: 'البيان', width: '22%', align: 'center' },
@@ -203,31 +294,32 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
         ]
       })),
       summaryLines: [
-        { label: 'إجمالي المشتريات', value: `${formatCleanNumber(inv.subtotal || inv.total)} ${db.settings.currency}` },
-        inv.discount ? { label: 'الخصم الممنوح', value: `${formatCleanNumber(inv.discount)} ${db.settings.currency}` } : null,
+        { label: isRet ? 'إجمالي المرتجع' : 'إجمالي المشتريات', value: `${formatCleanNumber(inv.subtotal || inv.total)} ${db.settings.currency}` },
+        inv.discount ? { label: 'الخصم', value: `${formatCleanNumber(inv.discount)} ${db.settings.currency}` } : null,
         inv.tax ? { label: 'ضريبة القيمة المضافة', value: `${formatCleanNumber(inv.tax)} ${db.settings.currency}` } : null,
         { label: 'الصافي النهائي', value: `${formatCleanNumber(inv.total)} ${db.settings.currency}`, isTotal: true },
-        { label: 'المدفوع نقداً للمورد', value: `${formatCleanNumber(inv.paid)} ${db.settings.currency}` },
-        { label: 'المتبقي آجل للمورد', value: `${formatCleanNumber(inv.remaining)} ${db.settings.currency}`, highlight: inv.remaining > 0 }
+        { label: isRet ? 'المسترد نقداً من المورد' : 'المدفوع نقداً للمورد', value: `${formatCleanNumber(inv.paid)} ${db.settings.currency}` },
+        { label: isRet ? 'المتبقي خصماً من رصيد المورد' : 'المتبقي آجل للمورد', value: `${formatCleanNumber(inv.remaining)} ${db.settings.currency}`, highlight: inv.remaining > 0 }
       ].filter(Boolean) as any[],
-      footerNotes: inv.notes || db.settings.notes || 'تم استلام وتوريد البضاعة للمخزن وقيد الحساب'
+      footerNotes: inv.notes || db.settings.notes || (isRet ? 'تم إرجاع البضاعة للمورد واسترداد القيمة وتحديث المخزن' : 'تم استلام وتوريد البضاعة للمخزن وقيد الحساب')
     }));
 
     setPrintDocuments(docs);
-    setPrintDocTitle(`فواتير المشتريات المحددة (${purchaseInvoices.length} فاتورة)`);
+    setPrintDocTitle(`${isRet ? 'فواتير مرتجع المشتريات' : 'فواتير المشتريات'} (${purchaseInvoices.length} فاتورة)`);
     setPrintModalOpen(true);
   };
 
   // Export CSV
   const handleExportCsv = () => {
     if (purchaseInvoices.length === 0) {
-      alert('لا توجد فواتير مشتريات للتصدير!');
+      alert(purchasesSection === 'purchases' ? 'لا توجد فواتير مشتريات للتصدير!' : 'لا توجد فواتير مرتجع مشتريات للتصدير!');
       return;
     }
 
-    const headers = ['رقم الفاتورة', 'التاريخ', 'المورد', 'طريقة السداد', 'عدد الأصناف', 'الإجمالي', 'المدفوع', 'المستحق', 'الحالة'];
+    const headers = ['رقم الفاتورة', 'النوع', 'التاريخ', 'المورد', 'طريقة السداد', 'عدد الأصناف', 'الإجمالي', 'المدفوع', 'المستحق', 'الحالة'];
     const rows = purchaseInvoices.map(inv => [
       inv.number,
+      inv.invoiceKind === 'purchase_return' ? 'مرتجع مشتريات' : 'مشتريات وتوريد',
       inv.date,
       inv.partyName,
       inv.paymentMethod,
@@ -238,16 +330,17 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       inv.status
     ]);
 
-    exportTableToCsv(`purchases_invoices_${Date.now()}.csv`, headers, rows);
+    exportTableToCsv(`purchases_${purchasesSection}_${Date.now()}.csv`, headers, rows);
   };
 
   const handleDeleteInvoice = (inv: Invoice) => {
     if (!canDeletePurchases) {
-      alert('عذراً، ليس لديك صلاحية لحذف فواتير المشتريات.');
+      alert('عذراً، ليس لديك صلاحية لحذف الفواتير.');
       return;
     }
 
-    if (!confirm(`هل أنت متأكد من حذف فاتورة الشراء "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والمصروفات والأرصدة والقيود المحاسبية.`)) {
+    const isRet = inv.invoiceKind === 'purchase_return';
+    if (!confirm(`هل أنت متأكد من حذف ${isRet ? 'فاتورة مرتجع المشتريات' : 'فاتورة الشراء'} "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والمصروفات والأرصدة والقيود المحاسبية بدقة.`)) {
       return;
     }
 
@@ -260,7 +353,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     return (
       <div className="w-full transition-all">
         <UnifiedInvoicePage
-          mode="purchase"
+          mode={purchasesMode}
           db={db}
           onUpdateDb={onUpdateDb}
           onPreviewInvoice={onPreviewInvoice}
@@ -284,15 +377,15 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       {/* Top Header & Actions */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-200">
         <div className="flex items-center gap-2">
-          <div className="p-2 bg-blue-600 text-white rounded-lg shadow-2xs">
-            <ShoppingBag className="w-5 h-5" />
+          <div className={`p-2 text-white rounded-lg shadow-2xs ${purchasesSection === 'purchases' ? 'bg-blue-600' : 'bg-rose-600'}`}>
+            {purchasesSection === 'purchases' ? <ShoppingBag className="w-5 h-5" /> : <RotateCcw className="w-5 h-5" />}
           </div>
           <div>
             <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight">
-              إدارة فواتير المشتريات وتوريد البضائع
+              {purchasesSection === 'purchases' ? 'إدارة فواتير المشتريات وتوريد البضائع' : 'سجل فواتير مرتجع المشتريات (مردودات الموردين)'}
             </h1>
             <p className="text-[11px] text-slate-500 font-medium">
-              نظام الكروت السريع بدون أي تمرير أفقي
+              {purchasesSection === 'purchases' ? 'نظام الكروت السريع وتوثيق استلام البضائع بدون أي تمرير أفقي' : 'رد بضاعة للموردين وعكس أرصدة المخازن واسترداد المبالغ للخزينة بدقة'}
             </p>
           </div>
         </div>
@@ -312,49 +405,94 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
             type="button"
             onClick={handlePrintBatch}
             className="px-3 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-            title="طباعة وتصدير جميع فواتير المشتريات المحددة PDF وورقياً"
+            title="طباعة وتصدير جميع الفواتير المحددة PDF وورقياً"
           >
             <Printer className="w-4 h-4" />
             <span>طباعة وتصدير PDF ({purchaseInvoices.length})</span>
           </button>
 
-          {canDeletePurchases && db.invoices.length > 0 && (
+          {canDeletePurchases && (db.invoices.length > 0 || db.products.length > 0) && (
             <button
               type="button"
               onClick={() => {
                 const ok = window.confirm(
-                  '⚠️ تنبيه هام ومؤكد:\n' +
-                  'هل أنت متأكد من رغبتك في حذف وتصفير جميع الفواتير بالكامل من النظام؟\n\n' +
-                  '• سيتم حذف كافة فواتير المشتريات والمبيعات نهائياً.\n' +
-                  '• سيتم تصفير الأرصدة المرتبطة بها وعكس حركاتها.\n' +
-                  '• ستبدأ أول فاتورة جديدة تدخلها برقم 1 فوراً.\n' +
-                  '• سيتم حفظ التعديل فورياً ومزامنته سحابياً لكافة الأجهزة.'
+                  '⚠️ تنظيف شامل وتصفير كامل للنظام للبدء على نظيف:\n\n' +
+                  '• سيتم حذف كافة فواتير المشتريات والمبيعات والمرتجعات نهائياً.\n' +
+                  '• سيتم تصفير الأصناف والعملاء والموردين وحركات المخزون والخزينة.\n' +
+                  '• ستبدأ الترقيمات من رقم 1 فوراً.\n' +
+                  '• سيتم الحفاظ على بيانات المنشأة «شركة الموان» والحسابات القياسية.\n' +
+                  '• تتم المزامنة السحابية فوراً لكافة الأجهزة.'
                 );
                 if (!ok) return;
-                const wiped = wipeAllInvoicesFromSystem(db);
+                const wiped = wipeEntireSystemToCleanSlate(db);
                 onUpdateDb(wiped);
+                pushDatabaseToCloud(wiped, 'تصفير وتنظيف النظام الشامل للبدء على نظيف', true);
               }}
               className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-              title="تصفير وحذف جميع الفواتير من النظام نهائياً (0)"
+              title="تصفير وتنظيف النظام بالكامل للبدء على نظيف (0)"
             >
               <Trash2 className="w-4 h-4 text-rose-600" />
-              <span>تصفير وحذف كافة الفواتير (0)</span>
+              <span>تصفير وتنظيف النظام للبدء على نظيف (0)</span>
             </button>
           )}
 
           {canCreatePurchases && (
-            <button
-              onClick={() => {
-                setEditingInvoice(null);
-                setActiveTab('editor');
-              }}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>+ إنشاء فاتورة شراء جديدة</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => {
+                  setPurchasesMode('purchase');
+                  setPurchasesSection('purchases');
+                  setEditingInvoice(null);
+                  setActiveTab('editor');
+                }}
+                className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ فاتورة شراء</span>
+              </button>
+              <button
+                onClick={() => {
+                  setPurchasesMode('purchase_return');
+                  setPurchasesSection('returns');
+                  setEditingInvoice(null);
+                  setActiveTab('editor');
+                }}
+                className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>+ مرتجع مشتريات</span>
+              </button>
+            </div>
           )}
         </div>
+      </div>
+
+      {/* Purchases vs Returns Section Switcher Tabs */}
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+        <button
+          type="button"
+          onClick={() => setPurchasesSection('purchases')}
+          className={`px-4 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-2 cursor-pointer ${
+            purchasesSection === 'purchases'
+              ? 'bg-blue-600 text-white shadow-sm'
+              : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          <ShoppingBag className="w-4 h-4" />
+          <span>فواتير المشتريات والتوريد ({regularPurchaseInvoices.length})</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setPurchasesSection('returns')}
+          className={`px-4 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-2 cursor-pointer ${
+            purchasesSection === 'returns'
+              ? 'bg-rose-600 text-white shadow-sm'
+              : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'
+          }`}
+        >
+          <RotateCcw className="w-4 h-4" />
+          <span>مرتجع المشتريات للموردين ({purchaseReturnInvoices.length})</span>
+        </button>
       </div>
 
       {/* Branch Isolation Filter Bar */}
@@ -393,30 +531,61 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
-        <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
-          <span className="text-[11px] font-bold text-slate-500 block mb-0.5">إجمالي المشتريات</span>
-          <span className="text-base sm:text-lg font-black font-mono text-slate-950">
-            {formatMoney(totalPurchases, db.settings.currency)}
-          </span>
-        </div>
-        <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
-          <span className="text-[11px] font-bold text-slate-500 block mb-0.5">المدفوع للموردين</span>
-          <span className="text-base sm:text-lg font-black font-mono text-emerald-700">
-            {formatMoney(totalPaid, db.settings.currency)}
-          </span>
-        </div>
-        <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
-          <span className="text-[11px] font-bold text-slate-500 block mb-0.5">المستحق للموردين (آجل)</span>
-          <span className="text-base sm:text-lg font-black font-mono text-rose-700">
-            {formatMoney(totalDue, db.settings.currency)}
-          </span>
-        </div>
-        <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
-          <span className="text-[11px] font-bold text-slate-500 block mb-0.5">عدد فواتير التوريد</span>
-          <span className="text-base sm:text-lg font-black font-mono text-slate-950">
-            {purchaseInvoices.length} <span className="text-xs font-normal text-slate-500">فاتورة</span>
-          </span>
-        </div>
+        {purchasesSection === 'purchases' ? (
+          <>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">إجمالي المشتريات</span>
+              <span className="text-base sm:text-lg font-black font-mono text-slate-950">
+                {formatMoney(totalPurchases, db.settings.currency)}
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">المدفوع للموردين</span>
+              <span className="text-base sm:text-lg font-black font-mono text-emerald-700">
+                {formatMoney(totalPaid, db.settings.currency)}
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">المستحق للموردين (آجل)</span>
+              <span className="text-base sm:text-lg font-black font-mono text-rose-700">
+                {formatMoney(totalDue, db.settings.currency)}
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">عدد فواتير التوريد</span>
+              <span className="text-base sm:text-lg font-black font-mono text-slate-950">
+                {regularPurchaseInvoices.length} <span className="text-xs font-normal text-slate-500">فاتورة</span>
+              </span>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="bg-white p-3.5 rounded-xl border border-rose-200 shadow-2xs bg-rose-50/20">
+              <span className="text-[11px] font-bold text-rose-700 block mb-0.5">إجمالي قيمة المرتجعات</span>
+              <span className="text-base sm:text-lg font-black font-mono text-rose-900">
+                {formatMoney(totalReturnsAmount, db.settings.currency)}
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">عدد فواتير المرتجع</span>
+              <span className="text-base sm:text-lg font-black font-mono text-slate-950">
+                {purchaseReturnInvoices.length} <span className="text-xs font-normal text-slate-500">فاتورة مرتجع</span>
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">أثر المخزون</span>
+              <span className="text-xs font-bold text-emerald-700 block mt-1">
+                خصم آلي للكميات المرتجعة للمورد
+              </span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block mb-0.5">أثر الخزينة</span>
+              <span className="text-xs font-bold text-blue-700 block mt-1">
+                إيداع واسترداد نقدي تلقائي
+              </span>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Dynamic Search & Advanced Filter Bar */}
@@ -505,16 +674,30 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       {purchaseInvoices.length === 0 ? (
         <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
           <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-          <div className="text-sm font-bold text-slate-700">لا توجد فواتير شراء مطابقة للبحث</div>
+          <div className="text-sm font-bold text-slate-700">
+            {purchasesSection === 'purchases' ? 'لا توجد فواتير شراء مطابقة للبحث' : 'لا توجد فواتير مرتجع مشتريات للموردين'}
+          </div>
           <button
             onClick={() => {
+              setPurchasesMode(purchasesSection === 'purchases' ? 'purchase' : 'purchase_return');
               setEditingInvoice(null);
               setActiveTab('editor');
             }}
-            className="mt-3 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
+            className={`mt-3 px-4 py-2 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer ${
+              purchasesSection === 'purchases' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-rose-600 hover:bg-rose-700'
+            }`}
           >
-            <Plus className="w-4 h-4" />
-            <span>إنشاء أول فاتورة شراء</span>
+            {purchasesSection === 'purchases' ? (
+              <>
+                <Plus className="w-4 h-4" />
+                <span>إنشاء أول فاتورة شراء</span>
+              </>
+            ) : (
+              <>
+                <RotateCcw className="w-4 h-4" />
+                <span>إنشاء أول فاتورة مرتجع مشتريات للمورد</span>
+              </>
+            )}
           </button>
         </div>
       ) : (
@@ -522,14 +705,24 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
           {purchaseInvoices.map(inv => (
             <div
               key={inv.id}
-              className="bg-white rounded-xl border border-slate-200 hover:border-slate-300 shadow-2xs hover:shadow-xs transition-all flex flex-col justify-between p-3.5"
+              className={`bg-white rounded-xl border shadow-2xs hover:shadow-xs transition-all flex flex-col justify-between p-3.5 ${
+                inv.invoiceKind === 'purchase_return' ? 'border-rose-300 hover:border-rose-400 bg-rose-50/10' : 'border-slate-200 hover:border-slate-300'
+              }`}
             >
               {/* Card Header */}
               <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-slate-100">
                 <div>
-                  <span className="font-mono font-black text-sm text-slate-900 block">
-                    {inv.number}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-black text-sm text-slate-900 block">
+                      {inv.number}
+                    </span>
+                    {inv.invoiceKind === 'purchase_return' && (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-black bg-rose-100 text-rose-800 border border-rose-300 flex items-center gap-1">
+                        <RotateCcw className="w-3 h-3 text-rose-600" />
+                        <span>مرتجع مشتريات</span>
+                      </span>
+                    )}
+                  </div>
                   <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-1.5 flex-wrap">
                     <Calendar className="w-3 h-3 text-slate-400" />
                     <span>{inv.date}</span>
@@ -588,19 +781,25 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                 {/* Financial Grid */}
                 <div className="bg-slate-50 rounded-lg p-2 grid grid-cols-3 gap-2 text-center border border-slate-100">
                   <div>
-                    <span className="text-[10px] text-slate-500 block">الإجمالي</span>
+                    <span className="text-[10px] text-slate-500 block">
+                      {inv.invoiceKind === 'purchase_return' ? 'إجمالي المرتجع' : 'الإجمالي'}
+                    </span>
                     <span className="text-xs font-black font-mono text-slate-950">
                       {formatMoney(inv.total, db.settings.currency)}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-slate-500 block">المدفوع</span>
+                    <span className="text-[10px] text-slate-500 block">
+                      {inv.invoiceKind === 'purchase_return' ? 'المسترد نقداً' : 'المدفوع'}
+                    </span>
                     <span className="text-xs font-black font-mono text-emerald-700">
                       {formatMoney(inv.paid, db.settings.currency)}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-slate-500 block">المستحق</span>
+                    <span className="text-[10px] text-slate-500 block">
+                      {inv.invoiceKind === 'purchase_return' ? 'المتبقي بالحساب' : 'المستحق'}
+                    </span>
                     <span className={`text-xs font-black font-mono ${inv.remaining > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
                       {formatMoney(inv.remaining, db.settings.currency)}
                     </span>
@@ -611,10 +810,21 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
               {/* Card Footer */}
               <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2">
                 <span className="text-[11px] text-slate-400 font-medium">
-                  {inv.items.length} أصناف موردة
+                  {inv.items.length} أصناف
                 </span>
 
                 <div className="flex items-center gap-1">
+                  {inv.invoiceKind !== 'purchase_return' && (
+                    <button
+                      onClick={() => handleCreateReturnFromInvoice(inv)}
+                      className="px-2 py-1 text-rose-700 hover:text-rose-900 hover:bg-rose-50 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                      title="إنشاء فاتورة مرتجع مشتريات من هذه الفاتورة للمورد"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-rose-600" />
+                      <span className="hidden xs:inline">عمل مرتجع</span>
+                    </button>
+                  )}
+
                   <button
                     onClick={() => setSelectedAuditInvoice(inv)}
                     className="px-2 py-1 text-blue-700 hover:text-blue-900 hover:bg-blue-50 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
@@ -626,7 +836,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
 
                   <button
                     onClick={() => onPreviewInvoice(inv)}
-                    className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1"
+                    className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
                     title="عرض وطباعة الفاتورة"
                   >
                     <Eye className="w-3.5 h-3.5" />
@@ -637,6 +847,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                     <button
                       onClick={() => {
                         setEditingInvoice(inv);
+                        setPurchasesMode(inv.invoiceKind === 'purchase_return' ? 'purchase_return' : 'purchase');
                         setActiveTab('editor');
                       }}
                       className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 rounded-md transition-colors cursor-pointer"

@@ -558,6 +558,8 @@ export interface AppSettings {
   logo?: string;
   nextSale: number;
   nextPurchase: number;
+  nextSaleReturn?: number;
+  nextPurchaseReturn?: number;
   nextReceipt: number;
   nextPayment: number;
   nextQuote: number;

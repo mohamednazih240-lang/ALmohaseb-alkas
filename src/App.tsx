@@ -139,7 +139,7 @@ export default function App() {
 
   const handleEditInvoice = (inv: Invoice) => {
     setEditingInvoiceState(inv);
-    if (inv.type === 'purchase' || inv.invoiceKind === 'purchase') {
+    if (inv.type === 'purchase' || inv.invoiceKind === 'purchase' || inv.invoiceKind === 'purchase_return') {
       navigateToPage('purchases');
     } else {
       navigateToPage('sales');

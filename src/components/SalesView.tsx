@@ -22,13 +22,22 @@ import {
   Download,
   FileSpreadsheet,
   ShieldCheck,
-  History
+  History,
+  RotateCcw
 } from 'lucide-react';
 import {
   AccountingDB,
   Invoice
 } from '../types/accounting';
-import { formatMoney, logAudit, deleteInvoiceAndRevert, wipeAllInvoicesFromSystem } from '../services/accountingStorage';
+import {
+  formatMoney,
+  logAudit,
+  deleteInvoiceAndRevert,
+  wipeAllInvoicesFromSystem,
+  wipeEntireSystemToCleanSlate,
+  getTodayDate
+} from '../services/accountingStorage';
+import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -65,7 +74,8 @@ export const SalesView: React.FC<SalesViewProps> = ({
   const [branchFilter, setBranchFilter] = useState<'current' | 'all'>(isManager ? 'all' : 'current');
 
   const [activeTab, setActiveTab] = useState<'editor' | 'list'>(initialTab);
-  const [salesMode, setSalesMode] = useState<'sale' | 'wholesale'>('sale');
+  const [salesSection, setSalesSection] = useState<'sales' | 'returns'>('sales');
+  const [salesMode, setSalesMode] = useState<'sale' | 'wholesale' | 'sale_return'>('sale');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'مدفوع' | 'جزئي' | 'آجل'>('all');
   const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'month'>('all');
@@ -75,6 +85,10 @@ export const SalesView: React.FC<SalesViewProps> = ({
   React.useEffect(() => {
     if (initialEditingInvoice) {
       setEditingInvoice(initialEditingInvoice);
+      if (initialEditingInvoice.invoiceKind === 'sale_return') {
+        setSalesMode('sale_return');
+        setSalesSection('returns');
+      }
       setActiveTab('editor');
     }
   }, [initialEditingInvoice]);
@@ -131,9 +145,10 @@ export const SalesView: React.FC<SalesViewProps> = ({
   const todayStr = new Date().toISOString().slice(0, 10);
   const currentMonthStr = todayStr.slice(0, 7);
 
-  const salesInvoices = useMemo(() => {
+  // 1. Regular sales (excluding returns)
+  const regularSalesInvoices = useMemo(() => {
     return db.invoices
-      .filter(inv => inv.type === 'sale')
+      .filter(inv => (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') && inv.invoiceKind !== 'sale_return')
       .filter(inv => {
         const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
         if (!matchBranch) return false;
@@ -162,18 +177,87 @@ export const SalesView: React.FC<SalesViewProps> = ({
       });
   }, [db.invoices, branchFilter, targetBranchId, searchTerm, statusFilter, dateFilter, sortBy, todayStr, currentMonthStr]);
 
+  // 2. Sales Returns (مرتجع المبيعات)
+  const salesReturnInvoices = useMemo(() => {
+    return db.invoices
+      .filter(inv => inv.invoiceKind === 'sale_return')
+      .filter(inv => {
+        const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
+        if (!matchBranch) return false;
+
+        const s = searchTerm.trim().toLowerCase();
+        const matchSearch = !s ||
+          inv.number.toLowerCase().includes(s) ||
+          inv.partyName.toLowerCase().includes(s) ||
+          (inv.notes && inv.notes.toLowerCase().includes(s)) ||
+          inv.items.some(it => it.productName.toLowerCase().includes(s));
+
+        let matchDate = true;
+        if (dateFilter === 'today') matchDate = inv.date === todayStr;
+        else if (dateFilter === 'month') matchDate = inv.date.startsWith(currentMonthStr);
+
+        return matchSearch && matchDate;
+      })
+      .sort((a, b) => {
+        if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
+        if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
+        if (sortBy === 'highest') return b.total - a.total;
+        if (sortBy === 'lowest') return a.total - b.total;
+        return 0;
+      });
+  }, [db.invoices, branchFilter, targetBranchId, searchTerm, dateFilter, sortBy, todayStr, currentMonthStr]);
+
+  // Current active list
+  const displayedInvoices = salesSection === 'sales' ? regularSalesInvoices : salesReturnInvoices;
+  const salesInvoices = displayedInvoices;
+
   // Statistics for this branch (memoized)
   const { totalSales, totalCollected, totalPending } = useMemo(() => {
     let sales = 0;
     let collected = 0;
-    for (const i of db.invoices) {
-      if (i.type === 'sale' && (branchFilter === 'all' || (i.branchId === targetBranchId || (!i.branchId && targetBranchId === 'br_main')))) {
-        sales += i.total;
-        collected += i.paid;
-      }
+    for (const i of regularSalesInvoices) {
+      sales += i.total;
+      collected += i.paid;
     }
     return { totalSales: sales, totalCollected: collected, totalPending: sales - collected };
-  }, [db.invoices, branchFilter, targetBranchId]);
+  }, [regularSalesInvoices]);
+
+  const totalReturnsAmount = useMemo(() => {
+    return salesReturnInvoices.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
+  }, [salesReturnInvoices]);
+
+  // Quick Return from an existing sales invoice
+  const handleCreateReturnFromInvoice = (inv: Invoice) => {
+    const returnTemplate: Invoice = {
+      id: '',
+      number: '',
+      type: 'sale',
+      invoiceKind: 'sale_return',
+      date: getTodayDate(),
+      time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
+      partyId: inv.partyId,
+      partyCode: inv.partyCode,
+      partyName: inv.partyName,
+      partyPhone: inv.partyPhone,
+      warehouseId: inv.warehouseId || 'wh_main',
+      paymentMethod: inv.paymentMethod || 'نقدي',
+      subtotal: inv.subtotal,
+      discount: 0,
+      tax: 0,
+      total: inv.total,
+      paid: inv.paid,
+      remaining: 0,
+      status: 'مدفوع',
+      notes: `مرتجع عن الفاتورة الأصلية رقم ${inv.number}`,
+      jobSite: `مرتجع عن فاتورة رقم ${inv.number}`,
+      branchId: inv.branchId || targetBranchId,
+      branchName: inv.branchName,
+      items: JSON.parse(JSON.stringify(inv.items))
+    };
+    setEditingInvoice(returnTemplate);
+    setSalesMode('sale_return');
+    setActiveTab('editor');
+  };
 
   // Print all filtered sales invoices in approved design
   const handlePrintBatch = () => {
@@ -294,15 +378,15 @@ export const SalesView: React.FC<SalesViewProps> = ({
       {/* Top Header & Action */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-200">
         <div className="flex items-center gap-2">
-          <div className="p-2 bg-emerald-600 text-white rounded-lg shadow-2xs">
-            <ShoppingCart className="w-5 h-5" />
+          <div className={`p-2 text-white rounded-lg shadow-2xs ${salesSection === 'sales' ? 'bg-emerald-600' : 'bg-rose-600'}`}>
+            {salesSection === 'sales' ? <ShoppingCart className="w-5 h-5" /> : <RotateCcw className="w-5 h-5" />}
           </div>
           <div>
             <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight">
-              إدارة نقاط البيع وفواتير المبيعات
+              {salesSection === 'sales' ? 'إدارة نقاط البيع وفواتير المبيعات' : 'سجل فواتير مرتجع المبيعات (مردودات العملاء)'}
             </h1>
             <p className="text-[11px] text-slate-500 font-medium">
-              البيع السريع ونظام الكروت المباشر بدون أي تمرير أفقي
+              {salesSection === 'sales' ? 'البيع السريع ونظام الكروت المباشر بدون أي تمرير أفقي' : 'توثيق استرجاع بضاعة من العملاء للمخزن وإرجاع المبالغ وعكس الحسابات'}
             </p>
           </div>
         </div>
@@ -313,7 +397,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
             type="button"
             onClick={handleExportCsv}
             className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-            title="تصدير جدول المبيعات بصيغة Excel"
+            title="تصدير جدول البيانات بصيغة Excel"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
             <span>Excel</span>
@@ -324,65 +408,121 @@ export const SalesView: React.FC<SalesViewProps> = ({
               type="button"
               onClick={handlePrintBatch}
               className="px-3 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-              title="طباعة وتصدير جميع فواتير المبيعات المحددة PDF وورقياً"
+              title="طباعة وتصدير جميع الفواتير المحددة PDF وورقياً"
             >
               <Printer className="w-4 h-4" />
-              <span>طباعة وتصدير PDF ({salesInvoices.length})</span>
+              <span>طباعة وتصدير PDF ({displayedInvoices.length})</span>
             </button>
           )}
 
-          {canDeleteSales && db.invoices.length > 0 && (
+          {canDeleteSales && (
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
                 const ok = window.confirm(
-                  '⚠️ تنبيه هام ومؤكد:\n' +
-                  'هل أنت متأكد من رغبتك في حذف وتصفير جميع الفواتير بالكامل من النظام؟\n\n' +
-                  '• سيتم حذف كافة فواتير المشتريات والمبيعات نهائياً.\n' +
-                  '• سيتم تصفير الأرصدة المرتبطة بها وعكس حركاتها.\n' +
-                  '• ستبدأ أول فاتورة جديدة تدخلها برقم 1 فوراً.\n' +
-                  '• سيتم حفظ التعديل فورياً ومزامنته سحابياً لكافة الأجهزة.'
+                  '⚠️ تنبيه حاسم: تصفير وتنظيف النظام بالكامل للبدء على نظيف\n\n' +
+                  '• سيتم مسح كافة العملاء والموردين نهائياً (0).\n' +
+                  '• سيتم مسح كافة الأصناف والمخزون نهائياً (0).\n' +
+                  '• سيتم مسح كافة فواتير الشراء والبيع والمرتجعات نهائياً (0).\n' +
+                  '• سيتم تصفير الخزينة والحركات المالية نهائياً (0).\n' +
+                  '• ستبدأ الترقيمات من رقم 1 فورياً لكل قسم.\n' +
+                  '• سيتم الحفاظ على اسم الشركة (شركة الموان) وحسابات المديرين والفروع.\n\n' +
+                  'هل أنت متأكد تماماً من رغبتك في البدء على نظيف الآن؟'
                 );
                 if (!ok) return;
-                const wiped = wipeAllInvoicesFromSystem(db);
+                const wiped = wipeEntireSystemToCleanSlate(db);
                 onUpdateDb(wiped);
+                await pushDatabaseToCloud(wiped, 'تصفير وتنظيف النظام الشامل للبدء على نظيف', true);
               }}
               className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-              title="تصفير وحذف جميع الفواتير من النظام نهائياً (0)"
+              title="تصفير وتنظيف النظام بالكامل للبدء على نظيف (0)"
             >
               <Trash2 className="w-4 h-4 text-rose-600" />
-              <span>تصفير وحذف كافة الفواتير (0)</span>
+              <span>تصفير وتنظيف النظام (0)</span>
             </button>
           )}
 
           {canCreateSales && (
-            <>
-              <button
-                onClick={() => {
-                  setEditingInvoice(null);
-                  setSalesMode('wholesale');
-                  setActiveTab('editor');
-                }}
-                className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-              >
-                <Boxes className="w-4 h-4" />
-                <span>+ فاتورة جملة</span>
-              </button>
+            salesSection === 'sales' ? (
+              <>
+                <button
+                  onClick={() => {
+                    setEditingInvoice(null);
+                    setSalesMode('wholesale');
+                    setActiveTab('editor');
+                  }}
+                  className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <Boxes className="w-4 h-4" />
+                  <span>+ فاتورة جملة</span>
+                </button>
 
+                <button
+                  onClick={() => {
+                    setEditingInvoice(null);
+                    setSalesMode('sale');
+                    setActiveTab('editor');
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ إنشاء فاتورة بيع جديدة</span>
+                </button>
+              </>
+            ) : (
               <button
                 onClick={() => {
                   setEditingInvoice(null);
-                  setSalesMode('sale');
+                  setSalesMode('sale_return');
                   setActiveTab('editor');
                 }}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
               >
-                <Plus className="w-4 h-4" />
-                <span>+ إنشاء فاتورة بيع جديدة</span>
+                <RotateCcw className="w-4 h-4" />
+                <span>+ إنشاء فاتورة مرتجع مبيعات جديدة</span>
               </button>
-            </>
+            )
           )}
         </div>
+      </div>
+
+      {/* Section Switcher Tabs: Sales vs Sales Returns */}
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+        <button
+          type="button"
+          onClick={() => setSalesSection('sales')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-black transition-all cursor-pointer ${
+            salesSection === 'sales'
+              ? 'bg-emerald-600 text-white shadow-sm'
+              : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+          }`}
+        >
+          <ShoppingCart className="w-4 h-4" />
+          <span>فواتير المبيعات</span>
+          <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
+            salesSection === 'sales' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-700'
+          }`}>
+            {regularSalesInvoices.length}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSalesSection('returns')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-black transition-all cursor-pointer ${
+            salesSection === 'returns'
+              ? 'bg-rose-600 text-white shadow-sm'
+              : 'bg-slate-100 hover:bg-rose-50 text-slate-700 hover:text-rose-700'
+          }`}
+        >
+          <RotateCcw className="w-4 h-4" />
+          <span>مرتجع المبيعات</span>
+          <span className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
+            salesSection === 'returns' ? 'bg-white/20 text-white' : 'bg-rose-100 text-rose-700'
+          }`}>
+            {salesReturnInvoices.length}
+          </span>
+        </button>
       </div>
 
       {/* Branch Isolation Filter Bar */}
@@ -533,27 +673,34 @@ export const SalesView: React.FC<SalesViewProps> = ({
       {salesInvoices.length === 0 ? (
         <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
           <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-          <div className="text-sm font-bold text-slate-700">لا توجد فواتير مبيعات مسجلة تطابق البحث</div>
+          <div className="text-sm font-bold text-slate-700">
+            {salesSection === 'sales' ? 'لا توجد فواتير مبيعات مسجلة تطابق البحث' : 'لا توجد فواتير مرتجع مبيعات مسجلة'}
+          </div>
           <button
             onClick={() => {
               setEditingInvoice(null);
-              setSalesMode('sale');
+              setSalesMode(salesSection === 'sales' ? 'sale' : 'sale_return');
               setActiveTab('editor');
             }}
-            className="mt-3 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
+            className={`mt-3 px-4 py-2 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5 ${
+              salesSection === 'sales' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-rose-600 hover:bg-rose-700'
+            }`}
           >
-            <Plus className="w-4 h-4" />
-            <span>إنشاء أول فاتورة مبيعات</span>
+            {salesSection === 'sales' ? <Plus className="w-4 h-4" /> : <RotateCcw className="w-4 h-4" />}
+            <span>{salesSection === 'sales' ? 'إنشاء أول فاتورة مبيعات' : 'إنشاء أول فاتورة مرتجع مبيعات'}</span>
           </button>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
           {salesInvoices.map(inv => {
             const isWholesale = inv.invoiceKind === 'wholesale';
+            const isRet = inv.invoiceKind === 'sale_return';
             return (
               <div
                 key={inv.id}
-                className="bg-white rounded-xl border border-slate-200 hover:border-slate-300 shadow-2xs hover:shadow-xs transition-all flex flex-col justify-between p-3.5"
+                className={`bg-white rounded-xl border hover:border-slate-300 shadow-2xs hover:shadow-xs transition-all flex flex-col justify-between p-3.5 ${
+                  isRet ? 'border-rose-200 bg-rose-50/10' : 'border-slate-200'
+                }`}
               >
                 {/* Card Header: Number, Date, Status */}
                 <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-slate-100">
@@ -567,6 +714,11 @@ export const SalesView: React.FC<SalesViewProps> = ({
                           جملة
                         </span>
                       )}
+                      {isRet && (
+                        <span className="px-1.5 py-0.2 bg-rose-100 text-rose-900 text-[9px] font-black rounded">
+                          مرتجع مبيعات
+                        </span>
+                      )}
                     </div>
                     <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-1">
                       <Calendar className="w-3 h-3 text-slate-400" />
@@ -577,14 +729,16 @@ export const SalesView: React.FC<SalesViewProps> = ({
 
                   <span
                     className={`px-2.5 py-0.5 rounded-full text-[10px] font-black border ${
-                      inv.status === 'مدفوع'
+                      isRet
+                        ? 'bg-rose-50 text-rose-800 border-rose-300'
+                        : inv.status === 'مدفوع'
                         ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
                         : inv.status === 'جزئي'
                         ? 'bg-amber-50 text-amber-800 border-amber-300'
                         : 'bg-rose-50 text-rose-800 border-rose-300'
                     }`}
                   >
-                    {inv.status}
+                    {isRet ? 'مرتجع' : inv.status}
                   </span>
                 </div>
 
@@ -657,6 +811,19 @@ export const SalesView: React.FC<SalesViewProps> = ({
                   </div>
 
                   <div className="flex items-center gap-1">
+                    {/* Quick Return action on regular sales invoices */}
+                    {!isRet && canCreateSales && (
+                      <button
+                        type="button"
+                        onClick={() => handleCreateReturnFromInvoice(inv)}
+                        className="px-2 py-1 text-rose-700 hover:text-rose-900 hover:bg-rose-50 border border-rose-200 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                        title="عمل مرتجع مبيعات من هذه الفاتورة"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 text-rose-600" />
+                        <span className="hidden xs:inline">عمل مرتجع</span>
+                      </button>
+                    )}
+
                     <button
                       onClick={() => setSelectedAuditInvoice(inv)}
                       className="px-2 py-1 text-blue-700 hover:text-blue-900 hover:bg-blue-50 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
@@ -679,7 +846,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
                       <button
                         onClick={() => {
                           setEditingInvoice(inv);
-                          setSalesMode(inv.invoiceKind === 'wholesale' ? 'wholesale' : 'sale');
+                          setSalesMode(inv.invoiceKind === 'wholesale' ? 'wholesale' : (inv.invoiceKind === 'sale_return' ? 'sale_return' : 'sale'));
                           setActiveTab('editor');
                         }}
                         className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
