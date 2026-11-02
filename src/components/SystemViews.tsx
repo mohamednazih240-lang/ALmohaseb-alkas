@@ -650,7 +650,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     if (!confirm('تأكيد هام: هل ترغب في تنظيف وتصفير النظام بالكامل من كافة الفواتير، الحركات، الأصناف، العملاء، الموردين، سندات القبض والصرف، وقيود اليومية والتقارير للبدء على نظيف 100%؟\n\n• سيتم الإبقاء على دليل الحسابات القياسي وبيانات منشأة «شركة الموان».\n• ستبدأ كافة ترقيمات الفواتير من رقم 1 فوراً.\n• تتم المزامنة السحابية فوراً لكافة الأجهزة.')) return;
     const cleaned = wipeEntireSystemToCleanSlate(db);
     onUpdateDb(cleaned);
-    pushDatabaseToCloud(cleaned, 'تصفير وتنظيف النظام الشامل للبدء على نظيف', true);
+    pushDatabaseToCloud(cleaned, true);
     alert('تم تفريغ وتنظيف النظام بالكامل بنجاح من كافة الأصناف والعملاء والموردين والحركات والفواتير! أصبح النظام نظيفاً 100% وجاهزاً للبدء الفعلي.');
   };
 
@@ -659,7 +659,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     if (!confirm('تحذير: سيتم إعادة تعيين البرنامج بالكامل إلى الحالة الأولية الفارغة النظيفة (بدون أي بيانات تجريبية). هل أنت متأكد؟')) return;
     const fresh = createSeedData();
     onUpdateDb(fresh);
-    pushDatabaseToCloud(fresh, 'إعادة ضبط المصنع إلى الحالة الأولية النظيفة', true);
+    pushDatabaseToCloud(fresh, true);
     alert('تمت إعادة ضبط النظام بنجاح إلى الحالة الفارغة النظيفة الجاهزة للعمل.');
   };
 

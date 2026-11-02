@@ -232,11 +232,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       partyCode: inv.partyCode,
       partyName: inv.partyName,
       partyPhone: inv.partyPhone,
-      partyVatNumber: inv.partyVatNumber,
-      partyNationalId: inv.partyNationalId,
+      warehouseId: inv.warehouseId || 'wh_mawan',
       branchId: inv.branchId || targetBranchId,
       branchName: inv.branchName || currentBranch.name,
-      items: inv.items.map(it => ({ ...it })),
+      items: JSON.parse(JSON.stringify(inv.items)),
       subtotal: inv.subtotal,
       discount: inv.discount || 0,
       tax: inv.tax || 0,
@@ -246,10 +245,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       paymentMethod: inv.paymentMethod || 'نقدي',
       status: 'مدفوع',
       notes: `مرتجع مشتريات للفاتورة الأصلية رقم ${inv.number}`,
-      currency: inv.currency || db.settings.currency,
-      costTotal: 0,
-      profitTotal: 0,
-      treasuryId: inv.treasuryId
+      currencyCode: inv.currencyCode || db.settings.currency
     };
     setPurchasesMode('purchase_return');
     setPurchasesSection('returns');
@@ -426,7 +422,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                 if (!ok) return;
                 const wiped = wipeEntireSystemToCleanSlate(db);
                 onUpdateDb(wiped);
-                pushDatabaseToCloud(wiped, 'تصفير وتنظيف النظام الشامل للبدء على نظيف', true);
+                pushDatabaseToCloud(wiped, true);
               }}
               className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
               title="تصفير وتنظيف النظام بالكامل للبدء على نظيف (0)"
