@@ -110,6 +110,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
 
     const printRoot = document.createElement('div');
     printRoot.id = 'isolated-print-root';
+    printRoot.setAttribute('data-paper-size', paperSize);
     printRoot.innerHTML = contentEl.innerHTML;
     document.body.appendChild(printRoot);
 
@@ -118,7 +119,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
       styleEl.innerHTML = `
-        @page { size: A4 portrait; margin: 6mm 8mm; }
+        @page { size: A4 portrait; margin: 8mm 10mm; }
       `;
     } else if (paperSize === 'A5') {
       styleEl.innerHTML = `
@@ -421,15 +422,19 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="info-col-left" style={{ flex: '1', overflow: 'hidden' }}>
-                      <div className="text-[10.5px]">
-                        <strong>التاريخ: </strong>
-                        <bdi dir="ltr" className="font-mono font-bold">{invoice.date}</bdi>
+                    <div className="info-col-left" style={{ flex: '0 0 auto', minWidth: 'max-content', textAlign: 'start' }}>
+                      <div className="text-[10.5px] whitespace-nowrap flex items-center gap-1 justify-start">
+                        <strong className="whitespace-nowrap">التاريخ:</strong>
+                        <span dir="ltr" className="font-mono font-bold whitespace-nowrap inline-block" style={{ wordBreak: 'keep-all', whiteSpace: 'nowrap' }}>
+                          {invoice.date}
+                        </span>
                       </div>
                       {invoice.time ? (
-                        <div className="print-hide-time text-[9px] mt-0.5 text-slate-600">
-                          <strong>الوقت: </strong>
-                          <span dir="ltr">{invoice.time}</span>
+                        <div className="print-hide-time text-[9px] mt-0.5 text-slate-600 whitespace-nowrap flex items-center gap-1 justify-start">
+                          <strong className="whitespace-nowrap">الوقت:</strong>
+                          <span dir="ltr" className="font-mono whitespace-nowrap inline-block" style={{ wordBreak: 'keep-all', whiteSpace: 'nowrap' }}>
+                            {invoice.time}
+                          </span>
                         </div>
                       ) : null}
                     </div>

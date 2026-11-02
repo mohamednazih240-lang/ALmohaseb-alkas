@@ -111,6 +111,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
 
     const printRoot = document.createElement('div');
     printRoot.id = 'isolated-print-root';
+    printRoot.setAttribute('data-paper-size', paperSize);
     printRoot.innerHTML = contentEl.innerHTML;
     document.body.appendChild(printRoot);
 
@@ -119,7 +120,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
     styleEl.id = 'dynamic-paper-print-style';
     if (paperSize === 'A4') {
       styleEl.innerHTML = `
-        @page { size: A4 portrait; margin: 6mm 8mm; }
+        @page { size: A4 portrait; margin: 8mm 10mm; }
       `;
     } else if (paperSize === 'A5') {
       styleEl.innerHTML = `
@@ -381,15 +382,19 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                           ) : null}
                         </div>
 
-                        <div className="info-col-left" style={{ flex: '1', overflow: 'hidden' }}>
-                          <div className="text-[10.5px]">
-                            <strong>التاريخ: </strong>
-                            <bdi dir="ltr" className="font-mono font-bold">{doc.date || new Date().toISOString().slice(0, 10)}</bdi>
+                        <div className="info-col-left" style={{ flex: '0 0 auto', minWidth: 'max-content', textAlign: 'start' }}>
+                          <div className="text-[10.5px] whitespace-nowrap flex items-center gap-1 justify-start">
+                            <strong className="whitespace-nowrap">التاريخ:</strong>
+                            <span dir="ltr" className="font-mono font-bold whitespace-nowrap inline-block" style={{ wordBreak: 'keep-all', whiteSpace: 'nowrap' }}>
+                              {doc.date || new Date().toISOString().slice(0, 10)}
+                            </span>
                           </div>
                           {doc.time ? (
-                            <div className="print-hide-time text-[9px] mt-0.5 text-slate-600">
-                              <strong>الوقت: </strong>
-                              <span dir="ltr">{doc.time}</span>
+                            <div className="print-hide-time text-[9px] mt-0.5 text-slate-600 whitespace-nowrap flex items-center gap-1 justify-start">
+                              <strong className="whitespace-nowrap">الوقت:</strong>
+                              <span dir="ltr" className="font-mono whitespace-nowrap inline-block" style={{ wordBreak: 'keep-all', whiteSpace: 'nowrap' }}>
+                                {doc.time}
+                              </span>
                             </div>
                           ) : null}
                         </div>
@@ -410,9 +415,17 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                     <div className="table-wrapper">
                       <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse' }}>
                         <colgroup>
-                          {doc.tableHeaders.map((th, thIdx) => (
-                            <col key={thIdx} style={{ width: th.width || 'auto' }} />
-                          ))}
+                          {doc.tableHeaders.map((th, thIdx) => {
+                            const isDate = (th.label || '').includes('تاريخ');
+                            return (
+                              <col
+                                key={thIdx}
+                                style={{
+                                  width: isDate ? Math.max(parseFloat(th.width || '16') || 16, 18) + '%' : th.width || 'auto'
+                                }}
+                              />
+                            );
+                          })}
                         </colgroup>
                         <thead>
                           <tr>
@@ -460,9 +473,13 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                     }}
                                   >
                                     {isDateCol ? (
-                                      <bdi dir="ltr" className="inline-block font-mono text-[9.5px] tabular-nums whitespace-nowrap">
+                                      <span
+                                        dir="ltr"
+                                        className="inline-block font-mono text-[9.5px] tabular-nums whitespace-nowrap"
+                                        style={{ wordBreak: 'keep-all', whiteSpace: 'nowrap', display: 'inline-block' }}
+                                      >
                                         {col}
-                                      </bdi>
+                                      </span>
                                     ) : isNumericCol ? (
                                       <span className="inline-block tabular-nums font-bold">
                                         {col}
