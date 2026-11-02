@@ -1648,8 +1648,20 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     sm => sm.sourceId !== invoice.id && sm.refNumber !== invoice.number
   );
 
-  // 3. Remove treasury entries
-  updated.treasury = updated.treasury.filter(tr => tr.sourceId !== invoice.id);
+  // 3. Remove all treasury entries related to this invoice (by sourceId, invoiceId, or invoice number in description)
+  updated.treasury = updated.treasury.filter(tr => {
+    if (tr.sourceId === invoice.id || (tr as any).invoiceId === invoice.id) return false;
+    if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim()) return false;
+    if (invoice.number && tr.description && (
+      tr.description.includes(`رقم ${invoice.number}`) ||
+      tr.description.includes(`فاتورة مشتريات رقم ${invoice.number}`) ||
+      tr.description.includes(`فاتورة مبيعات رقم ${invoice.number}`) ||
+      tr.description.includes(`مرتجع رقم ${invoice.number}`)
+    )) {
+      return false;
+    }
+    return true;
+  });
 
   // 4. Remove journal entry
   updated.journals = updated.journals.filter(
@@ -1735,6 +1747,18 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
   // 3. Remove voucher
   updated.vouchers = updated.vouchers.filter(item => item.id !== voucher.id);
 
+  // 3.5. If voucher was linked to an invoice, revert invoice paid and remaining amount
+  if (voucher.invoiceId || (voucher as any).referenceNumber) {
+    const linkedInv = updated.invoices.find(
+      i => i.id === voucher.invoiceId || i.number === (voucher as any).referenceNumber
+    );
+    if (linkedInv) {
+      linkedInv.paid = Math.max(0, (linkedInv.paid || 0) - voucher.amount);
+      linkedInv.remaining = Math.max(0, (linkedInv.total || 0) - linkedInv.paid);
+      linkedInv.status = linkedInv.paid <= 0 ? 'آجل' : linkedInv.remaining <= 0 ? 'مدفوع' : 'جزئي';
+    }
+  }
+
   // 4. Update party balance
   if (voucher.partyId) {
     const cust = updated.customers.find(c => c.id === voucher.partyId);
@@ -1805,23 +1829,64 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
 
   const targetSourceId = tr.sourceId || tr.id;
 
-  // If this was an expense or revenue, remove from expenses/revenues
+  // 1. If this was an expense or revenue, remove from expenses/revenues
   if (tr.sourceType === 'expense') {
-    updated.expenses = updated.expenses.filter(e => e.id !== targetSourceId);
+    updated.expenses = (updated.expenses || []).filter(e => e.id !== targetSourceId && e.id !== entryId);
   } else if (tr.sourceType === 'revenue') {
-    updated.revenues = updated.revenues.filter(r => r.id !== targetSourceId);
+    updated.revenues = (updated.revenues || []).filter(r => r.id !== targetSourceId && r.id !== entryId);
   }
 
-  // Remove treasury entry
-  updated.treasury = updated.treasury.filter(t => t.id !== entryId && t.sourceId !== targetSourceId);
+  // 2. If this was linked to a voucher, remove the voucher and recalculate party balance
+  if (tr.sourceType === 'voucher' || (updated.vouchers && updated.vouchers.some(v => v.id === targetSourceId))) {
+    const voucher = (updated.vouchers || []).find(v => v.id === targetSourceId);
+    if (voucher) {
+      updated.vouchers = updated.vouchers.filter(v => v.id !== voucher.id);
+      if (voucher.partyId) {
+        const cust = updated.customers.find(c => c.id === voucher.partyId);
+        if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
+        const supp = updated.suppliers.find(s => s.id === voucher.partyId);
+        if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
+      }
+    }
+  }
 
-  // Remove journals
-  updated.journals = updated.journals.filter(j => j.sourceId !== targetSourceId && j.id !== targetSourceId);
+  // 3. If this was linked to an invoice (purchase, sale, return), revert invoice paid/remaining and party balance
+  const invoiceNumMatch = tr.description ? tr.description.match(/رقم\s*([A-Za-z0-9_-]+)/) : null;
+  const invNumberExtracted = invoiceNumMatch ? invoiceNumMatch[1] : null;
+  const linkedInvoice = (updated.invoices || []).find(i => 
+    i.id === targetSourceId || 
+    (invNumberExtracted && String(i.number).trim() === invNumberExtracted.trim()) ||
+    ((tr as any).refNumber && String(i.number).trim() === String((tr as any).refNumber).trim())
+  );
+
+  if (linkedInvoice) {
+    linkedInvoice.paid = Math.max(0, (linkedInvoice.paid || 0) - tr.amount);
+    linkedInvoice.remaining = Math.max(0, (linkedInvoice.total || 0) - linkedInvoice.paid);
+    linkedInvoice.status = linkedInvoice.paid <= 0 ? 'آجل' : linkedInvoice.remaining <= 0 ? 'مدفوع' : 'جزئي';
+
+    if (linkedInvoice.partyId) {
+      const cust = updated.customers.find(c => c.id === linkedInvoice.partyId);
+      if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
+      const supp = updated.suppliers.find(s => s.id === linkedInvoice.partyId);
+      if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
+    }
+  }
+
+  // 4. Remove treasury entry
+  updated.treasury = updated.treasury.filter(t => t.id !== entryId);
+
+  // 5. Remove journals
+  updated.journals = (updated.journals || []).filter(j => 
+    j.sourceId !== targetSourceId && 
+    j.id !== targetSourceId && 
+    j.sourceId !== entryId && 
+    j.id !== entryId
+  );
 
   logAudit(
     updated,
     'حذف حركة خزينة وعكس الرصيد',
-    `تم حذف حركة ${tr.direction === 'in' ? 'وارد' : 'صادر'} بقيمة ${tr.amount} وعكس رصيد الخزينة والقيود`
+    `تم حذف حركة ${tr.direction === 'in' ? 'وارد' : 'صادر'} بقيمة ${tr.amount} وعكس رصيد الخزينة والفاتورة والأرصدة والقيود`
   );
 
   return updated;

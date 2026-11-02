@@ -291,18 +291,17 @@ export default function App() {
             const prevAuditCount = prevDb.audit?.length || 0;
             const cloudAuditCount = cloudDb.audit?.length || 0;
 
-            if (cloudInvoicesCount !== prevInvoicesCount || cloudAuditCount !== prevAuditCount) {
+            const cloudAuditTime = cloudDb.audit?.[0]?.at ? new Date(cloudDb.audit[0].at).getTime() : 0;
+            const prevAuditTime = prevDb.audit?.[0]?.at ? new Date(prevDb.audit[0].at).getTime() : 0;
+
+            if (cloudInvoicesCount !== prevInvoicesCount || cloudAuditCount !== prevAuditCount || cloudAuditTime > prevAuditTime) {
               const storedSession = getStoredAuthSession();
               const currentLocalUser = storedSession?.user || prevDb.currentUser;
               const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
               const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
               const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
-              const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || []);
-              const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
               const merged: AccountingDB = {
                 ...ensuredCloud,
-                invoices: mergedInvoices,
-                vouchers: mergedVouchers,
                 currentUser: effectiveUser || ensuredCloud.currentUser || ensuredCloud.users[0]
               };
               saveDatabase(merged);

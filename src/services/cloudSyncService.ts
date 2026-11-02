@@ -502,8 +502,8 @@ export function subscribeToCloudDatabase(
       console.warn('Firestore company listener notice:', error.message);
     });
 
-    // Also listen to main doc if COMP-101 for backwards compatibility
-    if (cleanCode === 'COMP-101') {
+    // Also listen to main doc for COMP-102 & COMP-101 for 100% real-time instant sync
+    if (cleanCode === 'COMP-102' || cleanCode === 'COMP-101') {
       const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
       unsubscribeListener = onSnapshot(docRef, handleSnapshot, (error) => {
         console.warn('Firestore realtime listener notice:', error.message);

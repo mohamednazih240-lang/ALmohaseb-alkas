@@ -19,7 +19,7 @@ import {
   ReturnInvoice,
   Invoice
 } from '../types/accounting';
-import { formatMoney, logAudit, getProductForBranch, updateProductBranchData } from '../services/accountingStorage';
+import { formatMoney, logAudit, getProductForBranch, updateProductBranchData, calculateCustomerBalance, calculateSupplierBalance } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
@@ -227,12 +227,20 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
       if (pIdx > -1) updated.products[pIdx] = prodUpdated;
     }
 
-    updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== ret.id);
-    updated.treasury = updated.treasury.filter(tr => tr.sourceId !== ret.id);
-    updated.journals = updated.journals.filter(j => j.sourceId !== ret.id);
-    updated.returns = updated.returns.filter(r => r.id !== ret.id);
+    updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.sourceId !== ret.id);
+    updated.treasury = (updated.treasury || []).filter(tr => tr.sourceId !== ret.id && (!ret.number || !tr.description?.includes(ret.number)));
+    updated.journals = (updated.journals || []).filter(j => j.sourceId !== ret.id);
+    updated.returns = (updated.returns || []).filter(r => r.id !== ret.id);
+    updated.invoices = (updated.invoices || []).filter(i => i.id !== ret.id && i.number !== ret.number);
 
-    logAudit(updated, 'حذف مرتجع', `تم حذف المرتجع ${ret.number} وعكس قيوده`);
+    if (ret.partyId) {
+      const cust = updated.customers.find(c => c.id === ret.partyId);
+      if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
+      const supp = updated.suppliers.find(s => s.id === ret.partyId);
+      if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
+    }
+
+    logAudit(updated, 'حذف مرتجع', `تم حذف المرتجع ${ret.number} وعكس قيوده ومخزونه والأرصدة بالكامل`);
     onUpdateDb(updated);
   };
 
