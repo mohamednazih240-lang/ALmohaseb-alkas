@@ -207,184 +207,165 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     : null;
 
   return (
-    <div className="invoice-modal-overlay fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-1 sm:p-4 overflow-y-auto">
-      <div className="invoice-modal-card bg-white rounded-2xl w-full max-w-4xl max-h-[96vh] flex flex-col shadow-2xl border border-slate-200">
+    <div className="invoice-modal-overlay fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-0 sm:p-4 overflow-hidden">
+      <div className="invoice-modal-card bg-white rounded-none sm:rounded-2xl w-full max-w-4xl h-full sm:h-auto sm:max-h-[96vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
         {/* Modal Controls (Hidden during print) */}
-        <div className="no-print flex items-center justify-between p-3 sm:p-3.5 border-b border-slate-200 bg-slate-50 rounded-t-2xl">
-          <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-            <h2 className="text-xs sm:text-sm font-black text-slate-900">
-              {activeTab === 'preview' ? `معاينة وطباعة (${invoice.number})` : `سجل الرقابة المالية والتدقيق (${invoice.number})`}
-            </h2>
+        <div className="no-print border-b border-slate-200 bg-slate-50 px-3 py-2.5 sm:px-4 sm:py-3 shrink-0">
+          {/* Top Row: Title, Tabs, Actions, Close */}
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-xs sm:text-sm font-black text-slate-900">
+                معاينة الفاتورة ({invoice.number})
+              </h2>
 
-            {/* Tab Switcher: Preview vs Audit Log */}
-            <div className="flex items-center bg-slate-200 rounded-lg p-0.5 text-xs font-bold">
-              <button
-                type="button"
-                onClick={() => setActiveTab('preview')}
-                className={`px-2.5 sm:px-3 py-1 rounded-md transition-all flex items-center gap-1.5 cursor-pointer ${
-                  activeTab === 'preview'
-                    ? 'bg-white text-slate-950 shadow-2xs font-black'
-                    : 'text-slate-600 hover:text-black'
-                }`}
-              >
-                <Eye className="w-3.5 h-3.5" />
-                <span>معاينة الفاتورة</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('audit')}
-                className={`px-2.5 sm:px-3 py-1 rounded-md transition-all flex items-center gap-1.5 cursor-pointer ${
-                  activeTab === 'audit'
-                    ? 'bg-blue-600 text-white shadow-2xs font-black'
-                    : 'text-slate-700 hover:text-blue-700'
-                }`}
-                title="عرض سجل تاريخ إنشاء وتعديل الفاتورة مع التواريخ والأوقات"
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
-                <span>سجل الرقابة والتدقيق</span>
-                <span className={`px-1.5 py-0.2 rounded-full text-[9px] font-mono ${
-                  activeTab === 'audit' ? 'bg-white/20 text-white' : 'bg-slate-300 text-slate-700'
-                }`}>
-                  {auditLogs.length}
-                </span>
-              </button>
-            </div>
-            
-            {/* Paper Size Selector (Only in preview tab) */}
-            {activeTab === 'preview' && (
-              <div className="flex items-center bg-slate-200 rounded-lg p-0.5 text-xs font-bold">
+              {/* Tab Switcher: Preview vs Audit Log */}
+              <div className="inline-flex bg-slate-200/80 rounded-lg p-0.5 text-xs font-bold">
                 <button
                   type="button"
-                  onClick={() => setPaperSize('A5')}
-                  className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
-                    paperSize === 'A5' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
+                  onClick={() => setActiveTab('preview')}
+                  className={`px-2.5 py-1 rounded-md transition-all flex items-center gap-1 cursor-pointer ${
+                    activeTab === 'preview'
+                      ? 'bg-white text-slate-950 shadow-2xs font-black'
+                      : 'text-slate-600 hover:text-black'
                   }`}
-                  title="مقاس A5 (نصف ورقة - 148×210 مم)"
                 >
-                  مقاس A5 (نصف ورقة)
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>معاينة الفاتورة</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setPaperSize('A4')}
-                  className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
-                    paperSize === 'A4' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
+                  onClick={() => setActiveTab('audit')}
+                  className={`px-2.5 py-1 rounded-md transition-all flex items-center gap-1 cursor-pointer ${
+                    activeTab === 'audit'
+                      ? 'bg-blue-600 text-white shadow-2xs font-black'
+                      : 'text-slate-700 hover:text-blue-700'
                   }`}
-                  title="مقاس A4 (ورقة كاملة - 210×297 مم)"
+                  title="عرض سجل تاريخ إنشاء وتعديل الفاتورة"
                 >
-                  مقاس A4 (ورقة كاملة)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPaperSize('thermal')}
-                  className={`px-2.5 sm:px-3 py-1 rounded-md transition-all cursor-pointer ${
-                    paperSize === 'thermal' ? 'bg-white text-slate-950 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
-                  }`}
-                  title="طباعة حراري (80 مم)"
-                >
-                  حراري (80mm)
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>التدقيق ({auditLogs.length})</span>
                 </button>
               </div>
-            )}
+            </div>
 
-            {/* Scale toggle for mobile */}
-            {activeTab === 'preview' && (
-              <button
-                type="button"
-                onClick={() => setFitScreen(!fitScreen)}
-                className={`hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold transition-all border cursor-pointer ${
-                  fitScreen
-                    ? 'bg-slate-100 text-slate-800 border-slate-300'
-                    : 'bg-white text-slate-600 border-slate-200'
-                }`}
-                title="ملاءمة الشاشة / الحجم الكامل"
-              >
-                <Maximize2 className="w-3.5 h-3.5" />
-                <span>{fitScreen ? 'ملاءمة العرض' : '100%'}</span>
-              </button>
-            )}
-          </div>
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              {activeTab === 'preview' ? (
+                <>
+                  {/* Direct PDF Download */}
+                  <button
+                    type="button"
+                    onClick={handleDownloadPdf}
+                    disabled={isExportingPdf}
+                    className="px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 transition-all flex items-center gap-1 cursor-pointer"
+                    title="تصدير وتحميل PDF صفحة واحدة كاملة"
+                  >
+                    {isExportingPdf ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-600" />
+                    ) : exportedSuccess ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-600" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5 text-slate-700" />
+                    )}
+                    <span className="hidden xs:inline">{exportedSuccess ? 'تم التحميل!' : 'تحميل PDF'}</span>
+                  </button>
 
-          <div className="flex items-center gap-1.5 sm:gap-2">
-            {activeTab === 'preview' ? (
-              <>
-                {/* Direct PDF Download */}
+                  {/* Instant Print Button */}
+                  <button
+                    type="button"
+                    onClick={handlePrint}
+                    className="px-3 sm:px-4 py-1.5 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-black transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                    title="طباعة فورية بكامل الإطارات صفحة واحدة"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>طباعة فورية</span>
+                  </button>
+                </>
+              ) : (
                 <button
                   type="button"
-                  onClick={handleDownloadPdf}
-                  disabled={isExportingPdf}
-                  className={`px-3 py-1.5 sm:py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
-                    exportedSuccess
-                      ? 'bg-emerald-600 text-white'
-                      : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300'
-                  }`}
-                  title="تصدير وتحميل PDF صفحة واحدة كاملة"
+                  onClick={() => window.print()}
+                  className="px-3 sm:px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  title="طباعة تقرير سجل التدقيق"
                 >
-                  {isExportingPdf ? (
-                    <Loader2 className="w-4 h-4 animate-spin text-slate-600" />
-                  ) : exportedSuccess ? (
-                    <Check className="w-4 h-4" />
-                  ) : (
-                    <Download className="w-4 h-4 text-slate-700" />
-                  )}
-                  <span className="hidden xs:inline">{exportedSuccess ? 'تم التحميل!' : 'تحميل PDF'}</span>
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>طباعة</span>
                 </button>
+              )}
 
-                {/* Instant Print Button */}
-                <button
-                  type="button"
-                  onClick={handlePrint}
-                  className="px-3 sm:px-4 py-1.5 sm:py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-                  title="طباعة فورية بكامل الإطارات صفحة واحدة"
-                >
-                  <Printer className="w-4 h-4" />
-                  <span>طباعة فورية</span>
-                </button>
-              </>
-            ) : (
               <button
                 type="button"
-                onClick={() => window.print()}
-                className="px-3 sm:px-4 py-1.5 sm:py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-                title="طباعة تقرير سجل التدقيق"
+                onClick={onClose}
+                className="p-1.5 text-slate-400 hover:text-black rounded-lg hover:bg-slate-200 cursor-pointer"
+                title="إغلاق"
               >
-                <Printer className="w-4 h-4" />
-                <span>طباعة سجل التدقيق</span>
+                <X className="w-5 h-5" />
               </button>
-            )}
-
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1.5 text-slate-400 hover:text-black rounded-lg hover:bg-slate-200 cursor-pointer"
-              title="إغلاق"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            </div>
           </div>
+
+          {/* Sub Row: Paper Size Selector (Only in preview tab) */}
+          {activeTab === 'preview' && (
+            <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-200/70 text-xs flex-wrap">
+              <div className="flex items-center gap-1">
+                <span className="text-[11px] font-bold text-slate-500 ml-1">حجم الورق:</span>
+                <div className="inline-flex bg-slate-200/80 rounded-lg p-0.5 font-bold">
+                  <button
+                    type="button"
+                    onClick={() => setPaperSize('A5')}
+                    className={`px-2.5 py-0.5 rounded-md text-[11px] transition-all cursor-pointer ${
+                      paperSize === 'A5' ? 'bg-blue-600 text-white shadow-xs font-black' : 'text-slate-600 hover:text-black'
+                    }`}
+                    title="مقاس A5 (نصف ورقة - 148×210 مم)"
+                  >
+                    مقاس A5 (نصف ورقة - افتراضي)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaperSize('A4')}
+                    className={`px-2.5 py-0.5 rounded-md text-[11px] transition-all cursor-pointer ${
+                      paperSize === 'A4' ? 'bg-slate-900 text-white shadow-xs font-black' : 'text-slate-600 hover:text-black'
+                    }`}
+                    title="مقاس A4 (ورقة كاملة - 210×297 مم)"
+                  >
+                    مقاس A4 (ورقة كاملة)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaperSize('thermal')}
+                    className={`px-2.5 py-0.5 rounded-md text-[11px] transition-all cursor-pointer ${
+                      paperSize === 'thermal' ? 'bg-slate-900 text-white shadow-xs font-black' : 'text-slate-600 hover:text-black'
+                    }`}
+                    title="طباعة حراري (80 مم)"
+                  >
+                    حراري (80mm)
+                  </button>
+                </div>
+              </div>
+              <span className="text-[10px] text-slate-500 hidden sm:inline font-medium">
+                عرض A5 متناسق ومنظم صفحة واحدة بدون أي تمرير أفقي
+              </span>
+            </div>
+          )}
         </div>
 
         {activeTab === 'preview' ? (
           /* Invoice Printable Viewport */
-          <div className="invoice-preview-viewport p-2 sm:p-5 overflow-y-auto overflow-x-auto flex-1 bg-slate-100 flex flex-col items-center">
-          <div
-            id="invoice-printable-content"
-            className={`transition-transform flex flex-col items-center ${
-              paperSize === 'A4'
-                ? 'invoice-wrapper-A4'
-                : paperSize === 'A5'
-                ? 'invoice-wrapper-A5'
-                : 'invoice-wrapper-thermal'
-            }`}
-            style={{
-              width: `${paperBaseWidth}px`,
-              minWidth: `${paperBaseWidth}px`,
-              maxWidth: `${paperBaseWidth}px`,
-              transformOrigin: 'top center',
-              transform: mobileScale < 1 ? `scale(${mobileScale})` : undefined,
-              marginBottom: mobileScale < 1 ? `-${Math.round((1 - mobileScale) * 650)}px` : undefined
-            }}
-            data-paper-size={paperSize}
-          >
+          <div className="invoice-preview-viewport p-2 sm:p-5 overflow-y-auto overflow-x-hidden flex-1 bg-slate-100 flex flex-col items-center w-full">
+            <div
+              id="invoice-printable-content"
+              className={`w-full flex flex-col items-center transition-all ${
+                paperSize === 'A4'
+                  ? 'invoice-wrapper-A4'
+                  : paperSize === 'A5'
+                  ? 'invoice-wrapper-A5'
+                  : 'invoice-wrapper-thermal'
+              }`}
+              style={{
+                maxWidth: paperSize === 'thermal' ? '320px' : paperSize === 'A4' ? '794px' : '560px',
+                width: '100%'
+              }}
+              data-paper-size={paperSize}
+            >
             {/* حاوية المستند النظيفة بمقاس A5 الأصلي المعتمد */}
             <div className="invoice-container">
               <div className="invoice-main-content">
