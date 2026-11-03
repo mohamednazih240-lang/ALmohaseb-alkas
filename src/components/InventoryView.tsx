@@ -46,7 +46,8 @@ import {
   getTodayDate,
   logAudit,
   getProductForBranch,
-  updateProductBranchData
+  updateProductBranchData,
+  isBranchMatch
 } from '../services/accountingStorage';
 import {
   Building2,
@@ -1378,8 +1379,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
               // Invoices
               db.invoices.forEach(inv => {
+                if (!isBranchMatch(inv.branchId, selectedBranchId)) return;
                 const matchItems = inv.items.filter(
-                  it => it.productId === product.id || it.productCode === product.code
+                  it => (it.productId && it.productId === product.id) ||
+                        (it.productCode && it.productCode === product.code) ||
+                        (it.productName && it.productName.trim().toLowerCase() === product.name.trim().toLowerCase())
                 );
                 matchItems.forEach(it => {
                   const isSale = inv.type === 'sale';

@@ -35,7 +35,8 @@ import {
   getTodayDate,
   calculateTreasuryBalance,
   logAudit,
-  deleteTreasuryEntryAndRevert
+  deleteTreasuryEntryAndRevert,
+  isBranchMatch
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
@@ -111,15 +112,15 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
   // Branch-isolated visible data (memoized)
   const visibleTreasury = useMemo(
-    () => db.treasury.filter(t => branchFilter === 'all' || (t.branchId === targetBranchId || (!t.branchId && targetBranchId === 'br_main'))),
+    () => db.treasury.filter(t => branchFilter === 'all' || isBranchMatch(t.branchId, targetBranchId)),
     [db.treasury, branchFilter, targetBranchId]
   );
   const visibleExpenses = useMemo(
-    () => db.expenses.filter(e => branchFilter === 'all' || (e.branchId === targetBranchId || (!e.branchId && targetBranchId === 'br_main'))),
+    () => db.expenses.filter(e => branchFilter === 'all' || isBranchMatch(e.branchId, targetBranchId)),
     [db.expenses, branchFilter, targetBranchId]
   );
   const visibleRevenues = useMemo(
-    () => db.revenues.filter(r => branchFilter === 'all' || (r.branchId === targetBranchId || (!r.branchId && targetBranchId === 'br_main'))),
+    () => db.revenues.filter(r => branchFilter === 'all' || isBranchMatch(r.branchId, targetBranchId)),
     [db.revenues, branchFilter, targetBranchId]
   );
   const visibleSimpleList = subPage === 'expenses' ? visibleExpenses : visibleRevenues;

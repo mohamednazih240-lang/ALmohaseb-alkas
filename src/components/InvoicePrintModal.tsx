@@ -80,17 +80,13 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     : 'بيان مشتريات';
 
   // Helper to extract sequential number starting from 1
+  const rawInvoiceNo = invoice.number?.trim() || (invoice as any).id?.replace(/\D/g, '') || '1';
   const formatInvoiceSerial = (rawNum: string | number | undefined): string => {
     if (!rawNum) return '1';
     const str = String(rawNum).trim();
-    const digits = str.replace(/\D/g, '');
-    if (digits) {
-      const parsed = parseInt(digits, 10);
-      return isNaN(parsed) || parsed === 0 ? '1' : String(parsed);
-    }
     return str || '1';
   };
-  const serialNo = formatInvoiceSerial(invoice.number);
+  const serialNo = formatInvoiceSerial(rawInvoiceNo);
 
   // Extract phone numbers into a list if multiple are provided
   const phoneList = settings.phone
@@ -216,7 +212,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-xs sm:text-sm font-black text-slate-900">
-                معاينة الفاتورة ({invoice.number})
+                معاينة الفاتورة ({rawInvoiceNo})
               </h2>
 
               {/* Tab Switcher: Preview vs Audit Log */}

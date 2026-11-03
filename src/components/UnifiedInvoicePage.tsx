@@ -1491,9 +1491,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     // Reverse previous effects if editing
     if (editingInvoice) {
       // Revert stock specifically for the branch of that invoice
-      const prevBranchId = editingInvoice.branchId || 'br_main';
+      const prevBranchId = editingInvoice.branchId || invoiceBranchId || 'br_mawan';
       editingInvoice.items.forEach(oldItem => {
-        const prod = updated.products.find(p => p.id === oldItem.productId);
+        const prod = updated.products.find(
+          p => (oldItem.productId && p.id === oldItem.productId) ||
+               (oldItem.productCode && p.code.toLowerCase() === oldItem.productCode.toLowerCase()) ||
+               (oldItem.productName && p.name.trim().toLowerCase() === oldItem.productName.trim().toLowerCase())
+        );
         if (prod) {
           const bp = getProductForBranch(prod, prevBranchId);
           let revertedQty = bp.currentQty;
@@ -1511,10 +1515,22 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           if (pIdx > -1) updated.products[pIdx] = updatedProd;
         }
       });
-      updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== editingInvoice.id);
-      updated.treasury = updated.treasury.filter(tr => tr.sourceId !== editingInvoice.id);
-      updated.journals = updated.journals.filter(j => j.sourceId !== editingInvoice.id);
-      updated.invoices = updated.invoices.filter(i => i.id !== editingInvoice.id);
+      updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== editingInvoice.id && sm.refNumber !== editingInvoice.number);
+      updated.treasury = updated.treasury.filter(tr => {
+        if (tr.sourceId === editingInvoice.id || (tr as any).invoiceId === editingInvoice.id) return false;
+        if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(editingInvoice.number).trim()) return false;
+        if (editingInvoice.number && tr.description && (
+          tr.description.includes(`رقم ${editingInvoice.number}`) ||
+          tr.description.includes(`فاتورة مشتريات رقم ${editingInvoice.number}`) ||
+          tr.description.includes(`فاتورة مبيعات رقم ${editingInvoice.number}`) ||
+          tr.description.includes(`مرتجع رقم ${editingInvoice.number}`)
+        )) {
+          return false;
+        }
+        return true;
+      });
+      updated.journals = updated.journals.filter(j => j.sourceId !== editingInvoice.id && j.id !== editingInvoice.journalEntryId);
+      updated.invoices = updated.invoices.filter(i => i.id !== editingInvoice.id && i.number !== editingInvoice.number);
       // Linked vouchers will be updated in-place by syncInvoiceVouchers below without duplicating or changing voucher numbers
     }
 
@@ -1634,7 +1650,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       partyPhone: custPhone,
       warehouseId: updated.warehouses[0]?.id || 'wh_main',
       paymentMethod: mainPaymentMethod,
-      payments: paymentRows.length > 0 ? paymentRows : [{ method: mainPaymentMethod, amount: finalPaid }],
+      payments: settlementType === 'cash'
+        ? [{ method: mainPaymentMethod, amount: netTotal }]
+        : (paymentRows.length > 0 ? paymentRows : [{ method: mainPaymentMethod, amount: finalPaid }]),
       subtotal: itemsSubTotal,
       discount: globalDiscCalculated,
       discountType: invDiscType,
@@ -1793,37 +1811,26 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                            mode === 'purchase_return' ? `استرداد مرتجع مشتريات رقم ${savedInvoice.number}` :
                            `تحصيل فاتورة مبيعات رقم ${savedInvoice.number}`;
 
-      if (savedInvoice.payments && savedInvoice.payments.length > 0) {
-        savedInvoice.payments.forEach(pLine => {
-          if (pLine.amount > 0 && pLine.method !== 'آجل') {
-            updated.treasury.unshift({
-              id: generateId('tr'),
-              date: savedInvoice.date,
-              direction: trDirection,
-              amount: pLine.amount,
-              method: pLine.method,
-              description: `${trActionDesc} (${invoiceBranch.name}) - ${partyName}`,
-              sourceType: mode,
-              sourceId: invId,
-              branchId: invoiceBranchId,
-              branchName: invoiceBranch.name
-            });
-          }
-        });
-      } else if (mainPaymentMethod !== 'آجل') {
-        updated.treasury.unshift({
-          id: generateId('tr'),
-          date: savedInvoice.date,
-          direction: trDirection,
-          amount: finalPaid,
-          method: mainPaymentMethod,
-          description: `${trActionDesc} (${invoiceBranch.name}) - ${partyName}`,
-          sourceType: mode,
-          sourceId: invId,
-          branchId: invoiceBranchId,
-          branchName: invoiceBranch.name
-        });
-      }
+      const activePayments = (savedInvoice.payments && savedInvoice.payments.length > 0)
+        ? savedInvoice.payments
+        : [{ method: mainPaymentMethod, amount: finalPaid }];
+
+      activePayments.forEach(pLine => {
+        if (pLine.amount > 0 && pLine.method !== 'آجل') {
+          updated.treasury.unshift({
+            id: generateId('tr'),
+            date: savedInvoice.date,
+            direction: trDirection,
+            amount: pLine.amount,
+            method: pLine.method,
+            description: `${trActionDesc} (${invoiceBranch.name}) - ${partyName}`,
+            sourceType: mode,
+            sourceId: invId,
+            branchId: invoiceBranchId,
+            branchName: invoiceBranch.name
+          });
+        }
+      });
     }
 
     // 2.5 Update customer / supplier current balances

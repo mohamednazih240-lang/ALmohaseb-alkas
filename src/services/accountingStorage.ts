@@ -828,11 +828,19 @@ export function calculateCustomerBalance(db: AccountingDB, customerId: string, b
     }
   });
 
+export function isBranchMatch(itemBranchId?: string, targetBranchId?: string): boolean {
+  if (!targetBranchId || targetBranchId === 'all') return true;
+  if (itemBranchId === targetBranchId) return true;
+  const isTargetPrimary = targetBranchId === 'br_main' || targetBranchId === 'br_mawan';
+  const isItemPrimary = !itemBranchId || itemBranchId === 'br_main' || itemBranchId === 'br_mawan';
+  return isTargetPrimary && isItemPrimary;
+}
+
   // Subtract sale returns
   db.returns.forEach(r => {
     if (r.type === 'sale' && r.partyId === customerId) {
       if (r.paymentMethod === 'آجل') {
-        if (!branchId || (r.branchId === branchId || (!r.branchId && branchId === 'br_main'))) {
+        if (isBranchMatch(r.branchId, branchId)) {
           balance -= Number(r.total);
         }
       }
@@ -855,7 +863,7 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string, b
   // Add unpaid purchase invoice portions
   db.invoices.forEach(inv => {
     if (inv.type === 'purchase' && inv.partyId === supplierId) {
-      if (!branchId || (inv.branchId === branchId || (!inv.branchId && branchId === 'br_main'))) {
+      if (isBranchMatch(inv.branchId, branchId)) {
         balance += (Number(inv.total) - Number(inv.paid));
       }
     }
@@ -866,7 +874,7 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string, b
     if (v.type === 'payment' && v.partyId === supplierId) {
       const isInvoiceLinked = Boolean(v.invoiceId || (v.referenceNumber && db.invoices.some(i => i.number === v.referenceNumber)));
       if (!isInvoiceLinked) {
-        if (!branchId || (v.branchId === branchId || (!v.branchId && branchId === 'br_main'))) {
+        if (isBranchMatch(v.branchId, branchId)) {
           balance -= Number(v.amount);
         }
       }
@@ -877,7 +885,7 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string, b
   db.returns.forEach(r => {
     if (r.type === 'purchase' && r.partyId === supplierId) {
       if (r.paymentMethod === 'آجل') {
-        if (!branchId || (r.branchId === branchId || (!r.branchId && branchId === 'br_main'))) {
+        if (isBranchMatch(r.branchId, branchId)) {
           balance -= Number(r.total);
         }
       }
@@ -893,7 +901,7 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string, b
 export function calculateTreasuryBalance(db: AccountingDB, method?: PaymentMethod, branchId?: string): number {
   return db.treasury
     .filter(entry => !method || entry.method === method)
-    .filter(entry => !branchId || (entry.branchId === branchId || (!entry.branchId && branchId === 'br_main')))
+    .filter(entry => isBranchMatch(entry.branchId, branchId))
     .reduce((sum, entry) => {
       const amt = Number(entry.amount) || 0;
       return sum + (entry.direction === 'in' ? amt : -amt);
@@ -920,10 +928,7 @@ export function calculateInventoryValuation(db: AccountingDB, branchId?: string)
 export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
   const today = getTodayDate();
 
-  const isTargetBranch = (bId?: string) => {
-    if (!branchId || branchId === 'all') return true;
-    return bId === branchId || (!bId && branchId === 'br_main');
-  };
+  const isTargetBranch = (bId?: string) => isBranchMatch(bId, branchId);
 
   const branchInvoices = db.invoices.filter(i => isTargetBranch(i.branchId));
   const branchExpenses = db.expenses.filter(e => isTargetBranch(e.branchId));
@@ -1341,11 +1346,17 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
  */
 export function getProductForBranch(product: Product, branchId?: string): Product & { branchQty: number } {
   if (!product) return product;
-  const targetBranch = branchId || 'br_main';
+  const targetBranch = branchId || 'br_mawan';
+  const isPrimary = targetBranch === 'br_main' || targetBranch === 'br_mawan';
 
   // Check if branch-specific data is already defined
-  if (product.branchesData && product.branchesData[targetBranch]) {
-    const bData = product.branchesData[targetBranch];
+  const branchKey = isPrimary
+    ? (product.branchesData?.['br_mawan'] ? 'br_mawan' : 'br_main')
+    : targetBranch;
+
+  const bData = product.branchesData?.[branchKey] || (isPrimary ? (product.branchesData?.['br_mawan'] || product.branchesData?.['br_main']) : undefined);
+
+  if (bData) {
     return {
       ...product,
       currentQty: bData.currentQty ?? 0,
@@ -1359,8 +1370,7 @@ export function getProductForBranch(product: Product, branchId?: string): Produc
   }
 
   // If this is a primary branch (br_main or br_mawan) and product hasn't migrated to branchesData yet:
-  const isPrimaryBranch = targetBranch === 'br_main' || targetBranch === 'br_mawan' || !product.branchesData || Object.keys(product.branchesData).length === 0;
-  if (isPrimaryBranch) {
+  if (isPrimary || !product.branchesData || Object.keys(product.branchesData).length === 0) {
     return {
       ...product,
       branchQty: product.currentQty ?? 0,
@@ -1388,12 +1398,13 @@ export function updateProductBranchData(
   branchId: string,
   updates: Partial<BranchProductData>
 ): Product {
-  const targetBranch = branchId || 'br_main';
+  const targetBranch = branchId || 'br_mawan';
   const existingBranchesData = { ...(product.branchesData || {}) };
   const isPrimaryBranch = targetBranch === 'br_main' || targetBranch === 'br_mawan' || !product.branchesData || Object.keys(product.branchesData).length <= 1;
 
   // Current branch numbers (or initial product values for primary branches)
-  const currentBranchData: BranchProductData = existingBranchesData[targetBranch] || {
+  const currentBranchData: BranchProductData = existingBranchesData[targetBranch] ||
+    (isPrimaryBranch ? (existingBranchesData['br_mawan'] || existingBranchesData['br_main']) : undefined) || {
     branchId: targetBranch,
     currentQty: isPrimaryBranch ? (product.currentQty || 0) : 0,
     buyPrice: isPrimaryBranch ? (product.buyPrice || 0) : 0,
@@ -1409,6 +1420,12 @@ export function updateProductBranchData(
   };
 
   existingBranchesData[targetBranch] = updatedBranchData;
+
+  // Keep br_mawan and br_main in lockstep for primary branch
+  if (isPrimaryBranch) {
+    existingBranchesData['br_mawan'] = { ...updatedBranchData, branchId: 'br_mawan' };
+    existingBranchesData['br_main'] = { ...updatedBranchData, branchId: 'br_main' };
+  }
 
   const updatedProduct: Product = {
     ...product,
