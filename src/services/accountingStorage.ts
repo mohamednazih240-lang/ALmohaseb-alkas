@@ -46,19 +46,8 @@ const IDB_NAME = 'hesabaty_accounting_db';
 const IDB_STORE = 'erp_storage';
 const IDB_KEY = 'main_database_state';
 
-// Whitelist / Blacklist protection: Strictly purge all invoices and records belonging to Ekhwa
-export const PURGED_EKHWA_INVOICE_IDS = new Set<string>([
-  'inv_mvt8tz8g_bdbs8',
-  'inv_mvt8m7y6_b60qr',
-  'inv_mvt7x4uk_0llcd',
-  'inv_mvobnimq_4pxcf',
-  'inv_mvob1d3h_4g7xe',
-  'inv_mvnuoaar_6fiye',
-  'inv_mvnsulgb_3d4sv',
-  'inv_mvcqzqlx_yq274',
-  'inv_mvcrfi1p_z3y8d',
-  'inv_mvcqlpcp_or9qr'
-]);
+// Whitelist / Blacklist: No automatic purging or filtering. All user transactions are preserved permanently.
+export const PURGED_EKHWA_INVOICE_IDS = new Set<string>();
 
 function openIndexedDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -372,33 +361,6 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.currentUser = db.users[0];
   }
 
-  // Strictly purge ONLY obsolete dummy test invoice IDs if present, NEVER filter by real party names!
-  if (db.invoices) {
-    db.invoices = db.invoices.filter(i => {
-      if (!i || !i.id) return false;
-      if (PURGED_EKHWA_INVOICE_IDS.has(i.id)) return false;
-      return true;
-    });
-  }
-
-  if (db.vouchers) {
-    db.vouchers = db.vouchers.filter(v => {
-      if (!v || !v.id) return false;
-      if (v.invoiceId && PURGED_EKHWA_INVOICE_IDS.has(v.invoiceId)) return false;
-      return true;
-    });
-  }
-
-  if (db.stockMovements) {
-    db.stockMovements = db.stockMovements.filter(sm => !sm.sourceId || !PURGED_EKHWA_INVOICE_IDS.has(sm.sourceId));
-  }
-  if (db.treasury) {
-    db.treasury = db.treasury.filter(tr => !tr.sourceId || !PURGED_EKHWA_INVOICE_IDS.has(tr.sourceId));
-  }
-  if (db.journals) {
-    db.journals = db.journals.filter(j => !j.sourceId || !PURGED_EKHWA_INVOICE_IDS.has(j.sourceId));
-  }
-
   // Ensure "شركة الرحمة للحدايد والبويات" supplier is registered and never lost
   const rahmaSupplierName = 'شركة الرحمة للحدايد والبويات';
   let rahmaSupplier = db.suppliers.find(s => s.name?.includes('الرحمة') || s.name === rahmaSupplierName);
@@ -419,125 +381,18 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.suppliers.unshift(rahmaSupplier);
   }
 
-  // Restore and guarantee the purchase invoice for شركة الرحمة للحدايد والبويات (Invoice #17)
-  const existingRahmaInv = db.invoices.find(
+  // Ensure Invoice #17 preserves Ahmed Nazih as creator and Mohamed Nazih as modifier, with all items untouched
+  const inv17 = db.invoices?.find(
     i => (i.number === '17' && (i.type === 'purchase' || i.invoiceKind === 'purchase')) ||
          (i.partyName && i.partyName.includes('الرحمة'))
   );
-
-  const rahmaTreasury = (db.treasury || []).find(
-    tr => tr.description?.includes('الرحمة') || tr.description?.includes('فاتورة مشتريات رقم 17')
-  );
-
-  if (!existingRahmaInv) {
-    const invId = rahmaTreasury?.sourceId || 'inv_purchase_rahma_17';
-    // Check if we have stock movements recorded for it
-    const linkedSm = (db.stockMovements || []).filter(sm => sm.refNumber === '17' || sm.sourceId === invId);
-    let items = linkedSm.map(sm => ({
-      productId: sm.productId,
-      productCode: '',
-      productName: sm.productName,
-      unit: 'قطعة',
-      spec: 'توريدات وبضاعة حدايد وبويات',
-      qty: Math.abs(sm.qtyChange) || 1,
-      unitPrice: sm.unitCost || 3058.34,
-      costPrice: sm.unitCost || 3058.34,
-      discount: 0,
-      taxRate: 0,
-      total: (Math.abs(sm.qtyChange) || 1) * (sm.unitCost || 3058.34)
-    }));
-
-    if (items.length === 0) {
-      items = [
-        {
-          productId: 'prod_rahma_items_17',
-          productCode: 'PRD-101',
-          productName: 'بضاعة وتوريدات حدايد وبويات',
-          unit: 'قطعة',
-          spec: 'أصناف وتوريدات حدايد وبويات ومستلزمات',
-          qty: 1,
-          unitPrice: 3058.34,
-          costPrice: 3058.34,
-          discount: 0,
-          taxRate: 0,
-          total: 3058.34
-        }
-      ];
+  if (inv17) {
+    if (!inv17.createdBy || inv17.createdBy === 'مدير النظام') {
+      inv17.createdBy = 'Ahmed Nazih';
     }
-
-    const calcTotal = items.reduce((s, it) => s + it.total, 0) || 3058.34;
-
-    const restoredInv: Invoice = {
-      id: invId,
-      number: '17',
-      type: 'purchase',
-      invoiceKind: 'purchase',
-      date: rahmaTreasury?.date || '2026-11-02',
-      time: '12:43',
-      priceType: 'buy',
-      partyId: rahmaSupplier.id,
-      partyCode: rahmaSupplier.code,
-      partyName: rahmaSupplier.name,
-      partyPhone: rahmaSupplier.phone || '',
-      warehouseId: 'wh_mawan',
-      paymentMethod: 'نقدي',
-      payments: [{ method: 'نقدي', amount: calcTotal }],
-      subtotal: calcTotal,
-      discount: 0,
-      tax: 0,
-      total: calcTotal,
-      paid: calcTotal,
-      remaining: 0,
-      status: 'مدفوع',
-      branchId: 'br_mawan',
-      branchName: 'الفرع الرئيسي - شركة الموان',
-      items,
-      createdBy: 'Mohamed Nazih',
-      createdAt: '2026-11-02T12:43:00Z',
-      updatedAt: new Date().toISOString()
-    };
-    db.invoices.unshift(restoredInv);
-  } else {
-    // If invoice exists but its items were accidentally cleared
-    if (!existingRahmaInv.items || existingRahmaInv.items.length === 0) {
-      const linkedSm = (db.stockMovements || []).filter(
-        sm => sm.refNumber === existingRahmaInv.number || sm.sourceId === existingRahmaInv.id
-      );
-      if (linkedSm.length > 0) {
-        existingRahmaInv.items = linkedSm.map(sm => ({
-          productId: sm.productId,
-          productCode: '',
-          productName: sm.productName,
-          unit: 'قطعة',
-          spec: 'توريدات وبضاعة حدايد وبويات',
-          qty: Math.abs(sm.qtyChange) || 1,
-          unitPrice: sm.unitCost || 3058.34,
-          costPrice: sm.unitCost || 3058.34,
-          discount: 0,
-          taxRate: 0,
-          total: (Math.abs(sm.qtyChange) || 1) * (sm.unitCost || 3058.34)
-        }));
-      } else {
-        existingRahmaInv.items = [
-          {
-            productId: 'prod_rahma_items_17',
-            productCode: 'PRD-101',
-            productName: 'بضاعة وتوريدات حدايد وبويات',
-            unit: 'قطعة',
-            spec: 'أصناف وتوريدات حدايد وبويات ومستلزمات',
-            qty: 1,
-            unitPrice: existingRahmaInv.total || 3058.34,
-            costPrice: existingRahmaInv.total || 3058.34,
-            discount: 0,
-            taxRate: 0,
-            total: existingRahmaInv.total || 3058.34
-          }
-        ];
-      }
-      existingRahmaInv.total = existingRahmaInv.items.reduce((s, it) => s + it.total, 0) || 3058.34;
-      existingRahmaInv.paid = existingRahmaInv.total;
-      existingRahmaInv.remaining = 0;
-      existingRahmaInv.status = 'مدفوع';
+    // If modified, ensure editor is Mohamed Nazih as intended
+    if (!inv17.updatedBy || inv17.updatedBy === inv17.createdBy) {
+      inv17.updatedBy = 'Mohamed Nazih';
     }
   }
 
@@ -1576,34 +1431,88 @@ export function updateProductBranchData(
 /**
  * Union & merge invoices safely by ID to prevent any loss across phones and concurrent updates
  */
-export function isPurgedEkhwaInvoice(inv: Invoice | null | undefined): boolean {
-  if (!inv || !inv.id) return true;
-  if (PURGED_EKHWA_INVOICE_IDS.has(inv.id)) return true;
+export function isPurgedEkhwaInvoice(_inv: Invoice | null | undefined): boolean {
   return false;
 }
 
 export function mergeInvoices(existingList: Invoice[] = [], incomingList: Invoice[] = []): Invoice[] {
   const map = new Map<string, Invoice>();
+
+  const mergeTwoInvoices = (a: Invoice, b: Invoice): Invoice => {
+    const timeA = new Date(a.updatedAt || a.createdAt || a.date || 0).getTime();
+    const timeB = new Date(b.updatedAt || b.createdAt || b.date || 0).getTime();
+    const itemsA = a.items?.length || 0;
+    const itemsB = b.items?.length || 0;
+
+    // Prefer the richer one if items count differs; otherwise newer timestamp
+    const primary = itemsA !== itemsB ? (itemsA > itemsB ? a : b) : (timeB >= timeA ? b : a);
+    const secondary = primary === b ? a : b;
+
+    // Original creator is preserved
+    const effectiveCreatedBy = a.createdBy || b.createdBy;
+    const effectiveCreatedById = a.createdById || b.createdById;
+    const effectiveCreatedAt = a.createdAt || b.createdAt;
+
+    // Editor is captured
+    let effectiveUpdatedBy = b.updatedBy || a.updatedBy;
+    if (!effectiveUpdatedBy && b.createdBy && a.createdBy && b.createdBy !== a.createdBy) {
+      effectiveUpdatedBy = timeB > timeA ? b.createdBy : a.createdBy;
+    }
+    const effectiveUpdatedById = b.updatedById || a.updatedById;
+    const effectiveUpdatedAt = b.updatedAt || a.updatedAt || (effectiveUpdatedBy ? new Date().toISOString() : undefined);
+
+    // Merge audit log
+    const seenAudits = new Set<string>();
+    const mergedAudit = [...(a.auditLog || []), ...(b.auditLog || [])].filter(aud => {
+      if (!aud.id || seenAudits.has(aud.id)) return false;
+      seenAudits.add(aud.id);
+      return true;
+    }).sort((x, y) => new Date(y.timestamp).getTime() - new Date(x.timestamp).getTime());
+
+    return {
+      ...primary,
+      items: primary.items && primary.items.length > 0 ? primary.items : (secondary.items || []),
+      createdBy: effectiveCreatedBy,
+      createdById: effectiveCreatedById,
+      createdAt: effectiveCreatedAt,
+      updatedBy: effectiveUpdatedBy,
+      updatedById: effectiveUpdatedById,
+      updatedAt: effectiveUpdatedAt,
+      auditLog: mergedAudit
+    };
+  };
+
   (existingList || []).forEach(inv => {
-    if (inv && inv.id && !isPurgedEkhwaInvoice(inv)) {
-      map.set(inv.id, inv);
+    if (inv && (inv.id || inv.number)) {
+      if (inv.id) map.set(inv.id, inv);
+      if (inv.number) map.set(`${inv.type || inv.invoiceKind}_${inv.number}`, inv);
     }
   });
+
   (incomingList || []).forEach(inv => {
-    if (inv && inv.id && !isPurgedEkhwaInvoice(inv)) {
-      const existing = map.get(inv.id);
+    if (inv && (inv.id || inv.number)) {
+      const byId = inv.id ? map.get(inv.id) : undefined;
+      const byNum = inv.number ? map.get(`${inv.type || inv.invoiceKind}_${inv.number}`) : undefined;
+      const existing = byId || byNum;
+
       if (!existing) {
-        map.set(inv.id, inv);
+        if (inv.id) map.set(inv.id, inv);
+        if (inv.number) map.set(`${inv.type || inv.invoiceKind}_${inv.number}`, inv);
       } else {
-        const existingTime = new Date(existing.updatedAt || existing.createdAt || existing.date || 0).getTime();
-        const incomingTime = new Date(inv.updatedAt || inv.createdAt || inv.date || 0).getTime();
-        if (incomingTime >= existingTime) {
-          map.set(inv.id, inv);
-        }
+        const merged = mergeTwoInvoices(existing, inv);
+        if (merged.id) map.set(merged.id, merged);
+        if (merged.number) map.set(`${merged.type || merged.invoiceKind}_${merged.number}`, merged);
       }
     }
   });
-  return Array.from(map.values()).sort((a, b) => (b.createdAt || b.date || '').localeCompare(a.createdAt || a.date || ''));
+
+  const unique = new Map<string, Invoice>();
+  Array.from(map.values()).forEach(inv => {
+    const key = inv.id || `${inv.type || inv.invoiceKind}_${inv.number}`;
+    unique.set(key, inv);
+  });
+
+  return Array.from(unique.values()).sort((a, b) => (b.createdAt || b.date || '').localeCompare(a.createdAt || a.date || ''));
 }
 
 /**
@@ -1611,20 +1520,41 @@ export function mergeInvoices(existingList: Invoice[] = [], incomingList: Invoic
  */
 export function mergeVouchers(existingList: Voucher[] = [], incomingList: Voucher[] = []): Voucher[] {
   const map = new Map<string, Voucher>();
-  const isPurgedVoucher = (v: Voucher) => {
-    if (!v || !v.id) return true;
-    if (v.invoiceId && PURGED_EKHWA_INVOICE_IDS.has(v.invoiceId)) return true;
-    return false;
-  };
-
   (existingList || []).forEach(v => {
-    if (v && v.id && !isPurgedVoucher(v)) {
-      map.set(v.id, v);
-    }
+    if (v && v.id) map.set(v.id, v);
   });
   (incomingList || []).forEach(v => {
-    if (v && v.id && !isPurgedVoucher(v)) {
-      map.set(v.id, v);
+    if (v && v.id) {
+      const existing = map.get(v.id);
+      map.set(v.id, existing ? { ...existing, ...v } : v);
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
+export function mergeTreasury(existingList: TreasuryEntry[] = [], incomingList: TreasuryEntry[] = []): TreasuryEntry[] {
+  const map = new Map<string, TreasuryEntry>();
+  (existingList || []).forEach(tr => {
+    if (tr && tr.id) map.set(tr.id, tr);
+  });
+  (incomingList || []).forEach(tr => {
+    if (tr && tr.id) {
+      const existing = map.get(tr.id);
+      map.set(tr.id, existing ? { ...existing, ...tr } : tr);
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
+export function mergeStockMovements(existingList: StockMovement[] = [], incomingList: StockMovement[] = []): StockMovement[] {
+  const map = new Map<string, StockMovement>();
+  (existingList || []).forEach(sm => {
+    if (sm && sm.id) map.set(sm.id, sm);
+  });
+  (incomingList || []).forEach(sm => {
+    if (sm && sm.id) {
+      const existing = map.get(sm.id);
+      map.set(sm.id, existing ? { ...existing, ...sm } : sm);
     }
   });
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));

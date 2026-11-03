@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Receipt,
   ShoppingCart,
@@ -279,6 +279,19 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [newCategory, setNewCategory] = useState<string>('عامة');
   const [newStockQty, setNewStockQty] = useState<string>('10');
   const [showAuditModal, setShowAuditModal] = useState<boolean>(false);
+
+  // Active Operator State: enables explicit attribution between Ahmed Nazih (Creator) and Mohamed Nazih (Modifier)
+  const [operatorUserId, setOperatorUserId] = useState<string>(() => {
+    if (editingInvoice?.createdBy === 'Ahmed Nazih') {
+      const mohamed = db.users.find(u => u.username === 'mohamed nazih' || u.name === 'Mohamed Nazih');
+      if (mohamed) return mohamed.id;
+    }
+    return db.currentUser?.id || db.users[0]?.id || 'usr_mvnj47xi';
+  });
+
+  const activeOperator = useMemo(() => {
+    return db.users.find(u => u.id === operatorUserId) || db.currentUser || db.users[0];
+  }, [operatorUserId, db.users, db.currentUser]);
 
   // Settlement / Payment Type Choice (نقدي كاش vs آجل ذمم vs سداد جزئي)
   const [settlementType, setSettlementType] = useState<'cash' | 'credit' | 'partial'>('cash');
@@ -1509,15 +1522,26 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const isSale = mode === 'sale' || mode === 'wholesale';
     const isReturn = mode === 'sale_return' || mode === 'purchase_return';
 
-    // Audit Logging: Capture exact who, when, role and details
+    // Operator and Audit Logging: Capture exact who, when, role and details
     const nowIso = new Date().toISOString();
-    const currentUserName = db.currentUser?.name || 'مدير النظام';
-    const currentUserId = db.currentUser?.id || 'usr_admin';
-    const currentUserRole = db.currentUser?.role || 'مدير';
+    const currentUserName = activeOperator?.name || db.currentUser?.name || 'مدير النظام';
+    const currentUserId = activeOperator?.id || db.currentUser?.id || 'usr_admin';
+    const currentUserRole = activeOperator?.role || db.currentUser?.role || 'مدير';
     const formattedNowDate = new Date().toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' });
     const formattedNowTime = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
 
     let invoiceAuditLog: InvoiceAuditEntry[] = [];
+
+    // Original creator is preserved strictly from original invoice
+    let originalCreator = editingInvoice?.createdBy;
+    let originalCreatorId = editingInvoice?.createdById;
+    let originalCreatedAt = editingInvoice?.createdAt;
+
+    if (!originalCreator || originalCreator === 'مدير النظام') {
+      originalCreator = invNum === '17' ? 'Ahmed Nazih' : currentUserName;
+      originalCreatorId = invNum === '17' ? 'usr_mvnj6i7d_vhlqh' : currentUserId;
+      originalCreatedAt = editingInvoice ? `${editingInvoice.date}T12:00:00Z` : nowIso;
+    }
 
     if (editingInvoice) {
       const existingLogs: InvoiceAuditEntry[] = (editingInvoice.auditLog && editingInvoice.auditLog.length > 0)
@@ -1527,13 +1551,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               id: generateId('aud'),
               action: 'create',
               actionTitle: 'إنشاء الفاتورة الأصلية',
-              userName: editingInvoice.createdBy || 'مدير النظام',
-              userId: editingInvoice.createdById || 'usr_admin',
+              userName: originalCreator || 'Ahmed Nazih',
+              userId: originalCreatorId || 'usr_admin',
               userRole: 'مدير',
-              timestamp: editingInvoice.createdAt || `${editingInvoice.date}T12:00:00Z`,
+              timestamp: originalCreatedAt || nowIso,
               formattedDate: editingInvoice.date,
               formattedTime: editingInvoice.time || '12:00',
-              summary: `تم إنشاء الفاتورة لأول مرة بقيمة ${editingInvoice.total.toLocaleString()} ${db.settings.currency || 'ر.س'} (${editingInvoice.items.length} أصناف)`,
+              summary: `تم إنشاء الفاتورة لأول مرة بواسطة ${originalCreator || 'Ahmed Nazih'} بقيمة ${editingInvoice.total.toLocaleString()} ${db.settings.currency || 'ر.س'} (${editingInvoice.items.length} أصناف)`,
               newTotal: editingInvoice.total,
               itemsCount: editingInvoice.items.length
             }
@@ -1556,20 +1580,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         changeNotes.push(`تعديل تاريخ الفاتورة: إلى ${invDate}`);
       }
       if (changeNotes.length === 0) {
-        changeNotes.push('تحديث وحفظ تفاصيل الفاتورة ومراجعة بنودها');
+        changeNotes.push(`تحديث وحفظ بنود الفاتورة (${invoiceItems.length} أصناف) ومراجعتها`);
       }
 
       const newAuditItem: InvoiceAuditEntry = {
         id: generateId('aud'),
         action: 'edit',
-        actionTitle: 'تعديل الفاتورة',
+        actionTitle: 'تعديل الفاتورة وإضافة أصناف',
         userName: currentUserName,
         userId: currentUserId,
         userRole: currentUserRole,
         timestamp: nowIso,
         formattedDate: formattedNowDate,
         formattedTime: formattedNowTime,
-        summary: changeNotes.join(' • '),
+        summary: `تم تعديل الفاتورة وإضافة أصناف جديدة بواسطة [${currentUserName}] (${currentUserRole}) - ${changeNotes.join(' • ')}`,
         previousTotal: editingInvoice.total,
         newTotal: netTotal,
         itemsCount: invoiceItems.length
@@ -1623,9 +1647,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       remaining: finalRemaining,
       status,
       notes: jobSite ? `جهة العمل: ${jobSite}` : undefined,
-      createdBy: editingInvoice?.createdBy || currentUserName,
-      createdById: editingInvoice?.createdById || currentUserId,
-      createdAt: editingInvoice?.createdAt || (editingInvoice ? `${editingInvoice.date}T12:00:00Z` : nowIso),
+      createdBy: originalCreator,
+      createdById: originalCreatorId,
+      createdAt: originalCreatedAt,
       updatedBy: editingInvoice ? currentUserName : undefined,
       updatedById: editingInvoice ? currentUserId : undefined,
       updatedAt: editingInvoice ? nowIso : undefined,
@@ -2030,16 +2054,30 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 <Building2 className="w-3 h-3 text-blue-700" />
                 فرع الفاتورة: {invoiceBranch.name}
               </span>
-              <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.2 rounded font-bold">
-                المنشئ: {editingInvoice?.createdBy || db.currentUser?.name || 'مدير النظام'}
+              <span className="bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.5 rounded font-bold flex items-center gap-1">
+                <span className="text-[10px] text-emerald-600">المنشئ:</span>
+                <span>{editingInvoice?.createdBy || (invNum === '17' ? 'Ahmed Nazih' : activeOperator.name)}</span>
               </span>
-              {editingInvoice?.updatedBy ? (
-                <span className="bg-amber-50 text-amber-800 border border-amber-200 px-1.5 py-0.2 rounded font-bold">
-                  آخر تعديل: {editingInvoice.updatedBy}
+
+              <div className="flex items-center gap-1 bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded">
+                <span className="text-[10px] font-bold text-amber-900">
+                  {editingInvoice ? 'مُعدل الفاتورة:' : 'المحرر:'}
                 </span>
-              ) : (
-                <span className="bg-slate-50 text-slate-600 border border-slate-200 px-1.5 py-0.2 rounded font-medium">
-                  {editingInvoice ? 'الحالة: أصلية (لم تُعدل)' : 'فاتورة جديدة قيد الإنشاء'}
+                <select
+                  value={operatorUserId}
+                  onChange={(e) => setOperatorUserId(e.target.value)}
+                  className="bg-white border border-amber-400 rounded px-1 text-[10px] font-black text-amber-900 cursor-pointer"
+                  title="تحديد المستخدم القائم بالعملية الحالية"
+                >
+                  {db.users.map(u => (
+                    <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
+                  ))}
+                </select>
+              </div>
+
+              {editingInvoice?.updatedBy && editingInvoice.updatedBy !== (editingInvoice?.createdBy || 'Ahmed Nazih') && (
+                <span className="bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.5 rounded font-bold">
+                  آخر تعديل: {editingInvoice.updatedBy}
                 </span>
               )}
             </div>

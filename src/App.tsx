@@ -10,6 +10,8 @@ import {
   syncAllExistingInvoiceVouchers,
   mergeInvoices,
   mergeVouchers,
+  mergeTreasury,
+  mergeStockMovements,
   wipeAllInvoicesFromSystem
 } from './services/accountingStorage';
 import {
@@ -188,11 +190,32 @@ export default function App() {
           const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
           const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
           const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
+
+          // Safely merge invoices, vouchers, movements, and treasury so NO item, creator, or editor is EVER lost!
+          const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || []);
+          const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
+          const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
+          const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || []);
+
           const merged: AccountingDB = {
             ...ensuredCloud,
-            currentUser: effectiveUser || ensuredCloud.currentUser || ensuredCloud.users[0]
+            invoices: mergedInvoices,
+            vouchers: mergedVouchers,
+            treasury: mergedTreasury,
+            stockMovements: mergedStockMovements,
+            currentUser: effectiveUser || prevDb.currentUser || ensuredCloud.currentUser || ensuredCloud.users[0]
           };
           saveDatabase(merged);
+
+          // If local had richer invoice data (e.g. newly added items), push the merged state back to cloud immediately
+          const hasRicherLocal = mergedInvoices.some(inv => {
+            const cloudInv = (ensuredCloud.invoices || []).find(ci => ci.id === inv.id || ci.number === inv.number);
+            return !cloudInv || (inv.items?.length || 0) > (cloudInv.items?.length || 0);
+          });
+          if (hasRicherLocal) {
+            pushDatabaseToCloud(merged, true);
+          }
+
           return merged;
         });
       }
@@ -261,10 +284,20 @@ export default function App() {
           setActiveBranchId(effectiveUser.branchId);
         }
 
-        const merged: AccountingDB = sanitizeCompanyDatabase({
-          ...remoteDb,
-          currentUser: effectiveUser || remoteDb.currentUser || remoteDb.users[0]
-        });
+        const ensuredCloud = sanitizeCompanyDatabase(remoteDb);
+        const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || []);
+        const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
+        const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
+        const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || []);
+
+        const merged: AccountingDB = {
+          ...ensuredCloud,
+          invoices: mergedInvoices,
+          vouchers: mergedVouchers,
+          treasury: mergedTreasury,
+          stockMovements: mergedStockMovements,
+          currentUser: effectiveUser || prevDb.currentUser || ensuredCloud.users[0]
+        };
         saveDatabase(merged);
         return merged;
       });
@@ -298,9 +331,19 @@ export default function App() {
               const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
               const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
               const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
+
+              const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || []);
+              const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
+              const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
+              const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || []);
+
               const merged: AccountingDB = {
                 ...ensuredCloud,
-                currentUser: effectiveUser || ensuredCloud.currentUser || ensuredCloud.users[0]
+                invoices: mergedInvoices,
+                vouchers: mergedVouchers,
+                treasury: mergedTreasury,
+                stockMovements: mergedStockMovements,
+                currentUser: effectiveUser || prevDb.currentUser || ensuredCloud.users[0]
               };
               saveDatabase(merged);
               return merged;
