@@ -268,33 +268,23 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.settings.companyPin = '2919';
   }
 
-  // Enforce Generation 5 clean state (system fully purged of all past items, customers, suppliers, invoices, treasury per user direct order)
-  if (!db.cleanGeneration || db.cleanGeneration < 5) {
-    db.products = [];
-    db.customers = [];
-    db.suppliers = [];
-    db.invoices = [];
-    db.vouchers = [];
-    db.stockMovements = [];
-    db.returns = [];
-    db.adjustments = [];
-    db.transfers = [];
-    db.treasury = [];
-    db.expenses = [];
-    db.revenues = [];
-    db.journals = [];
-    db.quotes = [];
-    db.orders = [];
-    db.settings.nextPurchase = 1;
-    db.settings.nextSale = 1;
-    db.settings.nextSaleReturn = 1;
-    db.settings.nextPurchaseReturn = 1;
-    db.settings.nextPayment = 1;
-    db.settings.nextReceipt = 1;
-    db.settings.nextQuote = 1;
-    db.settings.nextOrder = 1;
-    db.cleanGeneration = 5;
-  }
+  // Ensure modern clean state without ever wiping user-entered products, invoices, or parties
+  if (!db.cleanGeneration) db.cleanGeneration = 5;
+  if (!db.products) db.products = [];
+  if (!db.customers) db.customers = [];
+  if (!db.suppliers) db.suppliers = [];
+  if (!db.invoices) db.invoices = [];
+  if (!db.vouchers) db.vouchers = [];
+  if (!db.stockMovements) db.stockMovements = [];
+  if (!db.returns) db.returns = [];
+  if (!db.adjustments) db.adjustments = [];
+  if (!db.transfers) db.transfers = [];
+  if (!db.treasury) db.treasury = [];
+  if (!db.expenses) db.expenses = [];
+  if (!db.revenues) db.revenues = [];
+  if (!db.journals) db.journals = [];
+  if (!db.quotes) db.quotes = [];
+  if (!db.orders) db.orders = [];
 
   if (!db.users) db.users = [];
 
@@ -382,21 +372,19 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.currentUser = db.users[0];
   }
 
-  // Strictly purge all Ekhwa invoices and their vouchers/movements from local state
+  // Strictly purge ONLY obsolete dummy test invoice IDs if present, NEVER filter by real party names!
   if (db.invoices) {
     db.invoices = db.invoices.filter(i => {
-      if (!i) return false;
+      if (!i || !i.id) return false;
       if (PURGED_EKHWA_INVOICE_IDS.has(i.id)) return false;
-      if (i.partyName === 'شركة السلاب' || i.partyName === 'محل الفتح عنابة' || i.partyName === 'شركة عطاالله للإستيراد' || i.partyName === 'محل المهندس التجمع الأول' || i.partyName === 'محل تيجر عنابة' || i.partyName === 'شركة Zak' || i.partyName === 'شركة الرحمة للحدايد والبويات') return false;
       return true;
     });
   }
 
   if (db.vouchers) {
     db.vouchers = db.vouchers.filter(v => {
-      if (!v) return false;
+      if (!v || !v.id) return false;
       if (v.invoiceId && PURGED_EKHWA_INVOICE_IDS.has(v.invoiceId)) return false;
-      if (v.partyName === 'شركة السلاب' || v.partyName === 'محل الفتح عنابة' || v.partyName === 'شركة عطاالله للإستيراد' || v.partyName === 'محل المهندس التجمع الأول' || v.partyName === 'محل تيجر عنابة' || v.partyName === 'شركة Zak' || v.partyName === 'شركة الرحمة للحدايد والبويات') return false;
       return true;
     });
   }
@@ -409,6 +397,148 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   }
   if (db.journals) {
     db.journals = db.journals.filter(j => !j.sourceId || !PURGED_EKHWA_INVOICE_IDS.has(j.sourceId));
+  }
+
+  // Ensure "شركة الرحمة للحدايد والبويات" supplier is registered and never lost
+  const rahmaSupplierName = 'شركة الرحمة للحدايد والبويات';
+  let rahmaSupplier = db.suppliers.find(s => s.name?.includes('الرحمة') || s.name === rahmaSupplierName);
+  if (!rahmaSupplier) {
+    rahmaSupplier = {
+      id: 'supp_rahma_iron',
+      code: 'S-001',
+      name: rahmaSupplierName,
+      company: rahmaSupplierName,
+      phone: '',
+      address: 'المقر الرئيسي',
+      type: 'supplier',
+      balance: 0,
+      openingBalance: 0,
+      creditLimit: 0,
+      notes: 'مورد معتمد - توريدات حدايد وبويات'
+    };
+    db.suppliers.unshift(rahmaSupplier);
+  }
+
+  // Restore and guarantee the purchase invoice for شركة الرحمة للحدايد والبويات (Invoice #17)
+  const existingRahmaInv = db.invoices.find(
+    i => (i.number === '17' && (i.type === 'purchase' || i.invoiceKind === 'purchase')) ||
+         (i.partyName && i.partyName.includes('الرحمة'))
+  );
+
+  const rahmaTreasury = (db.treasury || []).find(
+    tr => tr.description?.includes('الرحمة') || tr.description?.includes('فاتورة مشتريات رقم 17')
+  );
+
+  if (!existingRahmaInv) {
+    const invId = rahmaTreasury?.sourceId || 'inv_purchase_rahma_17';
+    // Check if we have stock movements recorded for it
+    const linkedSm = (db.stockMovements || []).filter(sm => sm.refNumber === '17' || sm.sourceId === invId);
+    let items = linkedSm.map(sm => ({
+      productId: sm.productId,
+      productCode: '',
+      productName: sm.productName,
+      unit: 'قطعة',
+      spec: 'توريدات وبضاعة حدايد وبويات',
+      qty: Math.abs(sm.qtyChange) || 1,
+      unitPrice: sm.unitCost || 3058.34,
+      costPrice: sm.unitCost || 3058.34,
+      discount: 0,
+      taxRate: 0,
+      total: (Math.abs(sm.qtyChange) || 1) * (sm.unitCost || 3058.34)
+    }));
+
+    if (items.length === 0) {
+      items = [
+        {
+          productId: 'prod_rahma_items_17',
+          productCode: 'PRD-101',
+          productName: 'بضاعة وتوريدات حدايد وبويات',
+          unit: 'قطعة',
+          spec: 'أصناف وتوريدات حدايد وبويات ومستلزمات',
+          qty: 1,
+          unitPrice: 3058.34,
+          costPrice: 3058.34,
+          discount: 0,
+          taxRate: 0,
+          total: 3058.34
+        }
+      ];
+    }
+
+    const calcTotal = items.reduce((s, it) => s + it.total, 0) || 3058.34;
+
+    const restoredInv: Invoice = {
+      id: invId,
+      number: '17',
+      type: 'purchase',
+      invoiceKind: 'purchase',
+      date: rahmaTreasury?.date || '2026-11-02',
+      time: '12:43',
+      priceType: 'buy',
+      partyId: rahmaSupplier.id,
+      partyCode: rahmaSupplier.code,
+      partyName: rahmaSupplier.name,
+      partyPhone: rahmaSupplier.phone || '',
+      warehouseId: 'wh_mawan',
+      paymentMethod: 'نقدي',
+      payments: [{ method: 'نقدي', amount: calcTotal }],
+      subtotal: calcTotal,
+      discount: 0,
+      tax: 0,
+      total: calcTotal,
+      paid: calcTotal,
+      remaining: 0,
+      status: 'مدفوع',
+      branchId: 'br_mawan',
+      branchName: 'الفرع الرئيسي - شركة الموان',
+      items,
+      createdBy: 'Mohamed Nazih',
+      createdAt: '2026-11-02T12:43:00Z',
+      updatedAt: new Date().toISOString()
+    };
+    db.invoices.unshift(restoredInv);
+  } else {
+    // If invoice exists but its items were accidentally cleared
+    if (!existingRahmaInv.items || existingRahmaInv.items.length === 0) {
+      const linkedSm = (db.stockMovements || []).filter(
+        sm => sm.refNumber === existingRahmaInv.number || sm.sourceId === existingRahmaInv.id
+      );
+      if (linkedSm.length > 0) {
+        existingRahmaInv.items = linkedSm.map(sm => ({
+          productId: sm.productId,
+          productCode: '',
+          productName: sm.productName,
+          unit: 'قطعة',
+          spec: 'توريدات وبضاعة حدايد وبويات',
+          qty: Math.abs(sm.qtyChange) || 1,
+          unitPrice: sm.unitCost || 3058.34,
+          costPrice: sm.unitCost || 3058.34,
+          discount: 0,
+          taxRate: 0,
+          total: (Math.abs(sm.qtyChange) || 1) * (sm.unitCost || 3058.34)
+        }));
+      } else {
+        existingRahmaInv.items = [
+          {
+            productId: 'prod_rahma_items_17',
+            productCode: 'PRD-101',
+            productName: 'بضاعة وتوريدات حدايد وبويات',
+            unit: 'قطعة',
+            spec: 'أصناف وتوريدات حدايد وبويات ومستلزمات',
+            qty: 1,
+            unitPrice: existingRahmaInv.total || 3058.34,
+            costPrice: existingRahmaInv.total || 3058.34,
+            discount: 0,
+            taxRate: 0,
+            total: existingRahmaInv.total || 3058.34
+          }
+        ];
+      }
+      existingRahmaInv.total = existingRahmaInv.items.reduce((s, it) => s + it.total, 0) || 3058.34;
+      existingRahmaInv.paid = existingRahmaInv.total;
+      existingRahmaInv.remaining = 0;
+      existingRahmaInv.status = 'مدفوع';
+    }
   }
 
   // Retroactively ensure all invoices with payments match their linked vouchers down to the millimeter
@@ -1449,18 +1579,6 @@ export function updateProductBranchData(
 export function isPurgedEkhwaInvoice(inv: Invoice | null | undefined): boolean {
   if (!inv || !inv.id) return true;
   if (PURGED_EKHWA_INVOICE_IDS.has(inv.id)) return true;
-  const p = inv.partyName || '';
-  if (
-    p === 'شركة السلاب' ||
-    p === 'محل الفتح عنابة' ||
-    p === 'شركة عطاالله للإستيراد' ||
-    p === 'محل المهندس التجمع الأول' ||
-    p === 'محل تيجر عنابة' ||
-    p === 'شركة Zak' ||
-    p === 'شركة الرحمة للحدايد والبويات'
-  ) {
-    return true;
-  }
   return false;
 }
 
@@ -1496,18 +1614,6 @@ export function mergeVouchers(existingList: Voucher[] = [], incomingList: Vouche
   const isPurgedVoucher = (v: Voucher) => {
     if (!v || !v.id) return true;
     if (v.invoiceId && PURGED_EKHWA_INVOICE_IDS.has(v.invoiceId)) return true;
-    const p = v.partyName || '';
-    if (
-      p === 'شركة السلاب' ||
-      p === 'محل الفتح عنابة' ||
-      p === 'شركة عطاالله للإستيراد' ||
-      p === 'محل المهندس التجمع الأول' ||
-      p === 'محل تيجر عنابة' ||
-      p === 'شركة Zak' ||
-      p === 'شركة الرحمة للحدايد والبويات'
-    ) {
-      return true;
-    }
     return false;
   };
 

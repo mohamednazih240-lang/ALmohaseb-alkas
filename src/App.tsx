@@ -173,10 +173,8 @@ export default function App() {
       if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
         setDb(prevDb => {
           let effectiveCloud = cloudDb;
-          if (!effectiveCloud.cleanGeneration || effectiveCloud.cleanGeneration < 4) {
-            effectiveCloud = wipeAllInvoicesFromSystem(effectiveCloud);
-            effectiveCloud.cleanGeneration = 4;
-            pushDatabaseToCloud(effectiveCloud, true);
+          if (!effectiveCloud.cleanGeneration) {
+            effectiveCloud.cleanGeneration = 5;
           }
 
           // If local has newly entered products and cloud does not have them yet, preserve and sync them to cloud

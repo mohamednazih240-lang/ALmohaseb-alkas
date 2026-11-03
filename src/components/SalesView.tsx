@@ -150,7 +150,11 @@ export const SalesView: React.FC<SalesViewProps> = ({
     return db.invoices
       .filter(inv => (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') && inv.invoiceKind !== 'sale_return')
       .filter(inv => {
-        const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
+        const matchBranch = branchFilter === 'all' ||
+          !inv.branchId ||
+          inv.branchId === targetBranchId ||
+          (targetBranchId === 'br_mawan' && (inv.branchId === 'br_main' || !inv.branchId)) ||
+          (targetBranchId === 'br_main' && (inv.branchId === 'br_mawan' || !inv.branchId));
         if (!matchBranch) return false;
 
         const s = searchTerm.trim().toLowerCase();
@@ -182,7 +186,11 @@ export const SalesView: React.FC<SalesViewProps> = ({
     return db.invoices
       .filter(inv => inv.invoiceKind === 'sale_return')
       .filter(inv => {
-        const matchBranch = branchFilter === 'all' || (inv.branchId === targetBranchId || (!inv.branchId && targetBranchId === 'br_main'));
+        const matchBranch = branchFilter === 'all' ||
+          !inv.branchId ||
+          inv.branchId === targetBranchId ||
+          (targetBranchId === 'br_mawan' && (inv.branchId === 'br_main' || !inv.branchId)) ||
+          (targetBranchId === 'br_main' && (inv.branchId === 'br_mawan' || !inv.branchId));
         if (!matchBranch) return false;
 
         const s = searchTerm.trim().toLowerCase();
