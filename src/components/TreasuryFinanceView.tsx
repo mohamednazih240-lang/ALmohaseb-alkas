@@ -17,7 +17,8 @@ import {
   AlertCircle,
   X,
   FileText,
-  DollarSign
+  DollarSign,
+  Eye
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -95,6 +96,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   const [simpleDesc, setSimpleDesc] = useState('');
   const [editingSimple, setEditingSimple] = useState<SimpleRecord | null>(null);
   const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printModalAutoPrint, setPrintModalAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('تقرير مالي');
 
@@ -450,7 +452,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
     exportTableToCsv(`${subPage === 'expenses' ? 'المصروفات' : 'الإيرادات'}_${Date.now()}.csv`, headers, rows);
   };
 
-  const handlePrintTreasurySingle = (tr: TreasuryEntry) => {
+  const handlePrintTreasurySingle = (tr: TreasuryEntry, autoPrint: boolean = false) => {
     const tafqeetWords = tafqeetCurrency(tr.amount, db.settings.currency || 'ج.م');
     const block: MovementPrintBlock = {
       title: tr.direction === 'in' ? 'حركة إيداع وقبض خزينة' : 'حركة صرف وسحب خزينة',
@@ -488,6 +490,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
     setPrintDocuments([block]);
     setPrintDocTitle(`حركة_خزينة_${tr.id.slice(-6)}`);
+    setPrintModalAutoPrint(autoPrint);
     setPrintModalOpen(true);
   };
 
@@ -821,16 +824,29 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                         </span>
                       </div>
 
-                      <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-1.5 no-print">
-                        <button
-                          type="button"
-                          onClick={() => handlePrintTreasurySingle(tr)}
-                          className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
-                          title="طباعة / تصدير PDF"
-                        >
-                          <Printer className="w-3.5 h-3.5" />
-                          <span>PDF</span>
-                        </button>
+                      <div className="pt-2 border-t border-slate-100 flex items-center justify-between mt-2">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handlePrintTreasurySingle(tr, false)}
+                            className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
+                            title="معاينة الحركة وتصدير PDF"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>معاينة</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handlePrintTreasurySingle(tr, true)}
+                            className="px-2.5 py-1 text-white bg-slate-900 hover:bg-black rounded text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs"
+                            title="طباعة الحركة فورية (A5 / A4 / حراري)"
+                          >
+                            <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>طباعة</span>
+                          </button>
+                        </div>
+
                         {db.currentUser?.role === 'مدير' && (
                           <button
                             type="button"
@@ -1565,7 +1581,11 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       {/* Universal Print & PDF Modal */}
       <UniversalPrintModal
         isOpen={printModalOpen}
-        onClose={() => setPrintModalOpen(false)}
+        onClose={() => {
+          setPrintModalOpen(false);
+          setPrintModalAutoPrint(false);
+        }}
+        autoPrint={printModalAutoPrint}
         documentTitle={printDocTitle}
         documents={printDocuments}
         settings={db.settings}

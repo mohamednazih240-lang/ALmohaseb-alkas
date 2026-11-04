@@ -50,6 +50,7 @@ export interface UniversalPrintModalProps {
   documents: MovementPrintBlock[];
   settings: AppSettings;
   defaultPaperSize?: PaperSize;
+  autoPrint?: boolean;
 }
 
 export const formatCleanNumber = (val: number | string | undefined): string => {
@@ -69,7 +70,8 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
   documentTitle,
   documents,
   settings,
-  defaultPaperSize = 'A5'
+  defaultPaperSize = 'A5',
+  autoPrint = false
 }) => {
   const [paperSize, setPaperSize] = useState<PaperSize>(defaultPaperSize);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
@@ -82,6 +84,15 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  React.useEffect(() => {
+    if (isOpen && autoPrint && documents.length > 0) {
+      const timer = setTimeout(() => {
+        handlePrint();
+      }, 250);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen, autoPrint, documents]);
 
   const paperBaseWidth = paperSize === 'thermal' ? 300 : paperSize === 'A4' ? 794 : 560;
   const isNarrowScreen = windowWidth < paperBaseWidth + 24;

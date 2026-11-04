@@ -54,6 +54,7 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
 
   // Print modal state
   const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [returnAutoPrint, setReturnAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('سند مرتجع');
 
@@ -84,7 +85,7 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   });
 
   // Single return print handler
-  const handlePrintReturn = (ret: ReturnInvoice) => {
+  const handlePrintReturn = (ret: ReturnInvoice, autoPrint: boolean = false) => {
     const isSale = ret.type === 'sale';
     const doc: MovementPrintBlock = {
       title: isSale ? 'سند مردود مبيعات' : 'سند مردود مشتريات',
@@ -129,6 +130,7 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
 
     setPrintDocuments([doc]);
     setPrintDocTitle(`سند مرتجع ${ret.number}`);
+    setReturnAutoPrint(autoPrint);
     setPrintModalOpen(true);
   };
 
@@ -454,15 +456,26 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
 
                 {/* Footer: Preview, Print and Delete */}
                 <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={() => handlePrintReturn(r)}
-                    className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                    title="معاينة وطباعة سند المرتجع الفردي بتصميم الفاتورة المعتمد"
-                  >
-                    <Eye className="w-3.5 h-3.5 text-slate-500" />
-                    <span>معاينة وطباعة</span>
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handlePrintReturn(r, false)}
+                      className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer border border-slate-200"
+                      title="معاينة سند المرتجع وتحديد مقاس الورقة"
+                    >
+                      <Eye className="w-3.5 h-3.5 text-slate-500" />
+                      <span>معاينة</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handlePrintReturn(r, true)}
+                      className="px-2.5 py-1 text-white bg-slate-900 hover:bg-black rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer shadow-xs"
+                      title="طباعة فورية لسند المرتجع (A5 افتراضي)"
+                    >
+                      <Printer className="w-3.5 h-3.5 text-slate-200" />
+                      <span>طباعة</span>
+                    </button>
+                  </div>
 
                   <div className="flex items-center gap-1">
                     {db.currentUser?.role === 'مدير' && (
@@ -489,6 +502,7 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
         documentTitle={printDocTitle}
         documents={printDocuments}
         settings={db.settings}
+        autoPrint={returnAutoPrint}
       />
     </div>
   );

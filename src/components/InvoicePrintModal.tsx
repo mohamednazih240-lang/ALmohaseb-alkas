@@ -29,6 +29,7 @@ interface InvoicePrintModalProps {
   invoice: Invoice | null;
   settings: AppSettings;
   onClose: () => void;
+  autoPrint?: boolean;
 }
 
 export type PaperSize = 'A4' | 'A5' | 'thermal';
@@ -49,7 +50,8 @@ export const formatMoneyClean = (val: number | string | undefined): string => {
 export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
   invoice,
   settings,
-  onClose
+  onClose,
+  autoPrint = false
 }) => {
   const [activeTab, setActiveTab] = useState<'preview' | 'audit'>('preview');
   const [paperSize, setPaperSize] = useState<PaperSize>('A5');
@@ -63,6 +65,15 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  React.useEffect(() => {
+    if (autoPrint && invoice) {
+      const timer = setTimeout(() => {
+        handlePrint();
+      }, 250);
+      return () => clearTimeout(timer);
+    }
+  }, [autoPrint, invoice?.id]);
 
   const paperBaseWidth = paperSize === 'thermal' ? 300 : paperSize === 'A4' ? 794 : 560;
   const isNarrowScreen = windowWidth < paperBaseWidth + 24;

@@ -4,6 +4,7 @@ import {
   TrendingUp,
   DollarSign,
   Printer,
+  Eye,
   Download,
   Calendar,
   FileSpreadsheet,
@@ -54,6 +55,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
   // Universal print modal state
   const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [reportAutoPrint, setReportAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('تقرير مالي');
 
@@ -312,10 +314,11 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
     return { title: `تقرير موردين - ${branchLabel}`, docs: [doc] };
   };
 
-  const handleOpenPrintModal = () => {
+  const handleOpenPrintModal = (autoPrint: boolean = false) => {
     const { title, docs } = generateReportBlocks();
     setPrintDocTitle(title);
     setPrintDocuments(docs);
+    setReportAutoPrint(autoPrint);
     setPrintModalOpen(true);
   };
 
@@ -355,12 +358,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
           <button
             type="button"
-            onClick={handleOpenPrintModal}
-            className="px-4 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-            title="معاينة وطباعة التقرير بدقة متناهية (A4، A5، حراري، PDF)"
+            onClick={() => handleOpenPrintModal(false)}
+            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+            title="معاينة التقرير وتحديد مقاس الورقة (A4 / A5 / حراري)"
           >
-            <Printer className="w-4 h-4" />
-            <span>معاينة وطباعة التقرير (A4 / A5 / حراري / PDF)</span>
+            <Eye className="w-4 h-4 text-slate-600" />
+            <span>معاينة التقرير</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleOpenPrintModal(true)}
+            className="px-4 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+            title="طباعة فورية للتقرير بالمقاس المعتمد (A5 افتراضي)"
+          >
+            <Printer className="w-4 h-4 text-slate-200" />
+            <span>طباعة فورية</span>
           </button>
         </div>
       </div>
@@ -774,6 +787,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
         documentTitle={printDocTitle}
         documents={printDocuments}
         settings={db.settings}
+        autoPrint={reportAutoPrint}
       />
     </div>
   );

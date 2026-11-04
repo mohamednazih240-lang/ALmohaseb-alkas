@@ -46,6 +46,7 @@ interface PurchasesViewProps {
   db: AccountingDB;
   onUpdateDb: (updated: AccountingDB) => void;
   onPreviewInvoice: (invoice: Invoice) => void;
+  onPrintInvoice?: (invoice: Invoice) => void;
   onOpenPartyModal: (type: 'customer' | 'supplier') => void;
   activeBranchId?: string;
   initialEditingInvoice?: Invoice | null;
@@ -56,6 +57,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   db,
   onUpdateDb,
   onPreviewInvoice,
+  onPrintInvoice,
   onOpenPartyModal,
   activeBranchId,
   initialEditingInvoice = null,
@@ -841,10 +843,19 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                   <button
                     onClick={() => onPreviewInvoice(inv)}
                     className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                    title="عرض وطباعة الفاتورة"
+                    title="معاينة تفاصيل الفاتورة"
                   >
                     <Eye className="w-3.5 h-3.5" />
                     <span>معاينة</span>
+                  </button>
+
+                  <button
+                    onClick={() => onPrintInvoice ? onPrintInvoice(inv) : onPreviewInvoice(inv)}
+                    className="px-2.5 py-1 text-white bg-slate-900 hover:bg-black rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer shadow-xs"
+                    title="طباعة فورية مباشرة بمقاس الورقة (A5 / A4 / حراري)"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>طباعة</span>
                   </button>
 
                   {canEditPurchases && (

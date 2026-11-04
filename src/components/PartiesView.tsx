@@ -66,6 +66,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
   // Universal print modal state
   const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printModalAutoPrint, setPrintModalAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('');
 
@@ -367,7 +368,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
   };
 
   // Open full statement in UniversalPrintModal
-  const handleOpenStatement = (party: Party) => {
+  const handleOpenStatement = (party: Party, autoPrint: boolean = false) => {
     const rows = getStatementRows(party);
     const curr = db.settings.currency;
     const currentBalance = isCustomer
@@ -415,11 +416,12 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
     setPrintDocTitle(`كشف حساب - ${party.name}`);
     setPrintDocuments([doc]);
+    setPrintModalAutoPrint(autoPrint);
     setPrintModalOpen(true);
   };
 
   // Print all parties directory
-  const handlePrintAllParties = () => {
+  const handlePrintAllParties = (autoPrint: boolean = false) => {
     if (filteredParties.length === 0) {
       alert('لا توجد بيانات للطباعة');
       return;
@@ -463,6 +465,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
     setPrintDocTitle(`كشف ${isCustomer ? 'العملاء' : 'الموردين'}`);
     setPrintDocuments([doc]);
+    setPrintModalAutoPrint(autoPrint);
     setPrintModalOpen(true);
   };
 
@@ -721,12 +724,23 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
                 <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-1.5">
                   <div className="flex items-center gap-1">
                     <button
-                      onClick={() => handleOpenStatement(p)}
-                      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-900 rounded-md text-xs font-bold flex items-center gap-1 transition-colors"
-                      title="عرض كشف الحساب التفصيلي والطباعة"
+                      type="button"
+                      onClick={() => handleOpenStatement(p, false)}
+                      className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-md text-xs font-bold flex items-center gap-1 transition-colors border border-slate-200"
+                      title="معاينة كشف الحساب وتحديد مقاس الورقة"
                     >
-                      <FileSpreadsheet className="w-3.5 h-3.5 text-slate-600" />
-                      <span>كشف حساب</span>
+                      <Eye className="w-3.5 h-3.5 text-slate-600" />
+                      <span>معاينة</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStatement(p, true)}
+                      className="px-2 py-1 bg-slate-900 hover:bg-black text-white rounded-md text-xs font-bold flex items-center gap-1 transition-colors shadow-xs"
+                      title="طباعة فورية لكشف الحساب (A5 افتراضي)"
+                    >
+                      <Printer className="w-3.5 h-3.5 text-slate-200" />
+                      <span>طباعة</span>
                     </button>
 
                     <button
@@ -988,6 +1002,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
         documentTitle={printDocTitle}
         documents={printDocuments}
         settings={db.settings}
+        autoPrint={printModalAutoPrint}
       />
     </div>
   );

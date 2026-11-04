@@ -117,11 +117,22 @@ export default function App() {
   // Modals
   const [showQuickSearch, setShowQuickSearch] = useState(false);
   const [previewInvoice, setPreviewInvoice] = useState<Invoice | null>(null);
+  const [previewAutoPrint, setPreviewAutoPrint] = useState(false);
   const [editingInvoiceState, setEditingInvoiceState] = useState<Invoice | null>(null);
   const [productModalState, setProductModalState] = useState<{ isOpen: boolean; product?: Product | null }>({
     isOpen: false,
     product: null
   });
+
+  const handlePreviewInvoice = (inv: Invoice) => {
+    setPreviewInvoice(inv);
+    setPreviewAutoPrint(false);
+  };
+
+  const handlePrintInvoice = (inv: Invoice) => {
+    setPreviewInvoice(inv);
+    setPreviewAutoPrint(true);
+  };
 
   // Branch PIN Security & Headquarters Isolation Modal
   const [branchPinTarget, setBranchPinTarget] = useState<Branch | null>(null);
@@ -673,7 +684,8 @@ export default function App() {
             <SalesView
               db={db}
               onUpdateDb={handleUpdateDb}
-              onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
+              onPreviewInvoice={handlePreviewInvoice}
+              onPrintInvoice={handlePrintInvoice}
               onOpenPartyModal={() => navigateToPage('customers')}
               activeBranchId={activeBranchId}
               initialEditingInvoice={editingInvoiceState}
@@ -684,7 +696,8 @@ export default function App() {
             <PurchasesView
               db={db}
               onUpdateDb={handleUpdateDb}
-              onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
+              onPreviewInvoice={handlePreviewInvoice}
+              onPrintInvoice={handlePrintInvoice}
               onOpenPartyModal={() => navigateToPage('suppliers')}
               activeBranchId={activeBranchId}
               initialEditingInvoice={editingInvoiceState}
@@ -695,7 +708,7 @@ export default function App() {
             <ProcurementView
               db={db}
               onUpdateDb={handleUpdateDb}
-              onPreviewInvoice={(inv) => setPreviewInvoice(inv)}
+              onPreviewInvoice={handlePreviewInvoice}
             />
           )}
 
@@ -908,7 +921,11 @@ export default function App() {
       <InvoicePrintModal
         invoice={previewInvoice}
         settings={db.settings}
-        onClose={() => setPreviewInvoice(null)}
+        autoPrint={previewAutoPrint}
+        onClose={() => {
+          setPreviewInvoice(null);
+          setPreviewAutoPrint(false);
+        }}
       />
 
       {/* Google Drive Cloud Backup & Restore Modal */}

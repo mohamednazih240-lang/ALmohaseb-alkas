@@ -61,7 +61,8 @@ import {
   toWesternNumerals,
   parseNum,
   syncInvoiceVouchers,
-  deleteInvoiceAndRevert
+  deleteInvoiceAndRevert,
+  getDeterministicStockMovementId
 } from '../services/accountingStorage';
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
@@ -1781,8 +1782,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         const pIdx = updated.products.findIndex(p => p.id === prod.id);
         if (pIdx > -1) updated.products[pIdx] = updatedProd;
 
-        updated.stockMovements.unshift({
-          id: generateId('sm'),
+        const deterministicSmId = getDeterministicStockMovementId(invId, prod.id, whId);
+        const existingSmIdx = updated.stockMovements.findIndex(sm => sm.id === deterministicSmId || (sm.sourceId === invId && sm.productId === prod.id));
+
+        const movementPayload = {
+          id: deterministicSmId,
           date: savedInvoice.date,
           productId: prod.id,
           productName: prod.name,
@@ -1791,14 +1795,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           qtyChange,
           balanceAfter: newQty,
           unitCost: item.costPrice || item.unitPrice,
-          type: mode === 'sale' || mode === 'wholesale' ? 'sale' :
-                mode === 'purchase' ? 'purchase' :
-                mode === 'sale_return' ? 'sale_return' : 'purchase_return',
+          type: (mode === 'sale' || mode === 'wholesale' ? 'sale' :
+                 mode === 'purchase' ? 'purchase' :
+                 mode === 'sale_return' ? 'sale_return' : 'purchase_return') as any,
           refNumber: savedInvoice.number,
           sourceId: invId,
           branchId: invoiceBranchId,
           branchName: invoiceBranch.name
-        });
+        };
+
+        if (existingSmIdx > -1) {
+          updated.stockMovements[existingSmIdx] = movementPayload;
+        } else {
+          updated.stockMovements.unshift(movementPayload);
+        }
       }
     });
 

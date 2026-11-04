@@ -47,8 +47,10 @@ import {
   logAudit,
   getProductForBranch,
   updateProductBranchData,
-  isBranchMatch
+  isBranchMatch,
+  reconcileAndEnsureAllInvoiceStock
 } from '../services/accountingStorage';
+import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import {
   Building2,
   Info
@@ -99,11 +101,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [showWhModal, setShowWhModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showAdjustModal, setShowAdjustModal] = useState(false);
+  const [showReconciliationModal, setShowReconciliationModal] = useState(false);
 
   // Mobile back buttons: close open modal without leaving the view
   useModalBackHandler(showWhModal, () => setShowWhModal(false), 'inventory_wh_modal');
   useModalBackHandler(showTransferModal, () => setShowTransferModal(false), 'inventory_transfer_modal');
   useModalBackHandler(showAdjustModal, () => setShowAdjustModal(false), 'inventory_adjust_modal');
+  useModalBackHandler(showReconciliationModal, () => setShowReconciliationModal(false), 'inventory_reconciliation_modal');
 
   // Warehouse form state
   const [whName, setWhName] = useState('');
@@ -131,6 +135,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   // Universal Print Modal State
   const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [inventoryAutoPrint, setInventoryAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('طباعة المخزون');
 
@@ -573,7 +578,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   };
 
   // Detailed Product Movement Card (كارت صنف)
-  const handlePrintItemCard = (product: Product) => {
+  const handlePrintItemCard = (product: Product, autoPrint: boolean = false) => {
     const today = getTodayDate();
     const curr = db.settings.currency;
     const moves: { date: string; desc: string; type: string; inQty: number; outQty: number; balance: number; unitPrice: number }[] = [];
@@ -717,6 +722,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
     setPrintDocTitle(`كارت صنف - ${product.name}`);
     setPrintDocuments([doc]);
+    setInventoryAutoPrint(autoPrint);
     setPrintModalOpen(true);
   };
 
@@ -782,6 +788,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               >
                 <Calculator className="w-4 h-4 text-slate-600" />
                 <span>تقييم وجرد</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowReconciliationModal(true)}
+                className="px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                title="فحص ومطابقة حركات فواتير الشراء وترحيل الأصناف إلى المخزون"
+              >
+                <CheckCircle2 className="w-4 h-4 text-blue-600" />
+                <span>مطابقة المشتريات والمخزون</span>
               </button>
 
               <button
@@ -1169,12 +1185,21 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => handlePrintItemCard(p)}
-                          className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                          title="عرض وطباعة كارت حركة الصنف"
+                          onClick={() => handlePrintItemCard(p, false)}
+                          className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer border border-slate-200"
+                          title="معاينة كارت حركة الصنف وتحديد المقاس"
                         >
                           <History className="w-3.5 h-3.5 text-blue-600" />
                           <span>كارت حركة</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handlePrintItemCard(p, true)}
+                          className="px-2 py-1 bg-slate-900 hover:bg-black text-white rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer shadow-xs"
+                          title="طباعة فورية لكارت حركة الصنف (A5 افتراضي)"
+                        >
+                          <Printer className="w-3.5 h-3.5 text-slate-200" />
+                          <span>طباعة</span>
                         </button>
                         <button
                           onClick={() => onOpenProductModal(p)}
@@ -1795,6 +1820,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     ابحث عن أي صنف بالاسم أو الكود واضغط عليه لعرض كافة فواتير البيع وفواتير الشراء مع المعاينة والتعديل المباشر
                   </p>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowReconciliationModal(true)}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer self-start sm:self-auto shrink-0"
+                  title="فحص ومطابقة حركات فواتير الشراء وترحيل الأصناف إلى المخزون"
+                >
+                  <CheckCircle2 className="w-4 h-4 text-white" />
+                  <span>فحص ومطابقة فواتير الشراء مع المخزون</span>
+                </button>
               </div>
 
               {/* Instant Search Bar for Products */}
@@ -2214,6 +2249,185 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         </div>
       )}
 
+      {/* Purchase Invoices Stock Reconciliation Modal (Section 18 Audit) */}
+      {showReconciliationModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl border border-slate-200">
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                <div>
+                  <h2 className="text-base font-black text-slate-900">
+                    تقرير فحص ومطابقة حركات فواتير الشراء مع المخزون
+                  </h2>
+                  <p className="text-[11px] text-slate-500 font-medium">
+                    التأكد من تسجيل وترحيل كافة أصناف فواتير الشراء إلى المخزون واحتسابها بالأرصدة
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowReconciliationModal(false)}
+                className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-4 overflow-y-auto space-y-4 flex-1">
+              {/* Quick Sync Action */}
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div>
+                  <span className="text-xs font-black text-blue-900 block">
+                    ترحيل ومطابقة ذرية لجميع حركات فواتير الشراء
+                  </span>
+                  <span className="text-[11px] text-blue-700 font-medium">
+                    يقوم النظام بفحص كل صنف في كل فاتورة شراء وتوليد حركة المخزون الثابتة وتحديث الأرصدة فورياً دون تكرار
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = reconcileAndEnsureAllInvoiceStock(db);
+                    onUpdateDb(res.db);
+                    pushDatabaseToCloud(res.db, true);
+                    setToastMsg(`✓ تم بنجاح فحص ومطابقة كافة فواتير المشتريات (${res.reconciledCount} بند، و ${res.fixedMovementsCount} حركة مخزون جديدة) وتحديث الأرصدة بدقة!`);
+                  }}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-black shadow-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  <span>إعادة ترحيل ومطابقة كافة الأصناف للمخزون الآن</span>
+                </button>
+              </div>
+
+              {/* List of Purchase Invoices and their items */}
+              {(() => {
+                const purchaseInvoices = db.invoices.filter(i => i.type === 'purchase' || i.invoiceKind === 'purchase');
+                if (purchaseInvoices.length === 0) {
+                  return (
+                    <div className="text-center py-8 text-slate-400 text-xs font-bold">
+                      لا توجد فواتير مشتريات مسجلة حالياً
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-3">
+                    {purchaseInvoices.map(inv => {
+                      const totalItems = inv.items?.length || 0;
+                      const totalUnits = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0);
+                      return (
+                        <div key={inv.id} className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-2xs space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-black text-xs text-slate-900 bg-slate-100 px-2 py-0.5 rounded">
+                                فاتورة رقم {inv.number}
+                              </span>
+                              <span className="text-xs font-bold text-slate-700">
+                                {inv.partyName}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-mono">
+                                {inv.date}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-black font-mono text-emerald-700">
+                                {formatMoney(inv.total, db.settings.currency)}
+                              </span>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                ✓ مرحلة ({totalItems} أصناف / {totalUnits} قطعة)
+                              </span>
+                              {onPreviewInvoice && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowReconciliationModal(false);
+                                    onPreviewInvoice(inv);
+                                  }}
+                                  className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  <span>معاينة</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Items table */}
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-[11px] text-right border-collapse">
+                              <thead>
+                                <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
+                                  <th className="p-1.5">م</th>
+                                  <th className="p-1.5">اسم الصنف بالفاتورة</th>
+                                  <th className="p-1.5 text-center">الكمية بالفاتورة</th>
+                                  <th className="p-1.5 text-center">سعر الشراء</th>
+                                  <th className="p-1.5 text-center">الإجمالي</th>
+                                  <th className="p-1.5 text-center">حالة حركة المخزون</th>
+                                  <th className="p-1.5 text-center">الرصيد الحالي بالمخزن</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100">
+                                {(inv.items || []).map((it, idx) => {
+                                  const matchedProd = db.products.find(p =>
+                                    (it.productId && p.id === it.productId) ||
+                                    (it.productCode && p.code.toLowerCase() === it.productCode.toLowerCase()) ||
+                                    (it.productName && p.name.trim().toLowerCase() === it.productName.trim().toLowerCase())
+                                  );
+                                  const hasMovement = db.stockMovements.some(sm =>
+                                    sm.sourceId === inv.id && (sm.productId === it.productId || (matchedProd && sm.productId === matchedProd.id))
+                                  );
+
+                                  return (
+                                    <tr key={idx} className="hover:bg-slate-50/70">
+                                      <td className="p-1.5 font-mono text-slate-400">{idx + 1}</td>
+                                      <td className="p-1.5 font-bold text-slate-900">{it.productName}</td>
+                                      <td className="p-1.5 text-center font-mono font-black text-blue-700">{it.qty} {it.unit || 'قطعة'}</td>
+                                      <td className="p-1.5 text-center font-mono">{it.unitPrice}</td>
+                                      <td className="p-1.5 text-center font-mono font-bold text-slate-800">{it.total}</td>
+                                      <td className="p-1.5 text-center">
+                                        {hasMovement ? (
+                                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                            ✓ مسجلة ومرحلة
+                                          </span>
+                                        ) : (
+                                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                                            ⚠️ تلقائي
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="p-1.5 text-center font-mono font-black text-emerald-700">
+                                        {matchedProd ? `${matchedProd.currentQty} ${matchedProd.unit || 'قطعة'}` : '—'}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Footer */}
+            <div className="p-3 border-t border-slate-200 bg-slate-50 flex justify-end rounded-b-2xl">
+              <button
+                type="button"
+                onClick={() => setShowReconciliationModal(false)}
+                className="px-4 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-bold hover:bg-black cursor-pointer"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Universal Print Modal for Inventory & Products */}
       <UniversalPrintModal
         isOpen={printModalOpen}
@@ -2221,6 +2435,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         documentTitle={printDocTitle}
         documents={printDocuments}
         settings={db.settings}
+        autoPrint={inventoryAutoPrint}
       />
     </div>
   );

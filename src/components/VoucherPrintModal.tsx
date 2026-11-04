@@ -15,12 +15,14 @@ interface VoucherPrintModalProps {
   voucher: Voucher | null;
   settings: AppSettings;
   onClose: () => void;
+  autoPrint?: boolean;
 }
 
 export const VoucherPrintModal: React.FC<VoucherPrintModalProps> = ({
   voucher,
   settings,
-  onClose
+  onClose,
+  autoPrint = false
 }) => {
   if (!voucher) return null;
 
@@ -82,6 +84,7 @@ export const VoucherPrintModal: React.FC<VoucherPrintModalProps> = ({
       documents={[docBlock]}
       settings={settings}
       defaultPaperSize="A5"
+      autoPrint={autoPrint}
     />
   );
 };
