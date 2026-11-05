@@ -521,12 +521,22 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
           <button
             type="button"
-            onClick={handlePrintAllParties}
+            onClick={() => handlePrintAllParties(false)}
             className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
-            title="طباعة ومعاينة الكشف الشامل"
+            title="معاينة كشف الدليل الشامل وتحديد مقاس الورقة"
           >
-            <Printer className="w-4 h-4 text-slate-600" />
-            <span>طباعة الكشف</span>
+            <Eye className="w-4 h-4 text-slate-600" />
+            <span>معاينة الكشف</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handlePrintAllParties(true)}
+            className="px-3 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
+            title="طباعة فورية لدليل الحسابات (A5 افتراضي)"
+          >
+            <Printer className="w-4 h-4 text-slate-200" />
+            <span>طباعة فورية</span>
           </button>
 
           <button
