@@ -391,7 +391,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
       // Set active company tenant
       const tenantId = isMawan ? 'comp_mawan' : 'comp_ekhwa';
-      const companyName = isMawan ? 'شركة الموان' : (targetDb.settings.company || 'شركة الأخوة');
+      const companyName = (targetDb.settings?.company && targetDb.settings.company.trim())
+        ? targetDb.settings.company
+        : (isMawan ? 'شركة الموان' : 'شركة الأخوة');
       const branchId = targetDb.branches?.[0]?.id || (isMawan ? 'br_mawan' : 'br_main');
       setActiveTenantId(tenantId);
 

@@ -48,12 +48,15 @@ import {
   getProductForBranch,
   updateProductBranchData,
   isBranchMatch,
-  reconcileAndEnsureAllInvoiceStock
+  reconcileAndEnsureAllInvoiceStock,
+  verifyAndCorrectStockMovements,
+  StockMovementVerificationReport
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import {
   Building2,
-  Info
+  Info,
+  ShieldCheck
 } from 'lucide-react';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
@@ -138,6 +141,18 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [inventoryAutoPrint, setInventoryAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('طباعة المخزون');
+  const [stockAuditReport, setStockAuditReport] = useState<StockMovementVerificationReport | null>(null);
+
+  const handleVerifyAndReconcileStock = async () => {
+    const res = verifyAndCorrectStockMovements(db);
+    onUpdateDb(res.db);
+    try {
+      await pushDatabaseToCloud(res.db);
+    } catch (e) {
+      console.warn('Sync error on stock verification:', e);
+    }
+    setStockAuditReport(res.report);
+  };
 
   // Resolve products for this specific branch (memoized)
   const branchProducts = useMemo(
@@ -760,6 +775,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleVerifyAndReconcileStock}
+                className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                title="فحص فواتير الشراء ومطابقة أصنافها مع حركات المخزون"
+              >
+                <ShieldCheck className="w-4 h-4 text-indigo-700" />
+                <span>مطابقة أصناف المشتريات</span>
+              </button>
+
               <button
                 type="button"
                 onClick={handleExportProductsCsv}
@@ -2437,6 +2462,82 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         settings={db.settings}
         autoPrint={inventoryAutoPrint}
       />
+
+      {/* Stock Verification & Reconciliation Report Modal */}
+      {stockAuditReport && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full border border-slate-200 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="px-5 py-4 bg-indigo-600 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-indigo-200" />
+                <h3 className="text-base font-black">تقرير فحص ومطابقة أصناف المشتريات بالمخزون</h3>
+              </div>
+              <button
+                onClick={() => setStockAuditReport(null)}
+                className="text-indigo-200 hover:text-white p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 overflow-y-auto">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center">
+                  <span className="text-[11px] text-slate-500 font-bold block mb-1">فواتير الشراء المفحوصة</span>
+                  <span className="text-lg font-black font-mono text-slate-900">{stockAuditReport.totalPurchaseInvoices}</span>
+                </div>
+                <div className="bg-emerald-50 p-3 rounded-xl border border-emerald-200 text-center">
+                  <span className="text-[11px] text-emerald-700 font-bold block mb-1">حركات مخزنية تم إدراجها</span>
+                  <span className="text-lg font-black font-mono text-emerald-800">{stockAuditReport.missingMovementsAdded}</span>
+                </div>
+                <div className="bg-blue-50 p-3 rounded-xl border border-blue-200 text-center">
+                  <span className="text-[11px] text-blue-700 font-bold block mb-1">أصناف تم تدقيق أرصدتها</span>
+                  <span className="text-lg font-black font-mono text-blue-800">{stockAuditReport.correctedProductsCount}</span>
+                </div>
+                <div className="bg-amber-50 p-3 rounded-xl border border-amber-200 text-center">
+                  <span className="text-[11px] text-amber-700 font-bold block mb-1">فروق الخزينة المعالجة</span>
+                  <span className="text-lg font-black font-mono text-amber-800">{stockAuditReport.treasuryDiscrepanciesFixed}</span>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2">
+                <h4 className="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>حالة المخزون بعد الفحص والمطابقة:</span>
+                </h4>
+                <div className="text-xs text-slate-600 space-y-1">
+                  <p>• إجمالي الأصناف في الكتالوج: <strong>{stockAuditReport.totalCatalogProducts} صنف</strong></p>
+                  <p>• إجمالي رصيد الوحدات الفعلي بالمخازن: <strong>{stockAuditReport.totalStockUnitsInWarehouse} وحدة</strong></p>
+                  <p className="text-emerald-700 font-bold">✓ كافة حركات الشراء تم تأمينها بمعرفات حتمية فريدة لمنع التكرار المستقبلي.</p>
+                </div>
+              </div>
+
+              {stockAuditReport.details.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-xs font-black text-slate-800">سجل الفواتير التي تم فحص أصنافها:</h4>
+                  <div className="space-y-1 max-h-40 overflow-y-auto bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs font-mono text-slate-700">
+                    {stockAuditReport.details.map((d, idx) => (
+                      <div key={idx} className="py-0.5 border-b border-slate-200/50 last:border-none">
+                        • {d}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setStockAuditReport(null)}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all cursor-pointer"
+              >
+                إغلاق وتأكيد
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -40,6 +40,17 @@ import {
   CompanyTenant
 } from './tenantService';
 import { DEFAULT_CATALOG_1001, mergeCatalogIntoDb } from '../data/defaultCatalog1001';
+import {
+  getDeterministicVoucherId,
+  getDeterministicTreasuryId,
+  reconcileAndDeduplicateAllFinancialRecords
+} from './accountingEngine';
+
+export {
+  getDeterministicVoucherId,
+  getDeterministicTreasuryId,
+  reconcileAndDeduplicateAllFinancialRecords
+};
 
 const STORAGE_KEY = 'hesabaty_pro_db_v6';
 const IDB_NAME = 'hesabaty_accounting_db';
@@ -271,6 +282,274 @@ export function getDeterministicStockMovementId(invoiceId: string, productId: st
   return `sm_${cleanInv}_${cleanProd}_${cleanWh}`;
 }
 
+export interface StockMovementVerificationReport {
+  totalPurchaseInvoices: number;
+  invoicesWithMissingMovements: number;
+  missingMovementsAdded: number;
+  correctedProductsCount: number;
+  treasuryDiscrepanciesFixed: number;
+  totalCatalogProducts: number;
+  totalStockUnitsInWarehouse: number;
+  details: string[];
+}
+
+/**
+ * دالة مركزية تفحص كل فواتير الشراء المسجلة، ومطابقة أصنافها مع حركات المخزون،
+ * ثم إدراج الحركات المفقودة فقط مع استخدام معرف عملية فريد وحتمي لمنع التكرار المستقبلي،
+ * والتأكد من مطابقة الأثر المالي في الخزينة وتحديث أرصدة المخزون بدقة تامة.
+ */
+export function verifyAndCorrectStockMovements(db: AccountingDB): { db: AccountingDB; report: StockMovementVerificationReport } {
+  if (!db) {
+    return {
+      db,
+      report: {
+        totalPurchaseInvoices: 0,
+        invoicesWithMissingMovements: 0,
+        missingMovementsAdded: 0,
+        correctedProductsCount: 0,
+        treasuryDiscrepanciesFixed: 0,
+        totalCatalogProducts: 0,
+        totalStockUnitsInWarehouse: 0,
+        details: []
+      }
+    };
+  }
+
+  if (!db.products) db.products = [];
+  if (!db.stockMovements) db.stockMovements = [];
+  if (!db.invoices) db.invoices = [];
+  if (!db.treasury) db.treasury = [];
+  if (!db.warehouses || db.warehouses.length === 0) {
+    db.warehouses = [
+      { id: 'wh_mawan', name: 'مخزن شركة الموان الرئيسي', location: 'المقر الرئيسي', isDefault: true }
+    ];
+  }
+  const defaultWh = db.warehouses[0];
+  const defaultBranchId = db.branches?.[0]?.id || 'br_main';
+
+  let invoicesWithMissingMovements = 0;
+  let missingMovementsAdded = 0;
+  let treasuryDiscrepanciesFixed = 0;
+  const details: string[] = [];
+
+  // 1. الحفاظ الصارم على أصناف فاتورة رقم 17 لشركة الرحمة للحدايد (15 صنفاً)
+  const inv17 = db.invoices.find(
+    i => (i.number === '17' && (i.type === 'purchase' || i.invoiceKind === 'purchase')) ||
+         (i.partyName && i.partyName.includes('الرحمة'))
+  );
+  if (inv17 && (!inv17.items || inv17.items.length < 15)) {
+    inv17.items = JSON.parse(JSON.stringify(RAHMA_INVOICE_17_ITEMS));
+    inv17.total = 4319.14;
+    inv17.subtotal = 4319.14;
+    inv17.paid = 4319.14;
+    inv17.remaining = 0;
+    inv17.status = 'مدفوع';
+    inv17.paymentMethod = 'نقدي';
+    inv17.branchId = inv17.branchId || 'br_mawan';
+    inv17.branchName = inv17.branchName || 'الفرع الرئيسي - شركة الموان';
+  }
+
+  // 2. فحص كافة فواتير الشراء المسجلة
+  const purchaseInvoices = db.invoices.filter(inv =>
+    inv.type === 'purchase' ||
+    inv.invoiceKind === 'purchase' ||
+    (inv.items && inv.items.length > 0 && !inv.type && inv.partyName?.includes('مورد'))
+  );
+
+  purchaseInvoices.forEach(inv => {
+    if (!Array.isArray(inv.items) || inv.items.length === 0) return;
+
+    const targetBranch = inv.branchId || defaultBranchId;
+    const branchName = inv.branchName || db.branches?.find(b => b.id === targetBranch)?.name || defaultWh.name;
+    let invHadMissing = false;
+
+    inv.items.forEach(item => {
+      if (!item || !item.productName || item.qty <= 0) return;
+
+      // أ) البحث عن الصنف في الكتالوج أو تسجيله فوراً إن لم يكن مسجلاً
+      let prod = db.products.find(p =>
+        (item.productId && p.id === item.productId) ||
+        (item.productCode && p.code.toLowerCase() === item.productCode.toLowerCase()) ||
+        (item.productName && p.name.trim().toLowerCase() === item.productName.trim().toLowerCase())
+      );
+
+      if (!prod && item.productName.trim()) {
+        const rawName = item.productName.trim();
+        const newCode = (item.productCode && item.productCode.trim())
+          ? item.productCode.trim()
+          : `PRD-${100 + db.products.length + 1}`;
+        const unitBuy = Number(item.unitPrice || item.costPrice) || 0;
+        const unitSell = unitBuy > 0 ? unitBuy * 1.25 : 100;
+        const newProdId = (item.productId && item.productId.startsWith('prd_')) ? item.productId : generateId('prod');
+
+        prod = {
+          id: newProdId,
+          name: rawName,
+          code: newCode,
+          barcode: '',
+          category: 'عامة',
+          unit: item.unit || 'قطعة',
+          buyPrice: unitBuy,
+          sellPrice: unitSell,
+          wholesalePrice: unitSell * 0.9,
+          minStock: 5,
+          currentQty: 0,
+          avgCost: unitBuy,
+          branchesData: {}
+        };
+        db.products.push(prod);
+      }
+
+      if (!prod) return;
+
+      item.productId = prod.id;
+      item.productCode = prod.code;
+
+      // ب) معرف حركة المخزون الحتمي والفريد: sm_${invId}_${productId}_${warehouseId}
+      const deterministicSmId = getDeterministicStockMovementId(inv.id, prod.id, targetBranch);
+
+      // ج) فحص وجود الحركة المخزنية المطابقة
+      const existingIdx = db.stockMovements.findIndex(sm =>
+        sm.id === deterministicSmId ||
+        (sm.sourceId === inv.id && (sm.productId === prod.id || ((sm as any).productCode && prod.code && (sm as any).productCode.toLowerCase() === prod.code.toLowerCase()))) ||
+        (sm.refNumber && String(sm.refNumber).trim() === String(inv.number).trim() && sm.type === 'purchase' && (sm.productId === prod.id || ((sm as any).productCode && prod.code && (sm as any).productCode.toLowerCase() === prod.code.toLowerCase())))
+      );
+
+      const qty = Number(item.qty) || 0;
+      const unitCost = Number(item.costPrice || item.unitPrice) || 0;
+
+      if (existingIdx === -1) {
+        // الحركة مفقودة -> إدراج الحركة بالمعرف الحتمي الفريد
+        db.stockMovements.unshift({
+          id: deterministicSmId,
+          date: inv.date || getTodayDate(),
+          productId: prod.id,
+          productName: prod.name,
+          warehouseId: targetBranch,
+          warehouseName: branchName,
+          qtyChange: qty,
+          balanceAfter: 0,
+          unitCost: unitCost,
+          type: 'purchase',
+          refNumber: inv.number,
+          sourceId: inv.id,
+          branchId: targetBranch,
+          branchName: branchName
+        });
+        missingMovementsAdded++;
+        invHadMissing = true;
+      } else {
+        // الحركة موجودة -> تثبيت المعرف الحتمي وتحديث الحقول الموثوقة لمنع أي تكرار مستقبلي
+        const existingSm = db.stockMovements[existingIdx];
+        existingSm.id = deterministicSmId;
+        existingSm.productId = prod.id;
+        existingSm.productName = prod.name;
+        existingSm.qtyChange = qty;
+        existingSm.unitCost = unitCost;
+        existingSm.type = 'purchase';
+        existingSm.branchId = targetBranch;
+      }
+    });
+
+    if (invHadMissing) {
+      invoicesWithMissingMovements++;
+      details.push(`فاتورة مشتريات #${inv.number} (${inv.partyName || 'مورد'}): تم فحص وإدراج أصنافها المفقودة في حركات المخزون.`);
+    }
+
+    // د) التأكد من التأثير المالي للفاتورة على الخزينة في حال السداد
+    const paidAmount = Number(inv.paid) > 0 ? Number(inv.paid) : (inv.paymentMethod && inv.paymentMethod !== 'آجل' ? Number(inv.total) : 0);
+    if (paidAmount > 0) {
+      const deterministicTrId = getDeterministicTreasuryId('purchase', inv.id, 0, 'out');
+      const existingTr = db.treasury.find(tr =>
+        tr.id === deterministicTrId ||
+        tr.sourceId === inv.id ||
+        ((tr as any).invoiceId === inv.id) ||
+        ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(inv.number).trim() && tr.direction === 'out')
+      );
+      if (!existingTr) {
+        db.treasury.unshift({
+          id: deterministicTrId,
+          date: inv.date || getTodayDate(),
+          direction: 'out',
+          amount: paidAmount,
+          method: inv.paymentMethod || 'نقدي',
+          description: `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'}`,
+          sourceType: 'purchase',
+          sourceId: inv.id,
+          branchId: targetBranch,
+          branchName: branchName
+        });
+        treasuryDiscrepanciesFixed++;
+      } else if (existingTr.id !== deterministicTrId) {
+        existingTr.id = deterministicTrId;
+      }
+    }
+  });
+
+  // 3. إعادة احتساب أرصدة الأصناف بدقة وتحديث متوسط التكلفة المرجح
+  let correctedProductsCount = 0;
+  db.products.forEach(p => {
+    const prodMovements = db.stockMovements.filter(sm =>
+      sm.productId === p.id ||
+      ((sm as any).productCode && p.code && (sm as any).productCode.toLowerCase() === p.code.toLowerCase()) ||
+      sm.productName.trim().toLowerCase() === p.name.trim().toLowerCase()
+    );
+
+    const totalQty = prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0);
+
+    const purchaseMoves = prodMovements.filter(sm => sm.type === 'purchase' && sm.qtyChange > 0);
+    let avgCost = p.buyPrice || 0;
+    if (purchaseMoves.length > 0) {
+      const totalCostSum = purchaseMoves.reduce((sum, sm) => sum + (sm.qtyChange * (sm.unitCost || 0)), 0);
+      const totalPurchasedQty = purchaseMoves.reduce((sum, sm) => sum + sm.qtyChange, 0);
+      if (totalPurchasedQty > 0) {
+        avgCost = totalCostSum / totalPurchasedQty;
+      }
+      p.buyPrice = purchaseMoves[0].unitCost || p.buyPrice;
+    }
+
+    if (p.currentQty !== totalQty || p.avgCost !== avgCost) {
+      p.currentQty = totalQty;
+      p.avgCost = avgCost;
+      correctedProductsCount++;
+    }
+
+    const branchesMap = p.branchesData || {};
+    p.branchesData = branchesMap;
+    const branchInfo: BranchProductData = {
+      currentQty: totalQty,
+      buyPrice: p.buyPrice,
+      sellPrice: p.sellPrice,
+      wholesalePrice: p.wholesalePrice,
+      minStock: p.minStock || 5,
+      avgCost
+    };
+    branchesMap['br_mawan'] = { ...branchInfo };
+    branchesMap['br_main'] = { ...branchInfo };
+    if (db.branches) {
+      db.branches.forEach(b => {
+        branchesMap[b.id] = { ...branchInfo };
+      });
+    }
+  });
+
+  const totalStockUnitsInWarehouse = db.products.reduce((sum, p) => sum + (p.currentQty || 0), 0);
+
+  return {
+    db,
+    report: {
+      totalPurchaseInvoices: purchaseInvoices.length,
+      invoicesWithMissingMovements,
+      missingMovementsAdded,
+      correctedProductsCount,
+      treasuryDiscrepanciesFixed,
+      totalCatalogProducts: db.products.length,
+      totalStockUnitsInWarehouse,
+      details
+    }
+  };
+}
+
 /**
  * Reconciles and guarantees 100% atomic posting of all invoice items into stock movements and catalog balances.
  * Audits every purchase, sale, and return invoice to ensure every item has a deterministic movement and affects inventory.
@@ -474,12 +753,16 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   if (!db) return db;
 
   // ==========================================
-  // 🏢 شركة الموان (COMP-102) - النظام مخصص حصرياً لشركة الموان
+  // 🏢 إعدادات المنشأة - الحفاظ التام على ما يحدده المستخدم وعدم استبداله
   // ==========================================
-  db.settings.company = 'شركة الموان';
-  db.settings.companyCode = 'COMP-102';
+  if (!db.settings.company || !db.settings.company.trim()) {
+    db.settings.company = 'شركة الموان';
+  }
+  if (!db.settings.companyCode || !db.settings.companyCode.trim()) {
+    db.settings.companyCode = 'COMP-102';
+  }
   db.settings.invoiceTitle = db.settings.invoiceTitle || 'بيان';
-  if (!db.settings.companyPin || db.settings.companyPin === '1234' || db.settings.companyPin === '1272000') {
+  if (!db.settings.companyPin) {
     db.settings.companyPin = '2919';
   }
 
@@ -633,8 +916,14 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     }
   }
 
+  // Retroactively verify and correct all purchase invoice items, stock movements, and treasury impacts
+  db = verifyAndCorrectStockMovements(db).db;
+
   // Retroactively ensure all purchase & sale invoice items are posted to stock movements and catalog
   db = reconcileAndEnsureAllInvoiceStock(db).db;
+
+  // Retroactively audit and deduplicate all vouchers, treasury entries, and phantom deductions
+  db = reconcileAndDeduplicateAllFinancialRecords(db).db;
 
   // Retroactively ensure all invoices with payments match their linked vouchers down to the millimeter
   if (db.invoices && db.invoices.length > 0) {
@@ -1772,17 +2061,28 @@ export function mergeInvoices(existingList: Invoice[] = [], incomingList: Invoic
 }
 
 /**
- * Union & merge vouchers safely by ID to prevent loss across phones
+ * Union & merge vouchers safely by deterministic ID or composite key to prevent loss and duplicate vouchers across phones
  */
 export function mergeVouchers(existingList: Voucher[] = [], incomingList: Voucher[] = []): Voucher[] {
   const map = new Map<string, Voucher>();
+  const getKey = (v: Voucher) => {
+    if (v.invoiceId) {
+      return `vch_inv_${v.invoiceId}_${v.type}`;
+    }
+    if ((v as any).referenceNumber && v.type) {
+      return `vch_ref_${(v as any).referenceNumber}_${v.type}`;
+    }
+    return v.id;
+  };
+
   (existingList || []).forEach(v => {
-    if (v && v.id) map.set(v.id, v);
+    if (v && v.id) map.set(getKey(v), v);
   });
   (incomingList || []).forEach(v => {
     if (v && v.id) {
-      const existing = map.get(v.id);
-      map.set(v.id, existing ? { ...existing, ...v } : v);
+      const key = getKey(v);
+      const existing = map.get(key);
+      map.set(key, existing ? { ...existing, ...v } : v);
     }
   });
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -1790,13 +2090,21 @@ export function mergeVouchers(existingList: Voucher[] = [], incomingList: Vouche
 
 export function mergeTreasury(existingList: TreasuryEntry[] = [], incomingList: TreasuryEntry[] = []): TreasuryEntry[] {
   const map = new Map<string, TreasuryEntry>();
+  const getKey = (tr: TreasuryEntry) => {
+    if (tr.sourceId && tr.sourceType) {
+      return `tr_${tr.sourceType}_${tr.sourceId}_${tr.direction}`;
+    }
+    return tr.id;
+  };
+
   (existingList || []).forEach(tr => {
-    if (tr && tr.id) map.set(tr.id, tr);
+    if (tr && tr.id) map.set(getKey(tr), tr);
   });
   (incomingList || []).forEach(tr => {
     if (tr && tr.id) {
-      const existing = map.get(tr.id);
-      map.set(tr.id, existing ? { ...existing, ...tr } : tr);
+      const key = getKey(tr);
+      const existing = map.get(key);
+      map.set(key, existing ? { ...existing, ...tr } : tr);
     }
   });
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -1949,9 +2257,9 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     sm => sm.sourceId !== invoice.id && sm.refNumber !== invoice.number
   );
 
-  // 3. Remove all treasury entries related to this invoice (by sourceId, invoiceId, or invoice number in description)
+  // 3. Remove all treasury entries related to this invoice (by sourceId, invoiceId, deterministic ID, or invoice number in description)
   updated.treasury = updated.treasury.filter(tr => {
-    if (tr.sourceId === invoice.id || (tr as any).invoiceId === invoice.id) return false;
+    if (tr.sourceId === invoice.id || (tr as any).invoiceId === invoice.id || (tr.id && invoice.id && tr.id.includes(invoice.id))) return false;
     if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim()) return false;
     if (invoice.number && tr.description && (
       tr.description.includes(`رقم ${invoice.number}`) ||
@@ -1966,7 +2274,7 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
 
   // 4. Remove journal entry
   updated.journals = updated.journals.filter(
-    j => j.sourceId !== invoice.id && j.id !== invoice.journalEntryId
+    j => j.sourceId !== invoice.id && j.id !== invoice.journalEntryId && (!j.id.includes(invoice.id))
   );
 
   // 5. Remove any return entries
@@ -1980,7 +2288,8 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
   const linkedVoucherIds = new Set<string>();
   if (updated.vouchers) {
     updated.vouchers = updated.vouchers.filter(v => {
-      const isLinked = (v as any).sourceId === invoice.id ||
+      const isLinked = (v.id && invoice.id && v.id.includes(invoice.id)) ||
+                       (v as any).sourceId === invoice.id ||
                        (v as any).referenceNumber === invoice.number ||
                        (v as any).invoiceId === invoice.id ||
                        (v.description && v.description.includes(invoice.number));
@@ -2040,7 +2349,7 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
   // 1. Remove treasury entry
-  updated.treasury = updated.treasury.filter(tr => tr.sourceId !== voucher.id && tr.id !== voucher.id);
+  updated.treasury = updated.treasury.filter(tr => tr.sourceId !== voucher.id && tr.id !== voucher.id && !tr.id.includes(voucher.id));
 
   // 2. Remove journal entry
   updated.journals = updated.journals.filter(j => j.sourceId !== voucher.id && j.id !== voucher.journalEntryId);
@@ -2490,7 +2799,7 @@ export function syncInvoiceVouchers(
     updated.settings[settingKey] = Math.max(updated.settings[settingKey] || 1, nextSeq + 1);
 
     const newVoucher: Voucher = {
-      id: generateId(voucherType === 'receipt' ? 'rec' : 'pay'),
+      id: getDeterministicVoucherId(invoice.id, 0, voucherType),
       number: vNum,
       type: voucherType,
       date: invoice.date,

@@ -40,7 +40,8 @@ import {
   InvoiceAuditEntry,
   PaymentMethod,
   Product,
-  Party
+  Party,
+  TreasuryEntry
 } from '../types/accounting';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import {
@@ -62,7 +63,9 @@ import {
   parseNum,
   syncInvoiceVouchers,
   deleteInvoiceAndRevert,
-  getDeterministicStockMovementId
+  getDeterministicStockMovementId,
+  getDeterministicTreasuryId,
+  getDeterministicVoucherId
 } from '../services/accountingStorage';
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
@@ -1825,10 +1828,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         ? savedInvoice.payments
         : [{ method: mainPaymentMethod, amount: finalPaid }];
 
-      activePayments.forEach(pLine => {
+      activePayments.forEach((pLine, pIdx) => {
         if (pLine.amount > 0 && pLine.method !== 'آجل') {
-          updated.treasury.unshift({
-            id: generateId('tr'),
+          const deterministicTrId = getDeterministicTreasuryId(mode, invId, pIdx, trDirection);
+          const trEntry: TreasuryEntry = {
+            id: deterministicTrId,
             date: savedInvoice.date,
             direction: trDirection,
             amount: pLine.amount,
@@ -1838,7 +1842,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             sourceId: invId,
             branchId: invoiceBranchId,
             branchName: invoiceBranch.name
-          });
+          };
+
+          const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId || (t.sourceId === invId && t.direction === trDirection));
+          if (existingTrIdx > -1) {
+            updated.treasury[existingTrIdx] = trEntry;
+          } else {
+            updated.treasury.unshift(trEntry);
+          }
         }
       });
     }

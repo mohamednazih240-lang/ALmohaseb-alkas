@@ -18,7 +18,8 @@ import {
   X,
   FileText,
   DollarSign,
-  Eye
+  Eye,
+  ShieldCheck
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -37,8 +38,10 @@ import {
   calculateTreasuryBalance,
   logAudit,
   deleteTreasuryEntryAndRevert,
-  isBranchMatch
+  isBranchMatch,
+  reconcileAndDeduplicateAllFinancialRecords
 } from '../services/accountingStorage';
+import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
@@ -279,11 +282,77 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       branchName: currentBranch.name
     };
 
+    if (editingSimple) {
+      if (isExpense) {
+        const idx = updated.expenses.findIndex(e => e.id === editingSimple.id);
+        if (idx !== -1) {
+          updated.expenses[idx] = {
+            ...editingSimple,
+            date: simpleDate,
+            category: simpleCategory || 'مصروفات عامة',
+            amount: simpleAmount,
+            method: simpleMethod,
+            description: simpleDesc
+          };
+        }
+      } else {
+        const idx = updated.revenues.findIndex(r => r.id === editingSimple.id);
+        if (idx !== -1) {
+          updated.revenues[idx] = {
+            ...editingSimple,
+            date: simpleDate,
+            category: simpleCategory || 'إيرادات تشغيلية',
+            amount: simpleAmount,
+            method: simpleMethod,
+            description: simpleDesc
+          };
+        }
+      }
+
+      // Update treasury entry in place
+      const trIdx = updated.treasury.findIndex(t => t.sourceId === editingSimple.id || t.id.includes(editingSimple.id));
+      if (trIdx !== -1) {
+        updated.treasury[trIdx].amount = simpleAmount;
+        updated.treasury[trIdx].date = simpleDate;
+        updated.treasury[trIdx].method = simpleMethod;
+        updated.treasury[trIdx].description = `${isExpense ? 'مصروف' : 'إيراد'} (${currentBranch.name}): ${simpleCategory} (${simpleDesc})`;
+      }
+
+      // Update journal entry in place
+      const jIdx = updated.journals.findIndex(j => j.sourceId === editingSimple.id);
+      if (jIdx !== -1) {
+        const lines = updated.journals[jIdx].lines || [];
+        if (lines.length >= 2) {
+          if (isExpense) {
+            lines[0].debit = simpleAmount;
+            lines[1].credit = simpleAmount;
+          } else {
+            lines[0].debit = simpleAmount;
+            lines[1].credit = simpleAmount;
+          }
+        }
+        updated.journals[jIdx].date = simpleDate;
+      }
+
+      logAudit(
+        updated,
+        isExpense ? 'تعديل مصروف' : 'تعديل إيراد',
+        `${simpleCategory} بمبلغ ${formatMoney(simpleAmount, updated.settings.currency)}`
+      );
+      onUpdateDb(updated);
+      setShowSimpleModal(false);
+      setEditingSimple(null);
+      setSimpleAmount(0);
+      setSimpleDesc('');
+      return;
+    }
+
+    // Creating NEW Expense / Revenue (Idempotent Deterministic IDs)
     if (isExpense) {
       updated.expenses.unshift(record);
-      // Treasury Outflow
+      const deterministicTrId = `tr_expense_${recId}_p0_out`;
       updated.treasury.unshift({
-        id: generateId('tr'),
+        id: deterministicTrId,
         date: simpleDate,
         direction: 'out',
         amount: simpleAmount,
@@ -294,13 +363,13 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         branchId: targetBranchId,
         branchName: currentBranch.name
       });
-      // Journal: Debit Expenses (5201), Credit Cash/Bank
+
       const expAcc = updated.accounts.find(a => a.id === 'acc_exp')!;
       const cashAccId = getMethodAccountId(simpleMethod);
       const cashAcc = updated.accounts.find(a => a.id === cashAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
 
       updated.journals.unshift({
-        id: generateId('j'),
+        id: `jrn_expense_${recId}`,
         number: `J-${Date.now().toString().slice(-6)}`,
         date: simpleDate,
         description: `إثبات مصروف (${currentBranch.name}): ${record.category} - ${simpleDesc}`,
@@ -314,9 +383,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       });
     } else {
       updated.revenues.unshift(record);
-      // Treasury Inflow
+      const deterministicTrId = `tr_revenue_${recId}_p0_in`;
       updated.treasury.unshift({
-        id: generateId('tr'),
+        id: deterministicTrId,
         date: simpleDate,
         direction: 'in',
         amount: simpleAmount,
@@ -327,13 +396,13 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         branchId: targetBranchId,
         branchName: currentBranch.name
       });
-      // Journal: Debit Cash/Bank, Credit Other Revenues (4201)
+
       const revAcc = updated.accounts.find(a => a.id === 'acc_other_rev')!;
       const cashAccId = getMethodAccountId(simpleMethod);
       const cashAcc = updated.accounts.find(a => a.id === cashAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
 
       updated.journals.unshift({
-        id: generateId('j'),
+        id: `jrn_revenue_${recId}`,
         number: `J-${Date.now().toString().slice(-6)}`,
         date: simpleDate,
         description: `إثبات إيراد: ${record.category} - ${simpleDesc}`,
@@ -345,34 +414,6 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         ],
         createdAt: new Date().toISOString()
       });
-    }
-
-    if (editingSimple) {
-      if (isExpense) {
-        const idx = updated.expenses.findIndex(e => e.id === editingSimple.id);
-        if (idx !== -1) {
-          updated.expenses[idx] = { ...editingSimple, date: simpleDate, category: simpleCategory, amount: simpleAmount, method: simpleMethod, description: simpleDesc };
-        }
-      } else {
-        const idx = updated.revenues.findIndex(r => r.id === editingSimple.id);
-        if (idx !== -1) {
-          updated.revenues[idx] = { ...editingSimple, date: simpleDate, category: simpleCategory, amount: simpleAmount, method: simpleMethod, description: simpleDesc };
-        }
-      }
-      const trIdx = updated.treasury.findIndex(t => t.sourceId === editingSimple.id);
-      if (trIdx !== -1) {
-        updated.treasury[trIdx].amount = simpleAmount;
-        updated.treasury[trIdx].date = simpleDate;
-        updated.treasury[trIdx].method = simpleMethod;
-        updated.treasury[trIdx].description = `${isExpense ? 'مصروف' : 'إيراد'}: ${simpleCategory} (${simpleDesc})`;
-      }
-      logAudit(updated, isExpense ? 'تعديل مصروف' : 'تعديل إيراد', `${simpleCategory} بمبلغ ${formatMoney(simpleAmount, updated.settings.currency)}`);
-      onUpdateDb(updated);
-      setShowSimpleModal(false);
-      setEditingSimple(null);
-      setSimpleAmount(0);
-      setSimpleDesc('');
-      return;
     }
 
     logAudit(updated, isExpense ? 'تسجيل مصروف' : 'تسجيل إيراد', `${record.category} بمبلغ ${formatMoney(simpleAmount, updated.settings.currency)}`);
@@ -392,6 +433,17 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
     if (!confirm(`هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)} وعكس الأرصدة؟`)) return;
     const updated = deleteTreasuryEntryAndRevert(db, tr.id);
     onUpdateDb(updated);
+  };
+
+  const handleReconcileTreasury = async () => {
+    const res = reconcileAndDeduplicateAllFinancialRecords(db);
+    if (res.duplicateVouchersRemoved > 0 || res.duplicateTreasuryRemoved > 0) {
+      onUpdateDb(res.db);
+      await pushDatabaseToCloud(res.db);
+      alert(`✓ تم فحص النظام وتطهير ${res.duplicateVouchersRemoved} سندات مكررة و ${res.duplicateTreasuryRemoved} حركات خصم مكررة ومطابقة رصيد الخزينة بالكامل!`);
+    } else {
+      alert('✓ الخزينة والسندات متطابقة تماماً وخالية من أي تكرار أو فروق حسابية!');
+    }
   };
 
   const handleDeleteSimpleRecord = (item: SimpleRecord) => {
@@ -722,6 +774,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleReconcileTreasury}
+                className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                title="فحص وتطهير التكرارات ومطابقة الخزينة آلياً"
+              >
+                <ShieldCheck className="w-4 h-4 text-indigo-700" />
+                <span>مطابقة وتطهير الخزينة</span>
+              </button>
+
               <button
                 type="button"
                 onClick={handleExportTreasuryCsv}

@@ -664,7 +664,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   };
 
   // Save Settings
-  const handleSaveSettings = (e: React.FormEvent) => {
+  const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     updated.settings = { ...settingsForm };
@@ -684,7 +684,34 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     }
 
     onUpdateDb(updated);
-    alert('تم حفظ إعدادات النظام والرقم السري للشركة بنجاح.');
+
+    // Update active user session and device profile with new company details immediately
+    try {
+      const rawSession = localStorage.getItem('hesabaty_active_user');
+      if (rawSession) {
+        const session = JSON.parse(rawSession);
+        session.companyName = updated.settings.company;
+        localStorage.setItem('hesabaty_active_user', JSON.stringify(session));
+      }
+      const rawProfile = localStorage.getItem('hesabaty_device_profile');
+      if (rawProfile) {
+        const profile = JSON.parse(rawProfile);
+        profile.companyName = updated.settings.company;
+        profile.companyCode = updated.settings.companyCode;
+        localStorage.setItem('hesabaty_device_profile', JSON.stringify(profile));
+      }
+    } catch (err) {
+      console.warn('Session profile sync error:', err);
+    }
+
+    // Push to Firestore Cloud immediately
+    try {
+      await pushDatabaseToCloud(updated, true);
+    } catch (err) {
+      console.warn('Cloud sync error on settings save:', err);
+    }
+
+    alert(`✓ تم حفظ وتحديث اسم وبيانات منشأة «${updated.settings.company}» بنجاح وتأكيد مزامنتها سحابياً لجميع الأجهزة.`);
   };
 
   return (

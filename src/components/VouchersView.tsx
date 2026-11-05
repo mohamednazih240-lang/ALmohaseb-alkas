@@ -16,7 +16,8 @@ import {
 import {
   AccountingDB,
   Voucher,
-  PaymentMethod
+  PaymentMethod,
+  TreasuryEntry
 } from '../types/accounting';
 import {
   formatMoney,
@@ -182,9 +183,10 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
       branchName: currentBranch.name
     };
 
-    // 1. Treasury Entry
-    updated.treasury.unshift({
-      id: generateId('tr'),
+    // 1. Treasury Entry (Deterministic Idempotency Key)
+    const deterministicTrId = `tr_${type}_${vId}_p0_${isReceipt ? 'in' : 'out'}`;
+    const trEntry: TreasuryEntry = {
+      id: deterministicTrId,
       date: voucherDate,
       direction: isReceipt ? 'in' : 'out',
       amount,
@@ -194,12 +196,28 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
       sourceId: vId,
       branchId: targetBranchId,
       branchName: currentBranch.name
-    });
+    };
+
+    const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId || t.sourceId === vId);
+    if (existingTrIdx > -1) {
+      updated.treasury[existingTrIdx] = trEntry;
+    } else {
+      updated.treasury.unshift(trEntry);
+    }
 
     // 2. Automated Balanced Double-Entry Journal Entry
+    const deterministicJournalId = `jrn_${type}_${vId}`;
     const journal = createVoucherJournal(updated, newVoucher);
-    newVoucher.journalEntryId = journal.id;
-    updated.journals.unshift(journal);
+    journal.id = deterministicJournalId;
+    journal.sourceId = vId;
+    newVoucher.journalEntryId = deterministicJournalId;
+
+    const existingJIdx = updated.journals.findIndex(j => j.id === deterministicJournalId || j.sourceId === vId);
+    if (existingJIdx > -1) {
+      updated.journals[existingJIdx] = journal;
+    } else {
+      updated.journals.unshift(journal);
+    }
 
     // 3. Save voucher
     updated.vouchers.unshift(newVoucher);
