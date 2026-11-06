@@ -50,7 +50,8 @@ import {
   isBranchMatch,
   reconcileAndEnsureAllInvoiceStock,
   verifyAndCorrectStockMovements,
-  StockMovementVerificationReport
+  StockMovementVerificationReport,
+  normalizeArabicText
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import {
@@ -177,13 +178,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   // Filtered and sorted products (memoized to eliminate sorting lag on page changes)
   const filteredProducts = useMemo(() => {
-    const s = searchTerm.trim().toLowerCase();
+    const s = normalizeArabicText(searchTerm);
     return branchProducts.filter(p => {
       const matchSearch = !s ||
-        p.name.toLowerCase().includes(s) ||
-        p.code.toLowerCase().includes(s) ||
-        (p.barcode && p.barcode.toLowerCase().includes(s)) ||
-        (p.notes && p.notes.toLowerCase().includes(s));
+        normalizeArabicText(p.name).includes(s) ||
+        normalizeArabicText(p.code).includes(s) ||
+        (p.barcode && normalizeArabicText(p.barcode).includes(s)) ||
+        (p.notes && normalizeArabicText(p.notes).includes(s));
 
       let matchStock = true;
       if (stockStatusFilter === 'in_stock') matchStock = p.currentQty > 0;
@@ -598,15 +599,21 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     const curr = db.settings.currency;
     const moves: { date: string; desc: string; type: string; inQty: number; outQty: number; balance: number; unitPrice: number }[] = [];
 
-    // 1. Stock Movements log if present
-    const smList = db.stockMovements.filter(sm => sm.productId === product.id);
+    // 1. Stock Movements log with complete invoice and party details
+    const normPName = normalizeArabicText(product.name);
+    const smList = db.stockMovements.filter(sm =>
+      sm.productId === product.id ||
+      normalizeArabicText(sm.productName) === normPName
+    );
     if (smList.length > 0) {
       smList.forEach(sm => {
         const typeArabic = (sm.type as string) === 'purchase' ? 'شراء' :
                            (sm.type as string) === 'sale' ? 'بيع' :
                            ((sm.type as string) === 'purchase_return' || (sm.type as string) === 'sale_return') ? 'مرتجع' :
                            (sm.type as string) === 'opening' ? 'رصيد افتتاحي' : 'تسوية جردية';
-        const docDesc = sm.refNumber ? `فاتورة ${typeArabic} رقم ${sm.refNumber}` : `حركة ${typeArabic}`;
+        const linkedInv = db.invoices.find(i => i.id === sm.sourceId || (sm.refNumber && String(i.number).trim() === String(sm.refNumber).trim()));
+        const partyInfo = linkedInv?.partyName ? ` (${linkedInv.partyName})` : '';
+        const docDesc = sm.refNumber ? `فاتورة ${typeArabic} رقم ${sm.refNumber}${partyInfo}` : `حركة ${typeArabic}${partyInfo}`;
         moves.push({
           date: sm.date,
           desc: docDesc,

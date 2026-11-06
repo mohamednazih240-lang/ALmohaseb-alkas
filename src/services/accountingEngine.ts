@@ -81,9 +81,9 @@ export function getDeterministicJournalId(
 export function getDeterministicStockMovementId(
   sourceId: string,
   productId: string,
-  warehouseId: string
+  _warehouseId?: string
 ): string {
-  return `sm_${cleanIdPart(sourceId)}_${cleanIdPart(productId)}_${cleanIdPart(warehouseId)}`;
+  return `sm_${cleanIdPart(sourceId)}_${cleanIdPart(productId)}`;
 }
 
 /**

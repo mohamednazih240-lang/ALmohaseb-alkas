@@ -198,7 +198,7 @@ export function defaultSettings(): AppSettings {
     low: 5,
     cost: 'average',
     tax: 'disabled',
-    taxRate: 14,
+    taxRate: 0,
     notes: 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية',
     nextSale: 1,
     nextPurchase: 1,
@@ -272,14 +272,43 @@ export const RAHMA_INVOICE_17_ITEMS = [
 ];
 
 /**
- * Deterministic, idempotent stock movement ID generation
- * Follows exact pattern: sm_${invoiceId}_${productId}_${warehouseId}
+ * Normalizes Arabic text for 100% resilient search, matching, and deduplication.
+ * Removes tashkeel, standardizes alef/hamza forms, taa marbuta/haa, and yaa/alef maqsura.
  */
-export function getDeterministicStockMovementId(invoiceId: string, productId: string, warehouseId: string): string {
-  const cleanInv = (invoiceId || 'inv').replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanProd = (productId || 'prod').replace(/[^a-zA-Z0-9_-]/g, '_');
-  const cleanWh = (warehouseId || 'wh').replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `sm_${cleanInv}_${cleanProd}_${cleanWh}`;
+export function normalizeArabicText(text?: string | null): string {
+  if (!text) return '';
+  let s = text
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, '') // remove diacritics
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/ـ+/g, '') // remove kashida
+    .replace(/[×xX\*]/g, '×') // unify dimension symbols: 2×2, 2*2, 2x2
+    .replace(/["'”’]/g, '') // remove quotation marks
+    .replace(/\s+/g, ' ');
+  // Specific Egyptian hardware synonyms (whitespace-safe regex for Arabic characters)
+  s = s.replace(/(^|\s)سيلك(?=\s|$)/g, '$1سلك');
+  s = s.replace(/(^|\s)سليكون(?=\s|$)/g, '$1سيلكون');
+  s = s.replace(/(^|\s)فايبر(?=\s|$)/g, '$1فيبر');
+  // Handle known catalog aliases where invoices appended brand
+  if (s === 'اسطوانه بسكوته 9') {
+    s = 'اسطوانه بسكوته 9 apt';
+  }
+  return s.trim();
+}
+
+/**
+ * Deterministic, idempotent stock movement ID generation
+ * Follows exact canonical pattern: sm_${invoiceId}_${productId}
+ * Ensures identical ID regardless of branch or warehouse parameter
+ */
+export function getDeterministicStockMovementId(invoiceId: string, productId: string, _warehouseId?: string): string {
+  const cleanInv = (invoiceId || 'inv').toString().trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanProd = (productId || 'prod').toString().trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `sm_${cleanInv}_${cleanProd}`;
 }
 
 export interface StockMovementVerificationReport {
@@ -294,9 +323,9 @@ export interface StockMovementVerificationReport {
 }
 
 /**
- * دالة مركزية تفحص كل فواتير الشراء المسجلة، ومطابقة أصنافها مع حركات المخزون،
- * ثم إدراج الحركات المفقودة فقط مع استخدام معرف عملية فريد وحتمي لمنع التكرار المستقبلي،
- * والتأكد من مطابقة الأثر المالي في الخزينة وتحديث أرصدة المخزون بدقة تامة.
+ * دالة مركزية تفحص كافة الفواتير المسجلة (شراء وبيوع ومرتجع)، وتطابق أصنافها مع حركات المخزون،
+ * وتدمج أي حركات مكررة نتجت سابقاً لمنع تضاعف الأرصدة، وتدرج الحركات المفقودة بمعرف فريد وحتمي،
+ * وتحدث الأثر المالي في الخزينة وتسمع الأصناف غير المشتراة بالسالب حتى يتم شراؤها.
  */
 export function verifyAndCorrectStockMovements(db: AccountingDB): { db: AccountingDB; report: StockMovementVerificationReport } {
   if (!db) {
@@ -325,66 +354,163 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     ];
   }
   const defaultWh = db.warehouses[0];
-  const defaultBranchId = db.branches?.[0]?.id || 'br_main';
+  const defaultBranchId = db.branches?.[0]?.id || 'br_mawan';
+  const defaultBranchName = db.branches?.[0]?.name || defaultWh.name;
 
   let invoicesWithMissingMovements = 0;
   let missingMovementsAdded = 0;
   let treasuryDiscrepanciesFixed = 0;
   const details: string[] = [];
 
-  // 1. الحفاظ الصارم على أصناف فاتورة رقم 17 لشركة الرحمة للحدايد (15 صنفاً)
+  // 1. تسوية وتوحيد دليل الأصناف (Catalog Realignment & Unique Codes)
+  // لمنع تداخل الأكواد (مثل تشارك شريط لحام ولفة خرطوم في كود واحد) ودمج المسميات المترادفة (مثل سلك مقابل سيلك)
+  let maxCodeNum = 1300;
+  db.products.forEach(p => {
+    const m = p.code?.match(/\d+/);
+    if (m) {
+      const num = parseInt(m[0], 10);
+      if (num > maxCodeNum) maxCodeNum = num;
+    }
+  });
+
+  const prodByNorm = new Map<string, Product>();
+  const uniqueProducts: Product[] = [];
+  const mergedIdMap = new Map<string, string>();
+  const seenCodes = new Set<string>();
+
+  db.products.forEach(p => {
+    const norm = normalizeArabicText(p.name);
+    if (!prodByNorm.has(norm)) {
+      // التأكد من أن كود الصنف فريد تماماً ولا يتكرر لصنف آخر
+      if (!p.code || p.code.trim() === '' || seenCodes.has(p.code.trim())) {
+        maxCodeNum++;
+        p.code = `P-${maxCodeNum}`;
+      }
+      seenCodes.add(p.code.trim());
+      prodByNorm.set(norm, p);
+      uniqueProducts.push(p);
+    } else {
+      // صنف مكرر بنمط كتابة بديل (مثال: سيلك مقابل سلك)
+      const canonical = prodByNorm.get(norm)!;
+      mergedIdMap.set(p.id, canonical.id);
+      if ((canonical.currentQty === 0 || !canonical.currentQty) && (p.currentQty || 0) > 0) {
+        canonical.currentQty = p.currentQty;
+      }
+      if ((!canonical.buyPrice || canonical.buyPrice === 0) && (p.buyPrice || 0) > 0) {
+        canonical.buyPrice = p.buyPrice;
+      }
+      if (p.name.includes('APT') && !canonical.name.includes('APT')) {
+        canonical.name = p.name;
+      }
+      if (p.name.includes('سلك') && canonical.name.includes('سيلك')) {
+        canonical.name = p.name;
+      }
+    }
+  });
+  db.products = uniqueProducts;
+
+  // تحديث معرفات الأصناف المدمجة داخل حركات المخزون وبنود الفواتير
+  if (mergedIdMap.size > 0) {
+    db.stockMovements.forEach(sm => {
+      if (mergedIdMap.has(sm.productId)) {
+        const canonicalId = mergedIdMap.get(sm.productId)!;
+        const canonical = db.products.find(p => p.id === canonicalId);
+        sm.productId = canonicalId;
+        if (canonical) sm.productName = canonical.name;
+      }
+    });
+    db.invoices.forEach(inv => {
+      inv.items?.forEach(it => {
+        if (it.productId && mergedIdMap.has(it.productId)) {
+          const canonicalId = mergedIdMap.get(it.productId)!;
+          const canonical = db.products.find(p => p.id === canonicalId);
+          it.productId = canonicalId;
+          if (canonical) {
+            it.productCode = canonical.code;
+          }
+        }
+      });
+    });
+  }
+
+  // 2. الحفاظ الصارم على فاتورة رقم 17 لشركة الرحمة للحدايد (المنشئ Ahmed Nazih والمعدل Mohamed Nazih)
   const inv17 = db.invoices.find(
     i => (i.number === '17' && (i.type === 'purchase' || i.invoiceKind === 'purchase')) ||
          (i.partyName && i.partyName.includes('الرحمة'))
   );
-  if (inv17 && (!inv17.items || inv17.items.length < 15)) {
-    inv17.items = JSON.parse(JSON.stringify(RAHMA_INVOICE_17_ITEMS));
-    inv17.total = 4319.14;
-    inv17.subtotal = 4319.14;
-    inv17.paid = 4319.14;
-    inv17.remaining = 0;
-    inv17.status = 'مدفوع';
-    inv17.paymentMethod = 'نقدي';
-    inv17.branchId = inv17.branchId || 'br_mawan';
-    inv17.branchName = inv17.branchName || 'الفرع الرئيسي - شركة الموان';
+  if (inv17) {
+    if (!inv17.items || inv17.items.length < 15) {
+      inv17.items = JSON.parse(JSON.stringify(RAHMA_INVOICE_17_ITEMS));
+      inv17.total = 4319.14;
+      inv17.subtotal = 4319.14;
+      inv17.paid = 4319.14;
+      inv17.remaining = 0;
+      inv17.status = 'مدفوع';
+      inv17.paymentMethod = 'نقدي';
+      inv17.branchId = inv17.branchId || 'br_mawan';
+      inv17.branchName = inv17.branchName || 'الفرع الرئيسي - شركة الموان';
+    }
+    if (!inv17.createdBy || inv17.createdBy === 'مدير النظام') {
+      inv17.createdBy = 'Ahmed Nazih';
+    }
+    if (!inv17.updatedBy || inv17.updatedBy === inv17.createdBy) {
+      inv17.updatedBy = 'Mohamed Nazih';
+    }
   }
 
-  // 2. فحص كافة فواتير الشراء المسجلة
-  const purchaseInvoices = db.invoices.filter(inv =>
-    inv.type === 'purchase' ||
-    inv.invoiceKind === 'purchase' ||
-    (inv.items && inv.items.length > 0 && !inv.type && inv.partyName?.includes('مورد'))
-  );
-
-  purchaseInvoices.forEach(inv => {
+  // 3. فحص كافة الفواتير المسجلة وربط بنودها بأصنافها الحقيقية بالاسم أولاً
+  (db.invoices || []).forEach(inv => {
     if (!Array.isArray(inv.items) || inv.items.length === 0) return;
 
+    const isPurchase = inv.type === 'purchase' || inv.invoiceKind === 'purchase';
+    const isSale = inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale';
+    const isSaleReturn = inv.invoiceKind === 'sale_return';
+    const isPurchaseReturn = inv.invoiceKind === 'purchase_return';
+
     const targetBranch = inv.branchId || defaultBranchId;
-    const branchName = inv.branchName || db.branches?.find(b => b.id === targetBranch)?.name || defaultWh.name;
+    const branchName = inv.branchName || db.branches?.find(b => b.id === targetBranch)?.name || defaultBranchName;
     let invHadMissing = false;
 
+    // إعادة احتساب إجمالي بنود الفاتورة لضمان زيادة الإجمالي عند إضافة أصناف
+    const calculatedItemsTotal = inv.items.reduce((s, it) => s + (Number(it.total) || ((Number(it.qty) || 0) * (Number(it.unitPrice || it.costPrice || (it as any).price) || 0))), 0);
+    if (calculatedItemsTotal > 0 && Math.abs((Number(inv.total) || 0) - calculatedItemsTotal) > 0.05) {
+      inv.subtotal = calculatedItemsTotal;
+      inv.total = calculatedItemsTotal;
+      if (inv.status === 'مدفوع' || (inv.paymentMethod && inv.paymentMethod !== 'آجل')) {
+        inv.paid = calculatedItemsTotal;
+        inv.remaining = 0;
+      }
+    }
+
     inv.items.forEach(item => {
-      if (!item || !item.productName || item.qty <= 0) return;
+      if (!item || !item.productName) return;
+      const normItemName = normalizeArabicText(item.productName);
 
-      // أ) البحث عن الصنف في الكتالوج أو تسجيله فوراً إن لم يكن مسجلاً
-      let prod = db.products.find(p =>
-        (item.productId && p.id === item.productId) ||
-        (item.productCode && p.code.toLowerCase() === item.productCode.toLowerCase()) ||
-        (item.productName && p.name.trim().toLowerCase() === item.productName.trim().toLowerCase())
-      );
+      // المطابقة الصارمة: بالاسم المطابق لغوياً أولاً وأبداً لمنع اختطاف الأصناف بسبب تشابه الكود
+      let prod = prodByNorm.get(normItemName);
 
+      // ثانياً: إذا كان معرف الصنف مسجلاً ومطابقاً
+      if (!prod && item.productId) {
+        const canonicalId = mergedIdMap.get(item.productId) || item.productId;
+        const candidate = db.products.find(p => p.id === canonicalId);
+        if (candidate && normalizeArabicText(candidate.name) === normItemName) {
+          prod = candidate;
+        }
+      }
+
+      // ثالثاً: إدراج الصنف في الكتالوج فوراً إذا لم يكن موجوداً
       if (!prod && item.productName.trim()) {
-        const rawName = item.productName.trim();
-        const newCode = (item.productCode && item.productCode.trim())
-          ? item.productCode.trim()
-          : `PRD-${100 + db.products.length + 1}`;
-        const unitBuy = Number(item.unitPrice || item.costPrice) || 0;
-        const unitSell = unitBuy > 0 ? unitBuy * 1.25 : 100;
-        const newProdId = (item.productId && item.productId.startsWith('prd_')) ? item.productId : generateId('prod');
+        maxCodeNum++;
+        const newCode = `P-${maxCodeNum}`;
+        const unitBuy = isPurchase
+          ? (Number(item.unitPrice || item.costPrice || (item as any).price) || 0)
+          : (Number(item.costPrice) || (Number(item.unitPrice) > 0 ? Number(item.unitPrice) * 0.75 : 0));
+        const unitSell = isSale ? (Number(item.unitPrice) || 0) : (unitBuy > 0 ? unitBuy * 1.25 : 100);
+        const newProdId = generateId('prod');
 
         prod = {
           id: newProdId,
-          name: rawName,
+          name: item.productName.trim(),
           code: newCode,
           barcode: '',
           category: 'عامة',
@@ -398,39 +524,44 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
           branchesData: {}
         };
         db.products.push(prod);
+        prodByNorm.set(normItemName, prod);
+        seenCodes.add(newCode);
       }
 
       if (!prod) return;
 
+      // تصحيح وتثبيت ارتباط بند الفاتورة بالصنف الحقيقي
       item.productId = prod.id;
       item.productCode = prod.code;
 
-      // ب) معرف حركة المخزون الحتمي والفريد: sm_${invId}_${productId}_${warehouseId}
-      const deterministicSmId = getDeterministicStockMovementId(inv.id, prod.id, targetBranch);
-
-      // ج) فحص وجود الحركة المخزنية المطابقة
-      const existingIdx = db.stockMovements.findIndex(sm =>
-        sm.id === deterministicSmId ||
-        (sm.sourceId === inv.id && (sm.productId === prod.id || ((sm as any).productCode && prod.code && (sm as any).productCode.toLowerCase() === prod.code.toLowerCase()))) ||
-        (sm.refNumber && String(sm.refNumber).trim() === String(inv.number).trim() && sm.type === 'purchase' && (sm.productId === prod.id || ((sm as any).productCode && prod.code && (sm as any).productCode.toLowerCase() === prod.code.toLowerCase())))
-      );
+      // معرف حركة المخزون الحتمي والفريد: sm_${invId}_${productId}
+      const deterministicSmId = getDeterministicStockMovementId(inv.id, prod.id);
 
       const qty = Number(item.qty) || 0;
-      const unitCost = Number(item.costPrice || item.unitPrice) || 0;
+      const unitCost = Number(item.costPrice || item.unitPrice || (item as any).price) || 0;
+      // المشتريات ومرتجع المبيعات تزيد المخزون (+qty)
+      // المبيعات ومرتجع المشتريات تخصم من المخزون (-qty بالسالب للأصناف غير المشتراة بعد)
+      const qtyChange = (isPurchase || isSaleReturn) ? Math.abs(qty) : -Math.abs(qty);
+      const movementType = isPurchase ? 'purchase' : (isSale ? 'sale' : (isSaleReturn ? 'sale_return' : 'purchase_return'));
 
-      if (existingIdx === -1) {
-        // الحركة مفقودة -> إدراج الحركة بالمعرف الحتمي الفريد
+      // فحص وجود الحركة المخزنية المطابقة للصنف الحقيقي
+      const existingSmIdx = db.stockMovements.findIndex(sm =>
+        sm.id === deterministicSmId ||
+        (sm.sourceId === inv.id && (sm.productId === prod.id || normalizeArabicText(sm.productName) === normItemName))
+      );
+
+      if (existingSmIdx === -1) {
         db.stockMovements.unshift({
           id: deterministicSmId,
           date: inv.date || getTodayDate(),
           productId: prod.id,
           productName: prod.name,
-          warehouseId: targetBranch,
-          warehouseName: branchName,
-          qtyChange: qty,
+          warehouseId: defaultWh.id,
+          warehouseName: defaultWh.name,
+          qtyChange,
           balanceAfter: 0,
-          unitCost: unitCost,
-          type: 'purchase',
+          unitCost,
+          type: movementType,
           refNumber: inv.number,
           sourceId: inv.id,
           branchId: targetBranch,
@@ -439,60 +570,97 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
         missingMovementsAdded++;
         invHadMissing = true;
       } else {
-        // الحركة موجودة -> تثبيت المعرف الحتمي وتحديث الحقول الموثوقة لمنع أي تكرار مستقبلي
-        const existingSm = db.stockMovements[existingIdx];
-        existingSm.id = deterministicSmId;
-        existingSm.productId = prod.id;
-        existingSm.productName = prod.name;
-        existingSm.qtyChange = qty;
-        existingSm.unitCost = unitCost;
-        existingSm.type = 'purchase';
-        existingSm.branchId = targetBranch;
+        const sm = db.stockMovements[existingSmIdx];
+        sm.id = deterministicSmId;
+        sm.productId = prod.id;
+        sm.productName = prod.name;
+        sm.qtyChange = qtyChange;
+        sm.unitCost = unitCost;
+        sm.type = movementType;
+        sm.branchId = targetBranch;
+        sm.branchName = branchName;
+        sm.sourceId = inv.id;
+        sm.refNumber = inv.number;
       }
     });
 
+    // إزالة أي حركات مخزنية يتيمة للفاتورة لا تنتمي لأصنافها الفعلية
+    const validInvProdIds = new Set(inv.items.map(it => it.productId));
+    db.stockMovements = db.stockMovements.filter(sm => sm.sourceId !== inv.id || validInvProdIds.has(sm.productId));
+
     if (invHadMissing) {
       invoicesWithMissingMovements++;
-      details.push(`فاتورة مشتريات #${inv.number} (${inv.partyName || 'مورد'}): تم فحص وإدراج أصنافها المفقودة في حركات المخزون.`);
+      details.push(`فاتورة #${inv.number} (${inv.partyName || 'طرف'}): تم فحص وإدراج أصنافها في حركات المخزون.`);
     }
 
-    // د) التأكد من التأثير المالي للفاتورة على الخزينة في حال السداد
+    // التأكد من التأثير المالي التام للفاتورة على الخزينة في حال السداد أو الكاش
     const paidAmount = Number(inv.paid) > 0 ? Number(inv.paid) : (inv.paymentMethod && inv.paymentMethod !== 'آجل' ? Number(inv.total) : 0);
     if (paidAmount > 0) {
-      const deterministicTrId = getDeterministicTreasuryId('purchase', inv.id, 0, 'out');
+      const isOutflow = isPurchase || isSaleReturn;
+      const direction: 'in' | 'out' = isOutflow ? 'out' : 'in';
+      const sourceType = isPurchase ? 'purchase' : (isSale ? 'sale' : (isSaleReturn ? 'sale_return' : 'purchase_return'));
+      const deterministicTrId = getDeterministicTreasuryId(sourceType, inv.id, 0, direction);
+
       const existingTr = db.treasury.find(tr =>
         tr.id === deterministicTrId ||
         tr.sourceId === inv.id ||
         ((tr as any).invoiceId === inv.id) ||
-        ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(inv.number).trim() && tr.direction === 'out')
+        (tr.sourceType === sourceType && (tr as any).refNumber && String((tr as any).refNumber).trim() === String(inv.number).trim() && tr.direction === direction)
       );
+
+      const desc = isPurchase
+        ? `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'}`
+        : `تحصيل فاتورة مبيعات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'عميل'}`;
+
       if (!existingTr) {
         db.treasury.unshift({
           id: deterministicTrId,
           date: inv.date || getTodayDate(),
-          direction: 'out',
+          direction,
           amount: paidAmount,
           method: inv.paymentMethod || 'نقدي',
-          description: `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'}`,
-          sourceType: 'purchase',
+          description: desc,
+          sourceType,
           sourceId: inv.id,
           branchId: targetBranch,
           branchName: branchName
         });
         treasuryDiscrepanciesFixed++;
-      } else if (existingTr.id !== deterministicTrId) {
+      } else {
         existingTr.id = deterministicTrId;
+        if (Math.abs(existingTr.amount - paidAmount) > 0.01) {
+          existingTr.amount = paidAmount;
+          existingTr.method = inv.paymentMethod || existingTr.method || 'نقدي';
+          existingTr.description = desc;
+          treasuryDiscrepanciesFixed++;
+        }
       }
     }
   });
 
-  // 3. إعادة احتساب أرصدة الأصناف بدقة وتحديث متوسط التكلفة المرجح
+  // 4. إزالة أي حركات مكررة متبقية لضمان وجود حركة واحدة فقط لكل بند
+  const seenSmKeys = new Set<string>();
+  const deduplicatedMovements: StockMovement[] = [];
+  for (const sm of db.stockMovements) {
+    if (!sm.sourceId) {
+      deduplicatedMovements.push(sm);
+      continue;
+    }
+    const key = `${sm.sourceId}::${sm.productId}`;
+    if (!seenSmKeys.has(key)) {
+      seenSmKeys.add(key);
+      deduplicatedMovements.push(sm);
+    }
+  }
+  db.stockMovements = deduplicatedMovements;
+
+  // 5. إعادة احتساب أرصدة الأصناف بدقة تامة من سجل حركات المخزون، وتحديث متوسط التكلفة المرجح
   let correctedProductsCount = 0;
   db.products.forEach(p => {
+    const normPName = normalizeArabicText(p.name);
     const prodMovements = db.stockMovements.filter(sm =>
       sm.productId === p.id ||
-      ((sm as any).productCode && p.code && (sm as any).productCode.toLowerCase() === p.code.toLowerCase()) ||
-      sm.productName.trim().toLowerCase() === p.name.trim().toLowerCase()
+      normalizeArabicText(sm.productName) === normPName
     );
 
     const totalQty = prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0);
@@ -514,8 +682,8 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       correctedProductsCount++;
     }
 
-    const branchesMap = p.branchesData || {};
-    p.branchesData = branchesMap;
+    const bData = p.branchesData || {};
+    p.branchesData = bData;
     const branchInfo: BranchProductData = {
       currentQty: totalQty,
       buyPrice: p.buyPrice,
@@ -524,21 +692,22 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       minStock: p.minStock || 5,
       avgCost
     };
-    branchesMap['br_mawan'] = { ...branchInfo };
-    branchesMap['br_main'] = { ...branchInfo };
+    bData['br_mawan'] = { ...branchInfo };
+    bData['br_main'] = { ...branchInfo };
     if (db.branches) {
       db.branches.forEach(b => {
-        branchesMap[b.id] = { ...branchInfo };
+        bData[b.id] = { ...branchInfo };
       });
     }
   });
 
+  const totalPurchaseInvoices = db.invoices.filter(i => i.type === 'purchase' || i.invoiceKind === 'purchase').length;
   const totalStockUnitsInWarehouse = db.products.reduce((sum, p) => sum + (p.currentQty || 0), 0);
 
   return {
     db,
     report: {
-      totalPurchaseInvoices: purchaseInvoices.length,
+      totalPurchaseInvoices,
       invoicesWithMissingMovements,
       missingMovementsAdded,
       correctedProductsCount,
@@ -552,195 +721,15 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
 
 /**
  * Reconciles and guarantees 100% atomic posting of all invoice items into stock movements and catalog balances.
- * Audits every purchase, sale, and return invoice to ensure every item has a deterministic movement and affects inventory.
+ * Delegates directly to verifyAndCorrectStockMovements for 100% unified, deduplicated consistency.
  */
 export function reconcileAndEnsureAllInvoiceStock(db: AccountingDB): { db: AccountingDB; reconciledCount: number; fixedMovementsCount: number } {
-  if (!db) return { db, reconciledCount: 0, fixedMovementsCount: 0 };
-  if (!db.products) db.products = [];
-  if (!db.stockMovements) db.stockMovements = [];
-  if (!db.warehouses || db.warehouses.length === 0) {
-    db.warehouses = [
-      { id: 'wh_mawan', name: 'مخزن شركة الموان الرئيسي', location: 'المقر الرئيسي', isDefault: true }
-    ];
-  }
-  const defaultWh = db.warehouses[0];
-  const whId = defaultWh.id;
-
-  let fixedMovementsCount = 0;
-  let reconciledCount = 0;
-
-  // 1. Audit and guarantee every invoice item has its corresponding deterministic stock movement
-  (db.invoices || []).forEach(inv => {
-    // Special preservation check for Invoice #17 from شركة الرحمة للحدايد
-    if ((inv.number === '17' && (inv.type === 'purchase' || inv.invoiceKind === 'purchase')) ||
-        (inv.partyName && inv.partyName.includes('الرحمة'))) {
-      if (!inv.items || inv.items.length < 15) {
-        inv.items = JSON.parse(JSON.stringify(RAHMA_INVOICE_17_ITEMS));
-        inv.total = 4319.14;
-        inv.subtotal = 4319.14;
-        inv.paid = 4319.14;
-        inv.remaining = 0;
-        inv.status = 'مدفوع';
-        inv.branchId = 'br_mawan';
-        inv.branchName = 'الفرع الرئيسي - شركة الموان';
-        inv.paymentMethod = 'نقدي';
-        inv.createdBy = 'Ahmed Nazih';
-        inv.updatedBy = 'Mohamed Nazih';
-      }
-    }
-
-    if (!Array.isArray(inv.items) || inv.items.length === 0) return;
-
-    const isPurchase = inv.type === 'purchase' || inv.invoiceKind === 'purchase';
-    const isSale = inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale';
-    const isSaleReturn = inv.invoiceKind === 'sale_return';
-    const isPurchaseReturn = inv.invoiceKind === 'purchase_return';
-
-    inv.items.forEach(item => {
-      // Find product in catalog by id, code, or name
-      let prod = db.products.find(p =>
-        (item.productId && p.id === item.productId) ||
-        (item.productCode && p.code.toLowerCase() === item.productCode.toLowerCase()) ||
-        (item.productName && p.name.trim().toLowerCase() === item.productName.trim().toLowerCase())
-      );
-
-      // If product does not exist in catalog, auto-register it immediately
-      if (!prod && item.productName && item.productName.trim()) {
-        const rawName = item.productName.trim();
-        const newCode = (item.productCode && item.productCode.trim())
-          ? item.productCode.trim()
-          : `PRD-${100 + db.products.length + 1}`;
-        const unitBuy = isPurchase ? item.unitPrice : (item.costPrice || (item.unitPrice > 0 ? item.unitPrice * 0.75 : 0));
-        const unitSell = isSale ? item.unitPrice : (unitBuy > 0 ? unitBuy * 1.25 : 100);
-        const unitWholesale = unitSell * 0.9;
-        const newProdId = (item.productId && item.productId.startsWith('prod_')) ? item.productId : generateId('prod');
-
-        prod = {
-          id: newProdId,
-          name: rawName,
-          code: newCode,
-          barcode: '',
-          category: 'عامة',
-          unit: item.unit || 'قطعة',
-          buyPrice: unitBuy,
-          sellPrice: unitSell,
-          wholesalePrice: unitWholesale,
-          minStock: 5,
-          currentQty: 0,
-          avgCost: unitBuy,
-          branchesData: {
-            'br_mawan': {
-              currentQty: 0,
-              buyPrice: unitBuy,
-              sellPrice: unitSell,
-              wholesalePrice: unitWholesale,
-              minStock: 5,
-              avgCost: unitBuy
-            },
-            'br_main': {
-              currentQty: 0,
-              buyPrice: unitBuy,
-              sellPrice: unitSell,
-              wholesalePrice: unitWholesale,
-              minStock: 5,
-              avgCost: unitBuy
-            }
-          }
-        };
-        db.products.push(prod);
-      }
-
-      if (!prod) return;
-
-      // Link item to product
-      item.productId = prod.id;
-      item.productCode = prod.code;
-
-      const deterministicId = getDeterministicStockMovementId(inv.id, prod.id, whId);
-
-      // Check if stock movement exists
-      const existingMovementIndex = db.stockMovements.findIndex(sm =>
-        sm.id === deterministicId ||
-        (sm.sourceId === inv.id && (sm.productId === prod.id || sm.productName.trim().toLowerCase() === prod.name.trim().toLowerCase())) ||
-        (sm.refNumber === inv.number && sm.productId === prod.id && (
-          (isPurchase && sm.type === 'purchase') ||
-          (isSale && sm.type === 'sale') ||
-          (isSaleReturn && sm.type === 'sale_return') ||
-          (isPurchaseReturn && sm.type === 'purchase_return')
-        ))
-      );
-
-      const qtyChange = (isPurchase || isSaleReturn) ? item.qty : -item.qty;
-      const movementType = isPurchase ? 'purchase' : (isSale ? 'sale' : (isSaleReturn ? 'sale_return' : 'purchase_return'));
-
-      if (existingMovementIndex === -1) {
-        db.stockMovements.unshift({
-          id: deterministicId,
-          date: inv.date,
-          productId: prod.id,
-          productName: prod.name,
-          warehouseId: whId,
-          warehouseName: defaultWh.name,
-          qtyChange,
-          balanceAfter: 0,
-          unitCost: item.costPrice || item.unitPrice,
-          type: movementType,
-          refNumber: inv.number,
-          sourceId: inv.id,
-          branchId: inv.branchId || 'br_mawan',
-          branchName: inv.branchName || 'الفرع الرئيسي - شركة الموان'
-        });
-        fixedMovementsCount++;
-      } else {
-        const existingSm = db.stockMovements[existingMovementIndex];
-        existingSm.id = deterministicId;
-        existingSm.productId = prod.id;
-        existingSm.productName = prod.name;
-        existingSm.qtyChange = qtyChange;
-        existingSm.unitCost = item.costPrice || item.unitPrice;
-        existingSm.branchId = inv.branchId || 'br_mawan';
-      }
-      reconciledCount++;
-    });
-  });
-
-  // 2. Recalculate accurate product stock quantities and weighted average cost from all stock movements
-  db.products.forEach(p => {
-    const prodMovements = db.stockMovements.filter(sm =>
-      sm.productId === p.id ||
-      sm.productName.trim().toLowerCase() === p.name.trim().toLowerCase()
-    );
-
-    const totalQty = prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0);
-
-    const purchaseMoves = prodMovements.filter(sm => sm.type === 'purchase' && sm.qtyChange > 0);
-    let avgCost = p.buyPrice || 0;
-    if (purchaseMoves.length > 0) {
-      const totalCostSum = purchaseMoves.reduce((sum, sm) => sum + (sm.qtyChange * (sm.unitCost || 0)), 0);
-      const totalPurchasedQty = purchaseMoves.reduce((sum, sm) => sum + sm.qtyChange, 0);
-      if (totalPurchasedQty > 0) {
-        avgCost = totalCostSum / totalPurchasedQty;
-      }
-      p.buyPrice = purchaseMoves[0].unitCost || p.buyPrice;
-    }
-
-    p.currentQty = totalQty;
-    p.avgCost = avgCost;
-
-    if (!p.branchesData) p.branchesData = {};
-    const branchInfo: BranchProductData = {
-      currentQty: totalQty,
-      buyPrice: p.buyPrice,
-      sellPrice: p.sellPrice,
-      wholesalePrice: p.wholesalePrice,
-      minStock: p.minStock || 5,
-      avgCost
-    };
-    p.branchesData['br_mawan'] = { ...branchInfo };
-    p.branchesData['br_main'] = { ...branchInfo };
-  });
-
-  return { db, reconciledCount, fixedMovementsCount };
+  const result = verifyAndCorrectStockMovements(db);
+  return {
+    db: result.db,
+    reconciledCount: result.report.invoicesWithMissingMovements + result.report.correctedProductsCount,
+    fixedMovementsCount: result.report.missingMovementsAdded
+  };
 }
 
 /**

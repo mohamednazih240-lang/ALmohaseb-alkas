@@ -65,7 +65,8 @@ import {
   deleteInvoiceAndRevert,
   getDeterministicStockMovementId,
   getDeterministicTreasuryId,
-  getDeterministicVoucherId
+  getDeterministicVoucherId,
+  normalizeArabicText
 } from '../services/accountingStorage';
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
@@ -1686,18 +1687,27 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const wh = updated.warehouses.find(w => w.id === whId);
 
     savedInvoice.items.forEach(item => {
-      let prod = updated.products.find(
-        p => (item.productId && p.id === item.productId) ||
-             (item.productCode && p.code.toLowerCase() === item.productCode.toLowerCase()) ||
-             (item.productName && p.name.trim().toLowerCase() === item.productName.trim().toLowerCase())
-      );
+      const normItemName = normalizeArabicText(item.productName);
+      // Primary match: by exact normalized name so future purchases of the same product increase its stock instead of duplicating
+      let prod = updated.products.find(p => normItemName && normalizeArabicText(p.name) === normItemName);
+      if (!prod && item.productId) {
+        prod = updated.products.find(p => p.id === item.productId);
+      }
 
       // Auto-register brand new items entered on the fly into the products catalog
       if (!prod && item.productName && item.productName.trim()) {
         const rawName = item.productName.trim();
-        const newCode = (item.productCode && item.productCode.trim())
+        let maxCode = 1300;
+        updated.products.forEach(p => {
+          const m = p.code?.match(/\d+/);
+          if (m) {
+            const num = parseInt(m[0], 10);
+            if (num > maxCode) maxCode = num;
+          }
+        });
+        const newCode = (item.productCode && item.productCode.trim() && !updated.products.some(p => p.code === item.productCode.trim()))
           ? item.productCode.trim()
-          : `PRD-${100 + updated.products.length + 1}`;
+          : `P-${maxCode + 1}`;
         const unitBuy = mode === 'purchase'
           ? item.unitPrice
           : (item.costPrice || (item.unitPrice > 0 ? item.unitPrice * 0.75 : 0));
@@ -1740,53 +1750,23 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
 
       if (prod) {
-        const bp = getProductForBranch(prod, invoiceBranchId);
         let qtyChange = 0;
-        let newQty = bp.currentQty;
-        let newAvgCost = bp.avgCost || bp.buyPrice || 0;
-        let newBuyPrice = bp.buyPrice || 0;
-
         if (mode === 'sale' || mode === 'wholesale') {
           qtyChange = -item.qty;
-          newQty -= item.qty; // Supports negative stock if sold before receiving
-          // Lock cost price on the invoice item for 100% exact profit calculation
+          const bp = getProductForBranch(prod, invoiceBranchId);
           const effectiveCost = (bp.avgCost && bp.avgCost > 0) ? bp.avgCost : (bp.buyPrice || prod.buyPrice || 0);
           item.costPrice = effectiveCost;
         } else if (mode === 'purchase') {
           qtyChange = item.qty;
-          const oldQty = bp.currentQty;
-          const oldCost = bp.avgCost || bp.buyPrice || 0;
-          const newQ = item.qty;
-          const newCost = item.unitPrice;
-
-          // If previous stock was zero or negative, the new cost is the purchase price
-          if (oldQty <= 0) {
-            newAvgCost = newCost;
-          } else {
-            const totalQ = oldQty + newQ;
-            newAvgCost = totalQ > 0 ? ((oldQty * oldCost) + (newQ * newCost)) / totalQ : newCost;
-          }
-          newBuyPrice = newCost;
-          newQty += item.qty;
-          item.costPrice = newCost;
+          item.costPrice = item.unitPrice;
         } else if (mode === 'sale_return') {
           qtyChange = item.qty;
-          newQty += item.qty;
         } else if (mode === 'purchase_return') {
           qtyChange = -item.qty;
-          newQty -= item.qty;
         }
 
-        const updatedProd = updateProductBranchData(prod, invoiceBranchId, {
-          currentQty: newQty,
-          avgCost: newAvgCost,
-          buyPrice: newBuyPrice
-        });
-        const pIdx = updated.products.findIndex(p => p.id === prod.id);
-        if (pIdx > -1) updated.products[pIdx] = updatedProd;
-
-        const deterministicSmId = getDeterministicStockMovementId(invId, prod.id, whId);
-        const existingSmIdx = updated.stockMovements.findIndex(sm => sm.id === deterministicSmId || (sm.sourceId === invId && sm.productId === prod.id));
+        const deterministicSmId = getDeterministicStockMovementId(invId, prod.id);
+        const normProdName = normalizeArabicText(prod.name);
 
         const movementPayload = {
           id: deterministicSmId,
@@ -1796,7 +1776,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           warehouseId: whId,
           warehouseName: wh ? wh.name : 'المخزن الرئيسي',
           qtyChange,
-          balanceAfter: newQty,
+          balanceAfter: 0,
           unitCost: item.costPrice || item.unitPrice,
           type: (mode === 'sale' || mode === 'wholesale' ? 'sale' :
                  mode === 'purchase' ? 'purchase' :
@@ -1807,11 +1787,44 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           branchName: invoiceBranch.name
         };
 
+        const existingSmIdx = updated.stockMovements.findIndex(sm =>
+          sm.id === deterministicSmId ||
+          (sm.sourceId === invId && (sm.productId === prod.id || normalizeArabicText(sm.productName) === normProdName))
+        );
+
         if (existingSmIdx > -1) {
           updated.stockMovements[existingSmIdx] = movementPayload;
         } else {
           updated.stockMovements.unshift(movementPayload);
         }
+
+        // Recalculate true product stock balance and average cost directly from movements ledger
+        const prodMovements = updated.stockMovements.filter(sm =>
+          sm.productId === prod.id ||
+          normalizeArabicText(sm.productName) === normProdName
+        );
+        const accurateQty = prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0);
+
+        const purchaseMoves = prodMovements.filter(sm => sm.type === 'purchase' && sm.qtyChange > 0);
+        let accurateAvgCost = prod.buyPrice || 0;
+        if (purchaseMoves.length > 0) {
+          const totalCostSum = purchaseMoves.reduce((sum, sm) => sum + (sm.qtyChange * (sm.unitCost || 0)), 0);
+          const totalPurchasedQty = purchaseMoves.reduce((sum, sm) => sum + sm.qtyChange, 0);
+          if (totalPurchasedQty > 0) {
+            accurateAvgCost = totalCostSum / totalPurchasedQty;
+          }
+        }
+        const accurateBuyPrice = purchaseMoves.length > 0 ? (purchaseMoves[0].unitCost || prod.buyPrice || 0) : (prod.buyPrice || 0);
+
+        movementPayload.balanceAfter = accurateQty;
+
+        const updatedProd = updateProductBranchData(prod, invoiceBranchId, {
+          currentQty: accurateQty,
+          avgCost: accurateAvgCost,
+          buyPrice: accurateBuyPrice
+        });
+        const pIdx = updated.products.findIndex(p => p.id === prod.id);
+        if (pIdx > -1) updated.products[pIdx] = updatedProd;
       }
     });
 

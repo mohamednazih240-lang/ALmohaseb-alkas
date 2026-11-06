@@ -759,11 +759,11 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
                     <span>{inv.date}</span>
                     {inv.time && <span>• {inv.time}</span>}
                     <span className="text-[10px] font-bold text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200" title="منشئ الفاتورة الأصلي">
-                      المنشئ: {inv.createdBy || (inv.number === '17' ? 'Ahmed Nazih' : 'المدير')}
+                      المنشئ: {inv.createdBy || (inv.number === '17' ? 'Ahmed Nazih' : 'Ahmed Nazih')}
                     </span>
-                    {(inv.updatedBy || inv.number === '17') && (
+                    {((inv.updatedBy && inv.updatedBy !== (inv.createdBy || (inv.number === '17' ? 'Ahmed Nazih' : ''))) || (inv.number === '17')) && (
                       <span className="text-[10px] font-bold text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200" title="آخر من قام بتعديل الفاتورة">
-                        عُدلت: {inv.updatedBy && inv.updatedBy !== (inv.createdBy || 'Ahmed Nazih') ? inv.updatedBy : (inv.number === '17' ? 'Mohamed Nazih' : inv.updatedBy)}
+                        عُدلت: {(inv.updatedBy && inv.updatedBy !== (inv.createdBy || 'Ahmed Nazih')) ? inv.updatedBy : 'Mohamed Nazih'}
                       </span>
                     )}
                     {inv.branchName && (
