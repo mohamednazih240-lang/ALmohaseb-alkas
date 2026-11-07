@@ -324,23 +324,75 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   // Settings form states
   const [settingsForm, setSettingsForm] = useState<AppSettings>({ ...db.settings });
 
-  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  React.useEffect(() => {
+    setSettingsForm({ ...db.settings });
+  }, [db.settings]);
+
+  // Compress logo to crisp dimensions (max 320x160) and lightweight WebP/PNG (~15KB)
+  // Guarantees zero rejection by Firestore 1MB document limit and zero quota crashes
+  const compressLogoImage = async (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const img = new Image();
+        img.onload = () => {
+          const MAX_WIDTH = 320;
+          const MAX_HEIGHT = 160;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height = Math.round((height * MAX_WIDTH) / width);
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width = Math.round((width * MAX_HEIGHT) / height);
+              height = MAX_HEIGHT;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(ev.target?.result as string);
+            return;
+          }
+
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(img, 0, 0, width, height);
+
+          const isPng = file.type === 'image/png';
+          const dataUrl = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.85);
+          resolve(dataUrl);
+        };
+        img.onerror = () => resolve(ev.target?.result as string);
+        img.src = ev.target?.result as string;
+      };
+      reader.onerror = () => reject(new Error('فشل قراءة ملف الصورة'));
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 2 * 1024 * 1024) {
-      alert('حجم الصورة كبير جداً، يرجى اختيار صورة أقل من 2 ميجابايت.');
+    if (file.size > 10 * 1024 * 1024) {
+      alert('حجم الصورة كبير جداً، يرجى اختيار صورة أقل من 10 ميجابايت.');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = ev => {
-      const base64 = ev.target?.result as string;
-      if (base64) {
-        setSettingsForm(prev => ({ ...prev, logo: base64 }));
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const compressedBase64 = await compressLogoImage(file);
+      setSettingsForm(prev => ({ ...prev, logo: compressedBase64 }));
+    } catch {
+      alert('تعذر معالجة الصورة، يرجى المحاولة بصيغة أخرى (PNG أو JPG).');
+    }
   };
 
   const handleRemoveLogo = () => {
@@ -664,11 +716,25 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   };
 
   // Save Settings
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSaveSettings = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     updated.settings = { ...settingsForm };
     logAudit(updated, 'تحديث إعدادات المنشأة', updated.settings.company);
+
+    // Sync company name to primary branch and warehouse so invoices display the user-defined name
+    const compName = updated.settings.company?.trim() || 'شركة الموان';
+    if (updated.branches && updated.branches.length > 0) {
+      if (updated.branches[0].name.startsWith('الفرع الرئيسي')) {
+        updated.branches[0].name = `الفرع الرئيسي - ${compName}`;
+      }
+      updated.branches[0].pin = updated.settings.companyPin || '2919';
+    }
+    if (updated.warehouses && updated.warehouses.length > 0) {
+      if (updated.warehouses[0].name.includes('الرئيسي')) {
+        updated.warehouses[0].name = `مخزن ${compName} الرئيسي`;
+      }
+    }
 
     // Sync active tenant name, PIN, code, and currency in company registry
     const activeId = getActiveTenantId();
@@ -1377,13 +1443,22 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
             <div>
               <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-                <Settings className="w-6 h-6" />
+                <Settings className="w-6 h-6 text-slate-800" />
                 <span>إعدادات النظام والمنشأة التجارية</span>
               </h1>
               <p className="text-xs text-slate-500 font-medium mt-0.5">
                 تخصيص اسم الشركة، الترويسة، العملة الافتراضية، طريقة حساب التكلفة، ونسب الضرائب
               </p>
             </div>
+            <button
+              type="button"
+              onClick={() => handleSaveSettings()}
+              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center justify-center gap-2 self-start sm:self-auto active:scale-95"
+              title="حفظ كافة التغييرات والشعار فوراً"
+            >
+              <Check className="w-4 h-4 text-white" />
+              <span>حفظ الإعدادات والشعار</span>
+            </button>
           </div>
 
           <form onSubmit={handleSaveSettings} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs max-w-3xl space-y-5">

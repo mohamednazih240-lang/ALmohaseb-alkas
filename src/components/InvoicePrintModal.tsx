@@ -392,12 +392,13 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                         src={settings.logo}
                         alt="شعار الشركة"
                         className="logo-img"
+                        style={{ maxHeight: '55px', maxWidth: '120px', objectFit: 'contain' }}
                         onError={(e) => ((e.target as HTMLElement).style.display = 'none')}
                       />
                     ) : null}
                   </div>
                   <div className="header-left">
-                    <div><strong>هاتف 1:</strong> {phoneList[0] || settings.phone || '01000000000'}</div>
+                    <div><strong>هاتف:</strong> {settings.phone || phoneList[0] || '—'}</div>
                     {phoneList[1] ? (
                       <div><strong>هاتف 2:</strong> {phoneList[1]}</div>
                     ) : null}
@@ -695,7 +696,39 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             </div>
           </div>
         )}
+
+        {/* Sticky Mobile/Desktop Bottom Action Bar */}
+        <div className="no-print border-t border-slate-200 bg-white px-3 py-2 sm:px-4 sm:py-2.5 shrink-0 flex items-center justify-between gap-2 shadow-md z-30">
+          <button
+            type="button"
+            onClick={handlePrint}
+            className="flex-1 py-2.5 sm:py-3 px-4 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-xl text-xs sm:text-sm font-black transition-all flex items-center justify-center gap-2 shadow-sm cursor-pointer"
+            title="طباعة الفاتورة فوراً"
+          >
+            <Printer className="w-4 h-4" />
+            <span>طباعة الفاتورة الآن ({paperSize === 'A5' ? 'مقاس A5' : paperSize === 'A4' ? 'مقاس A4' : 'حراري'})</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleDownloadPdf}
+            disabled={isExportingPdf}
+            className="py-2.5 sm:py-3 px-3 sm:px-4 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+            title="تحميل الفاتورة PDF"
+          >
+            <Download className="w-4 h-4 text-slate-700" />
+            <span className="hidden xs:inline">تحميل PDF</span>
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="py-2.5 sm:py-3 px-3 sm:px-4 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl text-xs font-bold flex items-center justify-center cursor-pointer transition-all"
+            title="إغلاق"
+          >
+            <span>إغلاق</span>
+          </button>
+        </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

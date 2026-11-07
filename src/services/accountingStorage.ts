@@ -639,11 +639,23 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
   });
 
   // 4. إزالة أي حركات مكررة متبقية لضمان وجود حركة واحدة فقط لكل بند
+  // وإلغاء أي حركات افتتاحية مكررة لأصناف لها فواتير مشتريات موثقة لضمان أن رصيد المخزن يطابق فواتير المشتريات دون زيادة أو تكرار
+  const productsWithPurchases = new Set<string>();
+  db.stockMovements.forEach(sm => {
+    if (sm.type === 'purchase' && sm.productId) {
+      productsWithPurchases.add(sm.productId);
+    }
+  });
+
   const seenSmKeys = new Set<string>();
   const deduplicatedMovements: StockMovement[] = [];
   for (const sm of db.stockMovements) {
     if (!sm.sourceId) {
       deduplicatedMovements.push(sm);
+      continue;
+    }
+    // إذا كان للصنف فاتورة شراء، فإن فواتير المشتريات هي مصدر رصيده المعتمد، ولا يُحتسب له رصيد افتتاحي مكرر
+    if (sm.type === 'opening' && (productsWithPurchases.has(sm.productId) || (sm.sourceId && sm.sourceId.startsWith('prod_')))) {
       continue;
     }
     const key = `${sm.sourceId}::${sm.productId}`;
@@ -831,27 +843,37 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
 
   db.users = cleanUsers;
 
-  // Single unified branch: الفرع الرئيسي - شركة الموان
-  db.branches = [
-    {
-      id: 'br_mawan',
-      name: 'الفرع الرئيسي - شركة الموان',
-      code: 'BR-01',
-      isMain: true,
-      pin: db.settings.companyPin || '2919'
+  // Single unified branch: synchronized with user-defined company name
+  const compName = db.settings.company?.trim() || 'شركة الموان';
+  if (!db.branches || db.branches.length === 0) {
+    db.branches = [
+      {
+        id: 'br_mawan',
+        name: `الفرع الرئيسي - ${compName}`,
+        code: 'BR-01',
+        isMain: true,
+        pin: db.settings.companyPin || '2919'
+      }
+    ];
+  } else {
+    db.branches[0].pin = db.settings.companyPin || db.branches[0].pin || '2919';
+    if (db.branches[0].name.startsWith('الفرع الرئيسي')) {
+      db.branches[0].name = `الفرع الرئيسي - ${compName}`;
     }
-  ];
+  }
 
-  // Warehouses for شركة الموان
-  if (!db.warehouses || db.warehouses.length === 0 || !db.warehouses.some(w => w.id === 'wh_mawan')) {
+  // Warehouses: synchronized with user-defined company name
+  if (!db.warehouses || db.warehouses.length === 0) {
     db.warehouses = [
       {
         id: 'wh_mawan',
-        name: 'مخزن شركة الموان الرئيسي',
+        name: `مخزن ${compName} الرئيسي`,
         location: 'المقر الرئيسي',
         isDefault: true
       }
     ];
+  } else if (db.warehouses[0].name.includes('الرئيسي')) {
+    db.warehouses[0].name = `مخزن ${compName} الرئيسي`;
   }
 
   // Default currentUser
