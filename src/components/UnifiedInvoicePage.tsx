@@ -1818,11 +1818,31 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
         movementPayload.balanceAfter = accurateQty;
 
+        const isPurchase = mode === 'purchase';
+        const isSale = mode === 'sale';
+        const isWholesale = mode === 'wholesale';
+
         const updatedProd = updateProductBranchData(prod, invoiceBranchId, {
           currentQty: accurateQty,
           avgCost: accurateAvgCost,
-          buyPrice: accurateBuyPrice
+          // تثبيت آخر سعر شراء على الصنف كافتراضي للفواتير اللاحقة دون المساس بالفواتير التاريخية
+          buyPrice: (isPurchase && Number(item.unitPrice) > 0) ? Number(item.unitPrice) : accurateBuyPrice,
+          // تثبيت آخر سعر بيع على الصنف كافتراضي للفواتير اللاحقة
+          ...(isSale && Number(item.unitPrice) > 0 ? { sellPrice: Number(item.unitPrice) } : {}),
+          ...(isWholesale && Number(item.unitPrice) > 0 ? { wholesalePrice: Number(item.unitPrice) } : {})
         });
+
+        // مزامنة الحقول الأساسية لبطاقة الصنف مباشرة لضمان ظهور آخر سعر في كافة الشاشات
+        if (isSale && Number(item.unitPrice) > 0) {
+          updatedProd.sellPrice = Number(item.unitPrice);
+        }
+        if (isWholesale && Number(item.unitPrice) > 0) {
+          updatedProd.wholesalePrice = Number(item.unitPrice);
+        }
+        if (isPurchase && Number(item.unitPrice) > 0) {
+          updatedProd.buyPrice = Number(item.unitPrice);
+        }
+
         const pIdx = updated.products.findIndex(p => p.id === prod.id);
         if (pIdx > -1) updated.products[pIdx] = updatedProd;
       }
@@ -1951,7 +1971,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setUnsavedDraftData(null);
     setIsSavingInvoice(false);
 
-    alert(`✓ تم حفظ الفاتورة رقم ${savedInvoice.number} بنجاح وترحيل جميع الحركات المحاسبية للمخزن والخزينة!`);
+    const wantsPrint = confirm(`✓ تم حفظ الفاتورة رقم ${savedInvoice.number} بنجاح وترحيل جميع الحركات المحاسبية للمخزن والخزينة!\n\nهل ترغب في طباعة الفاتورة الآن؟`);
+    if (wantsPrint) {
+      onPreviewInvoice(savedInvoice);
+    }
 
     if (onCloseEdit) {
       onCloseEdit();

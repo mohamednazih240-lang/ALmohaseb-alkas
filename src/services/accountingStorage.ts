@@ -685,7 +685,11 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       if (totalPurchasedQty > 0) {
         avgCost = totalCostSum / totalPurchasedQty;
       }
-      p.buyPrice = purchaseMoves[0].unitCost || p.buyPrice;
+      // تثبيت آخر سعر شراء مسجل للصنف كافتراضي في الكتالوج دون المساس بالفواتير التاريخية
+      const latestPurchase = [...purchaseMoves].sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.id || '').localeCompare(a.id || ''))[0];
+      if (latestPurchase && latestPurchase.unitCost > 0) {
+        p.buyPrice = latestPurchase.unitCost;
+      }
     }
 
     if (p.currentQty !== totalQty || p.avgCost !== avgCost) {

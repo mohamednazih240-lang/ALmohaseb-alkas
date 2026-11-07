@@ -130,7 +130,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [adjustReason, setAdjustReason] = useState('مطابقة الجرد الدوري');
 
   // Filter & Search states for Products
-  const [stockStatusFilter, setStockStatusFilter] = useState<'all' | 'in_stock' | 'out_of_stock' | 'low_stock'>('all');
+  const [stockStatusFilter, setStockStatusFilter] = useState<'all' | 'in_stock' | 'out_of_stock' | 'low_stock' | 'negative_stock'>('all');
   const [sortBy, setSortBy] = useState<'name_asc' | 'name_desc' | 'code_asc' | 'qty_desc' | 'qty_asc' | 'price_desc' | 'price_asc'>('name_asc');
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(36);
@@ -162,18 +162,20 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   );
 
   // Statistics for this branch (computed in a single fast pass)
-  const { inStockCount, zeroStockCount, lowStockCount, totalStockValue } = useMemo(() => {
+  const { inStockCount, zeroStockCount, lowStockCount, negativeStockCount, totalStockValue } = useMemo(() => {
     let inStock = 0;
     let zeroStock = 0;
     let lowStock = 0;
+    let negativeStock = 0;
     let totalVal = 0;
     for (const p of branchProducts) {
       if (p.currentQty > 0) inStock++;
       if (p.currentQty === 0) zeroStock++;
+      if (p.currentQty < 0) negativeStock++;
       if (p.currentQty <= p.minStock && p.currentQty > 0) lowStock++;
       totalVal += p.currentQty * (p.avgCost || p.buyPrice);
     }
-    return { inStockCount: inStock, zeroStockCount: zeroStock, lowStockCount: lowStock, totalStockValue: totalVal };
+    return { inStockCount: inStock, zeroStockCount: zeroStock, lowStockCount: lowStock, negativeStockCount: negativeStock, totalStockValue: totalVal };
   }, [branchProducts]);
 
   // Filtered and sorted products (memoized to eliminate sorting lag on page changes)
@@ -190,6 +192,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       if (stockStatusFilter === 'in_stock') matchStock = p.currentQty > 0;
       else if (stockStatusFilter === 'out_of_stock') matchStock = p.currentQty === 0;
       else if (stockStatusFilter === 'low_stock') matchStock = p.currentQty <= p.minStock && p.currentQty > 0;
+      else if (stockStatusFilter === 'negative_stock') matchStock = p.currentQty < 0;
 
       return matchSearch && matchStock;
     }).sort((a, b) => {
@@ -1034,6 +1037,19 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 >
                   متوفر بالمستودع ({inStockCount})
                 </button>
+                {negativeStockCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => { setStockStatusFilter('negative_stock'); setCurrentPage(1); }}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      stockStatusFilter === 'negative_stock'
+                        ? 'bg-rose-600 text-white shadow-xs'
+                        : 'bg-rose-50 text-rose-800 hover:bg-rose-100 border border-rose-200'
+                    }`}
+                  >
+                    بالسالب / بانتظار الشراء ({negativeStockCount})
+                  </button>
+                )}
                 {lowStockCount > 0 && (
                   <button
                     type="button"
@@ -1155,14 +1171,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
                       <span
                         className={`px-2.5 py-0.5 rounded-full text-[10px] font-black border shrink-0 ${
-                          isZero
-                            ? 'bg-slate-100 text-slate-600 border-slate-200'
-                            : isLow
-                            ? 'bg-amber-50 text-amber-800 border-amber-300'
-                            : 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                          p.currentQty < 0
+                            ? 'bg-rose-50 text-rose-800 border-rose-300'
+                            : isZero
+                              ? 'bg-slate-100 text-slate-600 border-slate-200'
+                              : isLow
+                                ? 'bg-amber-50 text-amber-800 border-amber-300'
+                                : 'bg-emerald-50 text-emerald-800 border-emerald-300'
                         }`}
                       >
-                        {isZero ? 'رصيد صفر (جاهز للتوريد)' : isLow ? 'منخفض الرصيد' : 'متوفر بالمستودع'}
+                        {p.currentQty < 0 ? `بالسالب (${p.currentQty}) - بانتظار الشراء` : isZero ? 'رصيد صفر (جاهز للتوريد)' : isLow ? 'منخفض الرصيد' : 'متوفر بالمستودع'}
                       </span>
                     </div>
 
@@ -1194,7 +1212,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       <div className="flex items-center justify-between pt-1">
                         <div>
                           <span className="text-slate-500 text-[11px] block">الرصيد الفعلي:</span>
-                          <span className="text-base font-black font-mono text-slate-950">
+                          <span className={`text-base font-black font-mono ${p.currentQty < 0 ? 'text-rose-600' : 'text-slate-950'}`}>
                             {p.currentQty} <span className="text-xs font-normal text-slate-500">{p.unit}</span>
                           </span>
                         </div>
