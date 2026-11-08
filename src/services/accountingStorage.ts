@@ -249,6 +249,82 @@ export function isCompanyMawan(identifier?: string | null): boolean {
          clean.includes('الموان');
 }
 
+export interface VerifiedPurchaseInfo {
+  hasVerifiedPurchase: boolean;
+  price?: number;
+  date?: string;
+  invoiceNumber?: string;
+  supplierName?: string;
+}
+
+/**
+ * Retrieves the latest verified, successfully posted purchase price for a product.
+ * Strictly adheres to ERP integrity: never estimates or invents costs.
+ * Uses only posted purchase invoices (status !== 'ملغي').
+ */
+export function getLatestVerifiedPurchaseInfo(
+  db: AccountingDB,
+  productId?: string,
+  productName?: string,
+  excludeInvoiceId?: string
+): VerifiedPurchaseInfo {
+  if (!db || !db.invoices || (!productId && !productName)) {
+    return { hasVerifiedPurchase: false };
+  }
+
+  const normName = productName ? normalizeArabicText(productName) : '';
+
+  // Sort posted purchase invoices latest first
+  const purchaseInvoices = (db.invoices || [])
+    .filter(inv =>
+      (inv.type === 'purchase' || inv.invoiceKind === 'purchase') &&
+      (inv.status as string) !== 'ملغي' &&
+      (!excludeInvoiceId || inv.id !== excludeInvoiceId)
+    )
+    .sort((a, b) =>
+      (b.date || '').localeCompare(a.date || '') ||
+      (b.createdAt || '').localeCompare(a.createdAt || '') ||
+      (b.id || '').localeCompare(a.id || '')
+    );
+
+  for (const inv of purchaseInvoices) {
+    if (!inv.items || !Array.isArray(inv.items)) continue;
+    for (const it of inv.items) {
+      const matchId = Boolean(productId && it.productId && it.productId === productId);
+      const matchName = Boolean(normName && it.productName && normalizeArabicText(it.productName) === normName);
+      if (matchId || matchName) {
+        const p = Number(it.unitPrice || it.costPrice || (it as any).price) || 0;
+        if (p > 0) {
+          return {
+            hasVerifiedPurchase: true,
+            price: p,
+            date: inv.date,
+            invoiceNumber: inv.number,
+            supplierName: inv.partyName
+          };
+        }
+      }
+    }
+  }
+
+  // Fallback: check product catalog card ONLY if recorded buyPrice > 0
+  const prod = db.products?.find(p =>
+    (productId && p.id === productId) ||
+    (normName && normalizeArabicText(p.name) === normName)
+  );
+  if (prod && Number(prod.buyPrice) > 0) {
+    return {
+      hasVerifiedPurchase: true,
+      price: Number(prod.buyPrice),
+      date: undefined,
+      invoiceNumber: undefined,
+      supplierName: undefined
+    };
+  }
+
+  return { hasVerifiedPurchase: false };
+}
+
 /**
  * 15 Verified Items for Invoice #17 (شركة الرحمة للحدايد والبويات)
  * Guarantees zero loss and exact mathematical parity with user invoices

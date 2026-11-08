@@ -66,8 +66,14 @@ import {
   getDeterministicStockMovementId,
   getDeterministicTreasuryId,
   getDeterministicVoucherId,
-  normalizeArabicText
+  normalizeArabicText,
+  getLatestVerifiedPurchaseInfo
 } from '../services/accountingStorage';
+import {
+  InvoicePriceValidationModal,
+  BelowCostItem,
+  PurchasePriceChangeItem
+} from './InvoicePriceValidationModal';
 
 export type InvoiceMode = 'sale' | 'wholesale' | 'purchase' | 'sale_return' | 'purchase_return' | 'quote';
 
@@ -298,6 +304,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     return db.users.find(u => u.id === operatorUserId) || db.currentUser || db.users[0];
   }, [operatorUserId, db.users, db.currentUser]);
 
+  const currentUserName = activeOperator?.name || db.currentUser?.name || 'مدير النظام';
+  const currentUserId = activeOperator?.id || db.currentUser?.id || 'usr_admin';
+  const currentUserRole = activeOperator?.role || db.currentUser?.role || 'مدير';
+
   // Settlement / Payment Type Choice (نقدي كاش vs آجل ذمم vs سداد جزئي)
   const [settlementType, setSettlementType] = useState<'cash' | 'credit' | 'partial'>('cash');
   const [partialPaidInput, setPartialPaidInput] = useState<string>('');
@@ -359,9 +369,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
   const [unsavedDraftData, setUnsavedDraftData] = useState<any>(null);
 
+  // Pre-posting price validation modal states (below cost warning & purchase price change warning)
+  const [showPriceWarningModal, setShowPriceWarningModal] = useState<boolean>(false);
+  const [priceWarningType, setPriceWarningType] = useState<'below_cost' | 'purchase_price_change'>('below_cost');
+  const [belowCostWarningList, setBelowCostWarningList] = useState<BelowCostItem[]>([]);
+  const [purchasePriceChangeWarningList, setPurchasePriceChangeWarningList] = useState<PurchasePriceChangeItem[]>([]);
+  const [warningApprovalNote, setWarningApprovalNote] = useState<string>('');
+
   // Internal submodal management: Coordinates submodals (e.g. rapid item card, options/revenues, lookup, etc.)
   // without pushing rogue history states that kick the user out of the invoice!
   const hasAnyOpenSubmodal = Boolean(
+    showPriceWarningModal ||
     showRapidItemModal ||
     showOptionsModal ||
     showItemCardModal ||
@@ -1400,12 +1418,105 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
 
   // SAVE INVOICE WITH COMPLETE ACCOUNTING IMPACT
-  const handleSaveInvoice = () => {
+  const handleSaveInvoice = (approvalNote?: string) => {
     if (isSavingInvoice) return;
 
     if (invoiceItems.length === 0) {
       alert('الفاتورة فارغة! أضف أصنافاً أولاً.');
       return;
+    }
+
+    // 1. Below Cost Selling Pre-posting Check (Sales / Wholesale)
+    if (!approvalNote && (mode === 'sale' || mode === 'wholesale')) {
+      const belowCost: BelowCostItem[] = [];
+      invoiceItems.forEach(it => {
+        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName);
+        const sellPrice = Number(it.unitPrice) || 0;
+        if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined) {
+          if (sellPrice < pInfo.price) {
+            const lossPerUnit = pInfo.price - sellPrice;
+            const qty = Number(it.qty) || 0;
+            const totalLoss = lossPerUnit * qty;
+            const lossPercentage = pInfo.price > 0 ? (lossPerUnit / pInfo.price) * 100 : 0;
+            belowCost.push({
+              productId: it.productId,
+              productCode: it.productCode || '—',
+              productName: it.productName,
+              unit: it.unit || 'قطعة',
+              verifiedPurchasePrice: pInfo.price,
+              currentSellingPrice: sellPrice,
+              lossPerUnit,
+              qty,
+              totalLoss,
+              lossPercentage,
+              previousInvoiceNumber: pInfo.invoiceNumber,
+              previousInvoiceDate: pInfo.date,
+              hasVerifiedPurchase: true
+            });
+          }
+        } else {
+          // Unverified cost
+          belowCost.push({
+            productId: it.productId,
+            productCode: it.productCode || '—',
+            productName: it.productName,
+            unit: it.unit || 'قطعة',
+            verifiedPurchasePrice: 0,
+            currentSellingPrice: sellPrice,
+            lossPerUnit: 0,
+            qty: Number(it.qty) || 0,
+            totalLoss: 0,
+            lossPercentage: 0,
+            hasVerifiedPurchase: false
+          });
+        }
+      });
+
+      const confirmedLossItems = belowCost.filter(b => b.hasVerifiedPurchase);
+      if (confirmedLossItems.length > 0) {
+        setBelowCostWarningList(belowCost);
+        setPriceWarningType('below_cost');
+        setShowPriceWarningModal(true);
+        return;
+      }
+    }
+
+    // 2. Purchase Price Change Pre-posting Check (Purchases)
+    if (!approvalNote && mode === 'purchase') {
+      const priceChanges: PurchasePriceChangeItem[] = [];
+      invoiceItems.forEach(it => {
+        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName, editingInvoice?.id);
+        const newBuyPrice = Number(it.unitPrice) || 0;
+        if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined && Math.abs(newBuyPrice - pInfo.price) > 0.001) {
+          const diff = newBuyPrice - pInfo.price;
+          const isIncrease = diff > 0;
+          const qty = Number(it.qty) || 0;
+          const totalDifference = Math.abs(diff) * qty;
+          const percentageChange = pInfo.price > 0 ? (Math.abs(diff) / pInfo.price) * 100 : 0;
+          priceChanges.push({
+            productId: it.productId,
+            productCode: it.productCode || '—',
+            productName: it.productName,
+            unit: it.unit || 'قطعة',
+            previousPurchasePrice: pInfo.price,
+            newPurchasePrice: newBuyPrice,
+            differencePerUnit: Math.abs(diff),
+            isIncrease,
+            percentageChange,
+            purchasedQty: qty,
+            totalDifference,
+            previousInvoiceNumber: pInfo.invoiceNumber,
+            previousInvoiceDate: pInfo.date
+          });
+        }
+      });
+
+      if (priceChanges.length > 0) {
+        setPurchasePriceChangeWarningList(priceChanges);
+        setPriceWarningType('purchase_price_change');
+        setShowPriceWarningModal(true);
+        return;
+      }
     }
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
@@ -1614,7 +1725,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         timestamp: nowIso,
         formattedDate: formattedNowDate,
         formattedTime: formattedNowTime,
-        summary: `تم تعديل الفاتورة وإضافة أصناف جديدة بواسطة [${currentUserName}] (${currentUserRole}) - ${changeNotes.join(' • ')}`,
+        summary: `تم تعديل الفاتورة وإضافة أصناف جديدة بواسطة [${currentUserName}] (${currentUserRole}) - ${changeNotes.join(' • ')}${approvalNote ? ` • [${approvalNote}]` : ''}`,
         previousTotal: editingInvoice.total,
         newTotal: netTotal,
         itemsCount: invoiceItems.length
@@ -1633,7 +1744,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           timestamp: nowIso,
           formattedDate: formattedNowDate,
           formattedTime: formattedNowTime,
-          summary: `تم إنشاء الفاتورة بواسطة ${currentUserName} (${currentUserRole}) بقيمة إجمالية ${netTotal.toLocaleString()} ${db.settings.currency || 'ر.س'} (${status})`,
+          summary: `تم إنشاء الفاتورة بواسطة ${currentUserName} (${currentUserRole}) بقيمة إجمالية ${netTotal.toLocaleString()} ${db.settings.currency || 'ر.س'} (${status})${approvalNote ? ` • [${approvalNote}]` : ''}`,
           newTotal: netTotal,
           itemsCount: invoiceItems.length
         }
@@ -1959,7 +2070,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     logAudit(
       updated,
       editingInvoice ? `تعديل ${theme.title}` : `إنشاء ${theme.title}`,
-      `فاتورة رقم ${savedInvoice.number} بواسطة [${currentUserName}] (${currentUserRole}) - بقيمة ${formatMoney(savedInvoice.total, updated.settings.currency)} للطرف ${partyName}`
+      `فاتورة رقم ${savedInvoice.number} بواسطة [${currentUserName}] (${currentUserRole}) - بقيمة ${formatMoney(savedInvoice.total, updated.settings.currency)} للطرف ${partyName}${approvalNote ? ` • ${approvalNote}` : ''}`
     );
 
     onUpdateDb(updated);
@@ -1998,6 +2109,28 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       const { number: nextUniqueNum } = getNextUniqueInvoiceNumber(updated, mode);
       setInvNum(nextUniqueNum);
     }
+  };
+
+  const handleApprovePriceWarning = () => {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('ar-EG');
+    const timeStr = now.toLocaleTimeString('ar-EG');
+    let approvalNote = '';
+    if (priceWarningType === 'below_cost') {
+      const itemsCount = belowCostWarningList.filter(b => b.hasVerifiedPurchase).length;
+      const totalExpectedLoss = belowCostWarningList.reduce((acc, b) => acc + (b.totalLoss || 0), 0);
+      approvalNote = `موافقة ترحيل بيع بأقل من سعر التكلفة الشراء المعتمد (${itemsCount} صنف - إجمالي الخسارة المتوقعة: ${totalExpectedLoss.toFixed(2)} ج.م) بواسطة المستخدم: ${currentUserName} في ${dateStr} ${timeStr}`;
+    } else {
+      const itemsCount = purchasePriceChangeWarningList.length;
+      approvalNote = `موافقة ترحيل فاتورة مشتريات بأسعار شراء معدلة عن السابق (${itemsCount} صنف) بواسطة المستخدم: ${currentUserName} في ${dateStr} ${timeStr}`;
+    }
+    setShowPriceWarningModal(false);
+    handleSaveInvoice(approvalNote);
+  };
+
+  const handleCancelPriceWarning = () => {
+    setShowPriceWarningModal(false);
+    setIsSavingInvoice(false);
   };
 
   // Current balance display of selected party
@@ -2932,7 +3065,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           <div className="flex gap-1 flex-wrap">
             <button
               type="button"
-              onClick={handleSaveInvoice}
+              onClick={() => handleSaveInvoice()}
               disabled={isSavingInvoice}
               className="flex-1 min-w-[120px] py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white rounded font-bold text-[10px] flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer"
             >
@@ -3917,6 +4050,39 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         </span>
                       )}
                     </div>
+
+                    {/* Live Warning for Below Cost in Sales */}
+                    {(mode === 'sale' || mode === 'wholesale') && (() => {
+                      const pInfo = getLatestVerifiedPurchaseInfo(db, selectedCardProduct.id, selectedCardProduct.name);
+                      const currentPrice = parseFloat(itemCardPrice) || itemCardDefaultPrice;
+                      if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined && currentPrice < pInfo.price) {
+                        const loss = pInfo.price - currentPrice;
+                        return (
+                          <div className="bg-rose-50 border border-rose-300 rounded p-1.5 text-[9.5px] text-rose-800 font-bold flex items-center justify-between">
+                            <span>⚠️ تنبيه بيع بأقل من التكلفة المعتمدة ({pInfo.price.toFixed(2)} {db.settings.currency})</span>
+                            <span className="font-mono text-rose-700">خسارة متوقعة: -{loss.toFixed(2)}</span>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
+
+                    {/* Live Warning for Purchase Price Change in Purchases */}
+                    {mode === 'purchase' && (() => {
+                      const pInfo = getLatestVerifiedPurchaseInfo(db, selectedCardProduct.id, selectedCardProduct.name, editingInvoice?.id);
+                      const currentPrice = parseFloat(itemCardPrice) || itemCardDefaultPrice;
+                      if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined && Math.abs(currentPrice - pInfo.price) > 0.001) {
+                        const diff = currentPrice - pInfo.price;
+                        const isIncrease = diff > 0;
+                        return (
+                          <div className={`border rounded p-1.5 text-[9.5px] font-bold flex items-center justify-between ${isIncrease ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-emerald-50 border-emerald-300 text-emerald-900'}`}>
+                            <span>{isIncrease ? '🔺 سعر الشراء أعلى من السابق' : '🔻 سعر الشراء أقل من السابق'} (السابق: {pInfo.price.toFixed(2)} {db.settings.currency})</span>
+                            <span className="font-mono">{isIncrease ? `+${diff.toFixed(2)}` : diff.toFixed(2)}</span>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
                 </div>
 
@@ -4435,6 +4601,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
         </div>
       )}
+
+      {/* Price Validation & Protection Warning Modal */}
+      <InvoicePriceValidationModal
+        isOpen={showPriceWarningModal}
+        type={priceWarningType}
+        currency={db.settings.currency}
+        belowCostItems={belowCostWarningList}
+        purchasePriceChangeItems={purchasePriceChangeWarningList}
+        onApproveAndContinue={handleApprovePriceWarning}
+        onCancelAndModify={handleCancelPriceWarning}
+      />
 
       {/* Invoice Audit Log Modal */}
       {showAuditModal && editingInvoice && (

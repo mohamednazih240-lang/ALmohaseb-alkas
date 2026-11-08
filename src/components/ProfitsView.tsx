@@ -25,7 +25,8 @@ import {
   formatMoney,
   getTodayDate,
   getProductForBranch,
-  deleteInvoiceAndRevert
+  deleteInvoiceAndRevert,
+  getLatestVerifiedPurchaseInfo
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -103,21 +104,23 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     return true;
   };
 
-  // 1. INVOICE PROFITS CALCULATION
+  // 1. INVOICE PROFITS CALCULATION (Strict Rule 4: Latest Verified Purchase Price, No Averaging)
   const invoiceProfitsData = useMemo(() => {
-    const sales = db.invoices.filter(i => i.type === 'sale' && isDateMatch(i.date) && isTargetBranch(i.branchId));
+    const sales = db.invoices.filter(i => (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') && isDateMatch(i.date) && isTargetBranch(i.branchId));
 
     return sales.map(inv => {
-      // Calculate COGS for this invoice using branch pricing
-      const invBranch = inv.branchId || 'br_main';
       let invoiceCost = 0;
+      let hasUndefinedCost = false;
+
       inv.items.forEach(it => {
-        const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode || p.name === it.productName);
-        const branchProd = prod ? getProductForBranch(prod, invBranch) : null;
-        const costPrice = (it.costPrice && it.costPrice > 0)
-          ? it.costPrice
-          : (branchProd?.avgCost || branchProd?.buyPrice || prod?.avgCost || prod?.buyPrice || 0);
-        invoiceCost += it.qty * costPrice;
+        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName);
+        if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined) {
+          invoiceCost += it.qty * pInfo.price;
+        } else if (it.costPrice && it.costPrice > 0) {
+          invoiceCost += it.qty * it.costPrice;
+        } else {
+          hasUndefinedCost = true;
+        }
       });
 
       const revenue = inv.total;
@@ -136,7 +139,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         revenue,
         cost: invoiceCost,
         profit,
-        margin
+        margin,
+        hasUndefinedCost
       };
     }).filter(row => {
       if (!searchQuery) return true;
@@ -149,14 +153,26 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     });
   }, [db, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
 
-  // Grand Total of Invoice Profits (ONLY Grand Total of Profits at bottom as requested!)
+  // Grand Total of Gross Invoice Profits
   const grandTotalInvoiceProfits = useMemo(() => {
     return invoiceProfitsData.reduce((sum, row) => sum + row.profit, 0);
   }, [invoiceProfitsData]);
 
-  // 2. PRODUCT PROFITS CALCULATION
+  // Operating Expenses for date and branch filter
+  const operatingExpenses = useMemo(() => {
+    return (db.expenses || [])
+      .filter(e => isDateMatch(e.date) && isTargetBranch(e.branchId))
+      .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  }, [db.expenses, dateFilter, fromDate, toDate, selectedBranchId]);
+
+  // Net Business Profit = Gross Merchandise Profit - Operating Expenses
+  const netBusinessProfit = useMemo(() => {
+    return grandTotalInvoiceProfits - operatingExpenses;
+  }, [grandTotalInvoiceProfits, operatingExpenses]);
+
+  // 2. PRODUCT PROFITS CALCULATION (Strict Rule 4: Verified Purchase Info)
   const itemProfitsData = useMemo(() => {
-    const sales = db.invoices.filter(i => i.type === 'sale' && isDateMatch(i.date) && isTargetBranch(i.branchId));
+    const sales = db.invoices.filter(i => (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') && isDateMatch(i.date) && isTargetBranch(i.branchId));
 
     // Map: productId -> aggregated data
     const map = new Map<string, {
@@ -169,18 +185,18 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       qtySold: number;
       totalRevenue: number;
       totalCost: number;
+      hasVerifiedCost: boolean;
+      verifiedCostPrice: number;
     }>();
 
     sales.forEach(inv => {
-      const invBranch = inv.branchId || 'br_main';
       inv.items.forEach(it => {
         const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode || p.name === it.productName);
-        const branchProd = prod ? getProductForBranch(prod, invBranch) : null;
-        const costPrice = (it.costPrice && it.costPrice > 0)
-          ? it.costPrice
-          : (branchProd?.avgCost || branchProd?.buyPrice || prod?.avgCost || prod?.buyPrice || 0);
+        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName);
+        const hasVerified = pInfo.hasVerifiedPurchase && pInfo.price !== undefined;
+        const verifiedCost = hasVerified ? pInfo.price! : (it.costPrice && it.costPrice > 0 ? it.costPrice : 0);
         const itemRev = it.total;
-        const itemCost = it.qty * costPrice;
+        const itemCost = it.qty * verifiedCost;
 
         if (!map.has(it.productId)) {
           map.set(it.productId, {
@@ -192,7 +208,9 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             unit: it.unit || prod?.unit || 'قطعة',
             qtySold: 0,
             totalRevenue: 0,
-            totalCost: 0
+            totalCost: 0,
+            hasVerifiedCost: hasVerified || (Boolean(it.costPrice) && it.costPrice > 0),
+            verifiedCostPrice: verifiedCost
           });
         }
 
@@ -200,19 +218,21 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         entry.qtySold += it.qty;
         entry.totalRevenue += itemRev;
         entry.totalCost += itemCost;
+        if (hasVerified) {
+          entry.hasVerifiedCost = true;
+          entry.verifiedCostPrice = verifiedCost;
+        }
       });
     });
 
     const list = Array.from(map.values()).map(item => {
-      const profit = item.totalRevenue - item.totalCost;
-      const margin = item.totalRevenue > 0 ? (profit / item.totalRevenue) * 100 : 0;
+      const profit = item.hasVerifiedCost ? (item.totalRevenue - item.totalCost) : 0;
+      const margin = (item.hasVerifiedCost && item.totalRevenue > 0) ? (profit / item.totalRevenue) * 100 : 0;
       const avgSellPrice = item.qtySold > 0 ? item.totalRevenue / item.qtySold : 0;
-      const avgCostPrice = item.qtySold > 0 ? item.totalCost / item.qtySold : 0;
 
       return {
         ...item,
         avgSellPrice,
-        avgCostPrice,
         profit,
         margin
       };
@@ -230,7 +250,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     });
   }, [db, dateFilter, fromDate, toDate, searchQuery]);
 
-  // Grand Total of Item Profits (ONLY Grand Total of Profits at bottom as requested!)
+  // Grand Total of Item Profits
   const grandTotalItemProfits = useMemo(() => {
     return itemProfitsData.reduce((sum, row) => sum + row.profit, 0);
   }, [itemProfitsData]);
@@ -276,8 +296,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         { label: 'ربح الصنف', width: '16%', align: 'center' }
       ],
       tableRows: row.invoice.items.map(it => {
-        const prod = db.products.find(p => p.id === it.productId);
-        const cost = it.costPrice || prod?.buyPrice || 0;
+        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName);
+        const cost = (pInfo.hasVerifiedPurchase && pInfo.price !== undefined) ? pInfo.price : (it.costPrice || 0);
         const lineProfit = it.total - (it.qty * cost);
         return {
           cols: [
@@ -444,11 +464,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       it.unit,
       it.qtySold,
       it.avgSellPrice.toFixed(2),
-      it.avgCostPrice.toFixed(2),
+      it.hasVerifiedCost ? it.verifiedCostPrice.toFixed(2) : 'غير محدد',
       it.totalRevenue,
       it.totalCost,
       it.profit,
-      `${it.margin.toFixed(1)}%`
+      it.hasVerifiedCost ? `${it.margin.toFixed(1)}%` : '—'
     ]);
 
     // Bottom grand total row
@@ -736,29 +756,47 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                 </div>
               </div>
 
-              {/* BOTTOM SECTION: ONLY Grand Total of Profits (كما طلب المستخدم تماماً) */}
-              <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white rounded-xl p-4 shadow-md flex flex-col sm:flex-row items-center justify-between gap-3">
+              {/* BOTTOM SECTION: Gross Merchandise Profit, Operating Expenses & Net Business Profit */}
+              <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white rounded-xl p-4 shadow-md flex flex-col md:flex-row items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center text-white shrink-0">
                     <TrendingUp className="w-6 h-6" />
                   </div>
                   <div>
                     <span className="text-xs font-bold text-emerald-100 block">
-                      إجمالي الأرباح لجميع الفواتير المعروضة:
+                      ملخص الأرباح التشغيلية وحسابات النشاط التجاري:
                     </span>
-                    <span className="text-xs text-white/80">
-                      محسوبة بدقة من صافي مبيعات الفواتير بعد خصم تكلفة البضاعة المباعة
+                    <span className="text-[11px] text-white/80">
+                      محسوبة بدقة وفقاً لآخر سعر شراء معتمد في فواتير المشتريات المستلمة
                     </span>
                   </div>
                 </div>
 
-                <div className="text-center sm:text-left bg-black/20 px-5 py-2.5 rounded-xl border border-white/20 shrink-0">
-                  <span className="text-[11px] font-bold text-emerald-200 block">
-                    إجمالي الأرباح فقط للاجمالي:
-                  </span>
-                  <span className="text-xl sm:text-2xl font-black font-mono tracking-tight text-white">
-                    {formatMoney(grandTotalInvoiceProfits, db.settings.currency)}
-                  </span>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="text-center bg-black/20 px-3.5 py-2 rounded-xl border border-white/20 shrink-0">
+                    <span className="text-[10px] font-bold text-emerald-200 block">
+                      إجمالي ربح البضاعة:
+                    </span>
+                    <span className="text-sm sm:text-base font-black font-mono tracking-tight text-white">
+                      {formatMoney(grandTotalInvoiceProfits, db.settings.currency)}
+                    </span>
+                  </div>
+                  <div className="text-center bg-black/20 px-3.5 py-2 rounded-xl border border-white/20 shrink-0">
+                    <span className="text-[10px] font-bold text-rose-200 block">
+                      المصروفات التشغيلية:
+                    </span>
+                    <span className="text-sm sm:text-base font-black font-mono tracking-tight text-rose-200">
+                      {formatMoney(operatingExpenses, db.settings.currency)}
+                    </span>
+                  </div>
+                  <div className="text-center bg-emerald-950/60 px-4 py-2 rounded-xl border-2 border-emerald-300 shrink-0 shadow-xs">
+                    <span className="text-[10px] font-black text-emerald-300 block">
+                      صافي ربح النشاط التجاري:
+                    </span>
+                    <span className="text-base sm:text-lg font-black font-mono tracking-tight text-white">
+                      {formatMoney(netBusinessProfit, db.settings.currency)}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -785,7 +823,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                         <th className="p-2.5">اسم الصنف</th>
                         <th className="p-2.5">التصنيف</th>
                         <th className="p-2.5 text-center">الكمية المباعة</th>
-                        <th className="p-2.5 text-center">متوسط التكلفة</th>
+                        <th className="p-2.5 text-center">آخر تكلفة شراء موثقة</th>
                         <th className="p-2.5 text-center">متوسط سعر البيع</th>
                         <th className="p-2.5 text-center">إجمالي المبيعات</th>
                         <th className="p-2.5 text-center">إجمالي التكلفة</th>
@@ -809,7 +847,13 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                             {it.qtySold} {it.unit}
                           </td>
                           <td className="p-2.5 text-center font-mono text-slate-600">
-                            {formatMoney(it.avgCostPrice, db.settings.currency)}
+                            {it.hasVerifiedCost ? (
+                              formatMoney(it.verifiedCostPrice, db.settings.currency)
+                            ) : (
+                              <span className="text-amber-700 font-bold text-[10.5px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                                غير محدد (لم يُشترَ)
+                              </span>
+                            )}
                           </td>
                           <td className="p-2.5 text-center font-mono text-slate-900">
                             {formatMoney(it.avgSellPrice, db.settings.currency)}
@@ -818,13 +862,25 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                             {formatMoney(it.totalRevenue, db.settings.currency)}
                           </td>
                           <td className="p-2.5 text-center font-mono text-slate-600">
-                            {formatMoney(it.totalCost, db.settings.currency)}
+                            {it.hasVerifiedCost ? (
+                              formatMoney(it.totalCost, db.settings.currency)
+                            ) : (
+                              <span className="text-slate-400 font-mono">—</span>
+                            )}
                           </td>
                           <td className="p-2.5 text-center font-mono font-black text-emerald-700">
-                            {formatMoney(it.profit, db.settings.currency)}
+                            {it.hasVerifiedCost ? (
+                              formatMoney(it.profit, db.settings.currency)
+                            ) : (
+                              <span className="text-slate-400 font-mono">—</span>
+                            )}
                           </td>
                           <td className="p-2.5 text-center font-mono font-bold text-amber-700">
-                            {it.margin.toFixed(1)}%
+                            {it.hasVerifiedCost ? (
+                              `${it.margin.toFixed(1)}%`
+                            ) : (
+                              <span className="text-slate-400 font-mono">—</span>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -833,29 +889,47 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                 </div>
               </div>
 
-              {/* BOTTOM SECTION: ONLY Grand Total of Profits (كما طلب المستخدم تماماً) */}
-              <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white rounded-xl p-4 shadow-md flex flex-col sm:flex-row items-center justify-between gap-3">
+              {/* BOTTOM SECTION: Gross Merchandise Profit & Net Business Profit */}
+              <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white rounded-xl p-4 shadow-md flex flex-col md:flex-row items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center text-white shrink-0">
                     <TrendingUp className="w-6 h-6" />
                   </div>
                   <div>
                     <span className="text-xs font-bold text-emerald-100 block">
-                      إجمالي الأرباح لجميع الأصناف المباعة:
+                      إجمالي أرباح الأصناف المعتمدة:
                     </span>
-                    <span className="text-xs text-white/80">
-                      محسوبة تلقائياً من فروق أسعار الشراء والبيع لجميع أصناف الفواتير
+                    <span className="text-[11px] text-white/80">
+                      محسوبة تلقائياً من فروق أسعار الشراء والبيع للأصناف ذات تكلفة شراء موثقة
                     </span>
                   </div>
                 </div>
 
-                <div className="text-center sm:text-left bg-black/20 px-5 py-2.5 rounded-xl border border-white/20 shrink-0">
-                  <span className="text-[11px] font-bold text-emerald-200 block">
-                    إجمالي الأرباح فقط للاجمالي:
-                  </span>
-                  <span className="text-xl sm:text-2xl font-black font-mono tracking-tight text-white">
-                    {formatMoney(grandTotalItemProfits, db.settings.currency)}
-                  </span>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="text-center bg-black/20 px-3.5 py-2 rounded-xl border border-white/20 shrink-0">
+                    <span className="text-[10px] font-bold text-emerald-200 block">
+                      إجمالي ربح الأصناف:
+                    </span>
+                    <span className="text-sm sm:text-base font-black font-mono tracking-tight text-white">
+                      {formatMoney(grandTotalItemProfits, db.settings.currency)}
+                    </span>
+                  </div>
+                  <div className="text-center bg-black/20 px-3.5 py-2 rounded-xl border border-white/20 shrink-0">
+                    <span className="text-[10px] font-bold text-rose-200 block">
+                      المصروفات التشغيلية:
+                    </span>
+                    <span className="text-sm sm:text-base font-black font-mono tracking-tight text-rose-200">
+                      {formatMoney(operatingExpenses, db.settings.currency)}
+                    </span>
+                  </div>
+                  <div className="text-center bg-emerald-950/60 px-4 py-2 rounded-xl border-2 border-emerald-300 shrink-0 shadow-xs">
+                    <span className="text-[10px] font-black text-emerald-300 block">
+                      صافي ربح النشاط:
+                    </span>
+                    <span className="text-base sm:text-lg font-black font-mono tracking-tight text-white">
+                      {formatMoney(grandTotalItemProfits - operatingExpenses, db.settings.currency)}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
