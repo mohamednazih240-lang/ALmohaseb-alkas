@@ -349,6 +349,21 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             <Search className="w-4 h-4" />
           </button>
 
+          {/* Mobile Realtime Live Cloud Sync Pulse Button */}
+          <button
+            type="button"
+            onClick={handleSyncClick}
+            disabled={isSyncing}
+            className="flex items-center gap-1 px-2 py-1 bg-emerald-50 active:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-bold cursor-pointer"
+            title="مزامنة لحظية مباشرة بين الأجهزة (انقر للتحديث الفوري)"
+          >
+            <span className="relative flex h-2 w-2">
+              <span className={`absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 ${isSyncing ? 'animate-ping' : ''}`}></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            <span className="text-[10px] font-bold">{isSyncing ? 'تحديث...' : 'مزامنة'}</span>
+          </button>
+
           {/* User Avatar Circle */}
           <div 
             onClick={onOpenLogin}

@@ -67,7 +67,8 @@ import {
   getDeterministicTreasuryId,
   getDeterministicVoucherId,
   normalizeArabicText,
-  getLatestVerifiedPurchaseInfo
+  getLatestVerifiedPurchaseInfo,
+  calculateProductAverageCost
 } from '../services/accountingStorage';
 import {
   InvoicePriceValidationModal,
@@ -841,20 +842,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         name: name,
         category: 'عامة',
         unit: 'قطعة',
-        buyPrice: mode === 'purchase' ? price : (price * 0.8),
-        sellPrice: mode === 'purchase' ? (price * 1.25) : price,
-        wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+        buyPrice: mode === 'purchase' ? price : 0,
+        sellPrice: (mode === 'sale' || mode === 'wholesale') ? price : (mode === 'purchase' ? price : 0),
+        wholesalePrice: mode === 'wholesale' ? price : 0,
         minStock: 5,
         currentQty: 0,
-        avgCost: mode === 'purchase' ? price : (price * 0.8),
+        avgCost: mode === 'purchase' ? price : 0,
         branchesData: {
           [invoiceBranchId]: {
             currentQty: 0,
-            buyPrice: mode === 'purchase' ? price : (price * 0.8),
-            sellPrice: mode === 'purchase' ? (price * 1.25) : price,
-            wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+            buyPrice: mode === 'purchase' ? price : 0,
+            sellPrice: (mode === 'sale' || mode === 'wholesale') ? price : (mode === 'purchase' ? price : 0),
+            wholesalePrice: mode === 'wholesale' ? price : 0,
             minStock: 5,
-            avgCost: mode === 'purchase' ? price : (price * 0.8)
+            avgCost: mode === 'purchase' ? price : 0
           }
         }
       };
@@ -864,6 +865,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     }
 
     const calculatedTotal = total > 0 ? total : Math.max(0, (qty * price) - discount + tax);
+    const itemCostInfo = calculateProductAverageCost(db, matched.id, name);
+    const activeCost = itemCostInfo.hasPurchases
+      ? ((db.settings.cost === 'average') ? itemCostInfo.avgCost : itemCostInfo.latestBuyPrice)
+      : (matched.buyPrice || 0);
 
     const itemObj: InvoiceItem = {
       productId: matched.id,
@@ -873,7 +878,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       spec: rapidItemDesc.trim() || undefined,
       qty,
       unitPrice: price,
-      costPrice: matched.buyPrice || price,
+      costPrice: mode === 'purchase' ? price : activeCost,
       discount,
       taxRate: tax,
       total: calculatedTotal
@@ -1023,6 +1028,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         };
         return copy;
       } else {
+        const costInfo = calculateProductAverageCost(db, prod.id, prod.name);
+        const activeCost = costInfo.hasPurchases
+          ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
+          : (branchProd.avgCost || branchProd.buyPrice || 0);
         const newItem: InvoiceItem = {
           productId: prod.id,
           productCode: prod.code,
@@ -1031,7 +1040,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           spec: '',
           qty: 1,
           unitPrice: activePrice,
-          costPrice: branchProd.avgCost || branchProd.buyPrice,
+          costPrice: mode === 'purchase' ? activePrice : activeCost,
           discount: 0,
           taxRate: 0,
           total: activePrice * 1
@@ -1107,6 +1116,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         showToast(`✓ تم زيادة كمية "${selectedCardProduct.name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
         return copy;
       } else {
+        const costInfo = calculateProductAverageCost(db, selectedCardProduct.id, selectedCardProduct.name);
+        const activeCost = costInfo.hasPurchases
+          ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
+          : (branchProd.avgCost || branchProd.buyPrice || 0);
         const newItem: InvoiceItem = {
           productId: selectedCardProduct.id,
           productCode: selectedCardProduct.code,
@@ -1115,7 +1128,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           spec: itemCardSpec.trim(),
           qty: qty,
           unitPrice: unitPrice,
-          costPrice: branchProd.avgCost || branchProd.buyPrice,
+          costPrice: mode === 'purchase' ? unitPrice : activeCost,
           discount: 0,
           taxRate: 0,
           total: qty * unitPrice
@@ -1188,6 +1201,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       const newId = generateId('prod');
       const initialQty = 0;
 
+      const costInfo = calculateProductAverageCost(updated, undefined, name);
+      const verifiedBuy = mode === 'purchase' ? price : (costInfo.hasPurchases ? costInfo.latestBuyPrice : 0);
+      const verifiedAvg = mode === 'purchase' ? price : (costInfo.hasPurchases ? costInfo.avgCost : 0);
+
       newProd = {
         id: newId,
         code: newCode,
@@ -1195,20 +1212,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         name,
         category: fastItemCategory || 'عامة',
         unit: fastItemUnit || 'قطعة',
-        buyPrice: mode === 'purchase' ? price : (price * 0.8),
-        sellPrice: mode === 'purchase' ? (price * 1.25) : price,
-        wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+        buyPrice: verifiedBuy,
+        sellPrice: isSale ? price : (verifiedBuy > 0 ? verifiedBuy : 0),
+        wholesalePrice: mode === 'wholesale' ? price : 0,
         minStock: 5,
         currentQty: initialQty,
-        avgCost: mode === 'purchase' ? price : (price * 0.8),
+        avgCost: verifiedAvg,
         branchesData: {
           [invoiceBranchId]: {
             currentQty: initialQty,
-            buyPrice: mode === 'purchase' ? price : (price * 0.8),
-            sellPrice: mode === 'purchase' ? (price * 1.25) : price,
-            wholesalePrice: mode === 'purchase' ? (price * 1.15) : (price * 0.9),
+            buyPrice: verifiedBuy,
+            sellPrice: isSale ? price : (verifiedBuy > 0 ? verifiedBuy : 0),
+            wholesalePrice: mode === 'wholesale' ? price : 0,
             minStock: 5,
-            avgCost: mode === 'purchase' ? price : (price * 0.8)
+            avgCost: verifiedAvg
           }
         }
       };
@@ -1219,6 +1236,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     onUpdateDb(updated);
 
+    const costInfo = calculateProductAverageCost(updated, newProd.id, newProd.name);
+    const activeCost = costInfo.hasPurchases
+      ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
+      : (newProd.buyPrice || 0);
+
     const newItem: InvoiceItem = {
       productId: newProd.id,
       productCode: newProd.code,
@@ -1227,7 +1249,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       spec: isSale ? 'صنف جديد مضاف أثناء البيع (بالسالب)' : 'صنف جديد مضاف أثناء الشراء',
       qty,
       unitPrice: price,
-      costPrice: newProd.buyPrice,
+      costPrice: mode === 'purchase' ? price : activeCost,
       discount: 0,
       taxRate: 0,
       total: qty * price

@@ -9,7 +9,7 @@ import {
 } from 'firebase/firestore';
 import { auth } from './firebaseAuth';
 import { AccountingDB, User as AppUser, Branch } from '../types/accounting';
-import { saveDatabase, loadDatabase, ensurePrimaryBranches, sanitizeCompanyDatabase, isCompanyMawan, loadTenantDatabase, mergeInvoices, mergeVouchers } from './accountingStorage';
+import { saveDatabase, loadDatabase, ensurePrimaryBranches, sanitizeCompanyDatabase, isCompanyMawan, loadTenantDatabase, mergeInvoices, mergeVouchers, mergeTreasury, mergeStockMovements } from './accountingStorage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { getCompanyByCode } from './tenantService';
 
@@ -223,8 +223,8 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
       const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
       await setDoc(compDocRef, payload, { merge: true });
 
-      // 2. Also save to main database doc for COMP-102
-      if (cleanCode === 'COMP-102' || cleanCode === 'COMP-101') {
+      // 2. Save to main_company_database for COMP-102 for instant multi-device sync
+      if (cleanCode === 'COMP-102') {
         const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
         await setDoc(docRef, payload, { merge: true });
       }
@@ -284,41 +284,61 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 export async function fetchDatabaseFromCloud(companyCode?: string): Promise<AccountingDB | null> {
   const clean = normalizeCompanyCode(companyCode);
   try {
-    // 1. Check company specific document
-    const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
-    const specificSnap = await withTimeout(getDoc(specificRef), 3500);
-    if (specificSnap && specificSnap.exists()) {
-      const val = specificSnap.data();
-      if (val && val.data) {
-        return JSON.parse(val.data) as AccountingDB;
-      }
-    }
+    let specificDb: AccountingDB | null = null;
+    let mainDb: AccountingDB | null = null;
+    let mirrorDb: AccountingDB | null = null;
 
-    // 2. Check main cloud database
-    const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-    const snap = await withTimeout(getDoc(docRef), 3000);
-    if (snap && snap.exists()) {
-      const val = snap.data();
-      if (val && val.data) {
-        const parsed = JSON.parse(val.data) as AccountingDB;
-        const mainCode = normalizeCompanyCode(parsed.settings?.companyCode);
-        if (mainCode === clean || clean === 'COMP-101') {
-          return sanitizeCompanyDatabase(parsed, clean);
+    // 1. Check company specific document
+    try {
+      const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
+      const specificSnap = await withTimeout(getDoc(specificRef), 3500);
+      if (specificSnap && specificSnap.exists()) {
+        const val = specificSnap.data();
+        if (val && val.data) {
+          specificDb = JSON.parse(val.data) as AccountingDB;
         }
       }
-    }
+    } catch (e) {}
 
-    // 3. Check backup document
-    const backupRef = doc(firestore, SYNC_DOC_PATH, `backup_${clean}_latest`);
-    const backupSnap = await withTimeout(getDoc(backupRef), 3000);
-    if (backupSnap && backupSnap.exists()) {
-      const val = backupSnap.data();
-      if (val && val.data) {
-        return sanitizeCompanyDatabase(JSON.parse(val.data) as AccountingDB, clean);
+    // 2. Check main cloud database
+    try {
+      const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
+      const snap = await withTimeout(getDoc(docRef), 3000);
+      if (snap && snap.exists()) {
+        const val = snap.data();
+        if (val && val.data) {
+          mainDb = JSON.parse(val.data) as AccountingDB;
+        }
       }
-    }
+    } catch (e) {}
 
-    return null;
+    const candidates = [specificDb, mainDb].filter(Boolean) as AccountingDB[];
+    if (candidates.length === 0) return null;
+
+    let unified = candidates[0];
+    for (let i = 1; i < candidates.length; i++) {
+      const other = candidates[i];
+      unified = {
+        ...unified,
+        invoices: mergeInvoices(unified.invoices || [], other.invoices || []),
+        vouchers: mergeVouchers(unified.vouchers || [], other.vouchers || []),
+        treasury: mergeTreasury(unified.treasury || [], other.treasury || []),
+        stockMovements: mergeStockMovements(unified.stockMovements || [], other.stockMovements || []),
+        users: Array.from(new Map<string, AppUser>([
+          ...(unified.users || []).map((u): [string, AppUser] => [u.id || u.username, u]),
+          ...(other.users || []).map((u): [string, AppUser] => [u.id || u.username, u])
+        ]).values()),
+        customers: Array.from(new Map<string, any>([
+          ...(unified.customers || []).map((c): [string, any] => [c.id || c.name, c]),
+          ...(other.customers || []).map((c): [string, any] => [c.id || c.name, c])
+        ]).values()),
+        suppliers: Array.from(new Map<string, any>([
+          ...(unified.suppliers || []).map((s): [string, any] => [s.id || s.name, s]),
+          ...(other.suppliers || []).map((s): [string, any] => [s.id || s.name, s])
+        ]).values()),
+      };
+    }
+    return sanitizeCompanyDatabase(unified, clean);
   } catch (err) {
     console.warn('Firestore cloud sync fetch warning:', err);
     return null;
@@ -465,6 +485,8 @@ export function subscribeToCloudDatabase(
     }
 
     // 2. Handler for Firestore incoming remote snapshots
+    const isMawan = cleanCode === 'COMP-102' || cleanCode === 'COMP-101';
+
     const handleSnapshot = (snap: any) => {
       if (!snap.exists()) return;
       const data = snap.data();
@@ -476,8 +498,11 @@ export function subscribeToCloudDatabase(
       }
 
       // Filter out updates for a different company
-      if (data.companyCode && normalizeCompanyCode(data.companyCode) !== cleanCode) {
-        return;
+      if (data.companyCode) {
+        const dataCode = normalizeCompanyCode(data.companyCode);
+        if (!isMawan && dataCode !== cleanCode) {
+          return;
+        }
       }
 
       // Secondary protection: if deviceId was not present, check recent local timestamp within 300ms
@@ -496,14 +521,16 @@ export function subscribeToCloudDatabase(
       }
     };
 
+    let unsubMirror: (() => void) | null = null;
+
     // 3. Listen to company-specific document
     const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
     unsubscribeCompListener = onSnapshot(compDocRef, handleSnapshot, (error) => {
       console.warn('Firestore company listener notice:', error.message);
     });
 
-    // Also listen to main doc for COMP-102 & COMP-101 for 100% real-time instant sync
-    if (cleanCode === 'COMP-102' || cleanCode === 'COMP-101') {
+    // Also listen to main doc for COMP-102 for 100% real-time instant sync
+    if (isMawan) {
       const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
       unsubscribeListener = onSnapshot(docRef, handleSnapshot, (error) => {
         console.warn('Firestore realtime listener notice:', error.message);

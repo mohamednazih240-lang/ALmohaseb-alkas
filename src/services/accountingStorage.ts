@@ -252,13 +252,148 @@ export function isCompanyMawan(identifier?: string | null): boolean {
 export interface VerifiedPurchaseInfo {
   hasVerifiedPurchase: boolean;
   price?: number;
+  avgCost?: number;
+  latestBuyPrice?: number;
   date?: string;
   invoiceNumber?: string;
   supplierName?: string;
 }
 
+export interface ProductCostFromPurchases {
+  hasPurchases: boolean;
+  /** متوسط التكلفة الفعلي المحسوب حصرياً من فواتير الشراء المسجلة (المتوسط المرجح = إجمالي القيمة / إجمالي الكمية) */
+  avgCost: number;
+  /** آخر سعر شراء فعلي موثق في أحدث فاتورة شراء */
+  latestBuyPrice: number;
+  /** إجمالي الكميات المشتراة فعلياً في فواتير الشراء */
+  totalPurchasedQty: number;
+  /** إجمالي قيمة المشتريات المسجلة لهذا الصنف */
+  totalPurchasedAmount: number;
+  /** عدد فواتير الشراء التي ورد فيها الصنف */
+  purchasesCount: number;
+  /** تاريخ آخر فاتورة شراء */
+  lastPurchaseDate?: string;
+  /** رقم آخر فاتورة شراء */
+  lastInvoiceNumber?: string;
+  /** اسم مورد آخر فاتورة شراء */
+  lastSupplierName?: string;
+}
+
 /**
- * Retrieves the latest verified, successfully posted purchase price for a product.
+ * دالة حساب متوسط سعر التكلفة المرجح وآخر سعر شراء حصرياً من فواتير الشراء المسجلة فعلياً
+ * تطبق المعايير المحاسبية الدقيقة:
+ * متوسط التكلفة = (مجموع الكمية × سعر الشراء لكل فاتورة) / إجمالي الكميات المشتراة
+ * لا تعتمد على أي معادلات تقديرية أو نسب افتراضية نهائياً.
+ */
+export function calculateProductAverageCost(
+  db: AccountingDB,
+  productId?: string,
+  productName?: string,
+  excludeInvoiceId?: string
+): ProductCostFromPurchases {
+  if (!db || !db.invoices || (!productId && !productName)) {
+    return {
+      hasPurchases: false,
+      avgCost: 0,
+      latestBuyPrice: 0,
+      totalPurchasedQty: 0,
+      totalPurchasedAmount: 0,
+      purchasesCount: 0
+    };
+  }
+
+  const normTargetName = productName ? normalizeArabicText(productName) : '';
+
+  // فلترة كافة فواتير المشتريات المعتمدة والمسجلة فعلياً فقط (استبعاد الفواتير الملغاة)
+  const purchaseInvoices = (db.invoices || []).filter(inv =>
+    (inv.type === 'purchase' || inv.invoiceKind === 'purchase') &&
+    (inv.status as string) !== 'ملغي' &&
+    (!excludeInvoiceId || inv.id !== excludeInvoiceId)
+  );
+
+  let totalPurchasedQty = 0;
+  let totalPurchasedAmount = 0;
+  let purchasesCount = 0;
+  let latestBuyPrice = 0;
+  let lastPurchaseDate: string | undefined;
+  let lastInvoiceNumber: string | undefined;
+  let lastSupplierName: string | undefined;
+  let latestSortKey = '';
+
+  for (const inv of purchaseInvoices) {
+    if (!inv.items || !Array.isArray(inv.items)) continue;
+    for (const it of inv.items) {
+      const matchId = Boolean(productId && it.productId && it.productId === productId);
+      const matchName = Boolean(normTargetName && it.productName && normalizeArabicText(it.productName) === normTargetName);
+
+      if (matchId || matchName) {
+        const qty = Number(it.qty) || 0;
+        const price = Number(it.unitPrice || it.costPrice || (it as any).price || (qty > 0 && it.total > 0 ? it.total / qty : 0)) || 0;
+        if (qty > 0 && price > 0) {
+          totalPurchasedQty += qty;
+          totalPurchasedAmount += (qty * price);
+          purchasesCount++;
+
+          const invSortKey = `${inv.date || ''}_${inv.createdAt || ''}_${inv.number || ''}_${inv.id || ''}`;
+          if (invSortKey > latestSortKey) {
+            latestSortKey = invSortKey;
+            latestBuyPrice = price;
+            lastPurchaseDate = inv.date;
+            lastInvoiceNumber = inv.number;
+            lastSupplierName = inv.partyName;
+          }
+        }
+      }
+    }
+  }
+
+  if (purchasesCount > 0 && totalPurchasedQty > 0) {
+    const rawAvg = totalPurchasedAmount / totalPurchasedQty;
+    return {
+      hasPurchases: true,
+      avgCost: Number(rawAvg.toFixed(2)),
+      latestBuyPrice: Number(latestBuyPrice.toFixed(2)),
+      totalPurchasedQty,
+      totalPurchasedAmount: Number(totalPurchasedAmount.toFixed(2)),
+      purchasesCount,
+      lastPurchaseDate,
+      lastInvoiceNumber,
+      lastSupplierName
+    };
+  }
+
+  // إذا لم يُعثر على فواتير شراء مسجلة:
+  // نتحقق من بطاقة الصنف الأصلية فقط إذا كان بها سعر شراء مسجل ومحدد مسبقاً
+  const prod = db.products?.find(p =>
+    (productId && p.id === productId) ||
+    (normTargetName && normalizeArabicText(p.name) === normTargetName)
+  );
+
+  if (prod && Number(prod.buyPrice) > 0) {
+    const recordedPrice = Number(prod.buyPrice);
+    return {
+      hasPurchases: true,
+      avgCost: recordedPrice,
+      latestBuyPrice: recordedPrice,
+      totalPurchasedQty: prod.currentQty > 0 ? prod.currentQty : 0,
+      totalPurchasedAmount: (prod.currentQty > 0 ? prod.currentQty : 0) * recordedPrice,
+      purchasesCount: 1
+    };
+  }
+
+  // لا توجد فواتير شراء ولا سعر شراء مسجل: صفر دون أي معادلات تقديرية
+  return {
+    hasPurchases: false,
+    avgCost: 0,
+    latestBuyPrice: 0,
+    totalPurchasedQty: 0,
+    totalPurchasedAmount: 0,
+    purchasesCount: 0
+  };
+}
+
+/**
+ * Retrieves verified purchase pricing details for a product directly from purchase invoices.
  * Strictly adheres to ERP integrity: never estimates or invents costs.
  * Uses only posted purchase invoices (status !== 'ملغي').
  */
@@ -268,57 +403,20 @@ export function getLatestVerifiedPurchaseInfo(
   productName?: string,
   excludeInvoiceId?: string
 ): VerifiedPurchaseInfo {
-  if (!db || !db.invoices || (!productId && !productName)) {
-    return { hasVerifiedPurchase: false };
-  }
+  const costInfo = calculateProductAverageCost(db, productId, productName, excludeInvoiceId);
+  if (costInfo.hasPurchases) {
+    const activePrice = (db.settings?.cost === 'average')
+      ? (costInfo.avgCost || costInfo.latestBuyPrice)
+      : (costInfo.latestBuyPrice || costInfo.avgCost);
 
-  const normName = productName ? normalizeArabicText(productName) : '';
-
-  // Sort posted purchase invoices latest first
-  const purchaseInvoices = (db.invoices || [])
-    .filter(inv =>
-      (inv.type === 'purchase' || inv.invoiceKind === 'purchase') &&
-      (inv.status as string) !== 'ملغي' &&
-      (!excludeInvoiceId || inv.id !== excludeInvoiceId)
-    )
-    .sort((a, b) =>
-      (b.date || '').localeCompare(a.date || '') ||
-      (b.createdAt || '').localeCompare(a.createdAt || '') ||
-      (b.id || '').localeCompare(a.id || '')
-    );
-
-  for (const inv of purchaseInvoices) {
-    if (!inv.items || !Array.isArray(inv.items)) continue;
-    for (const it of inv.items) {
-      const matchId = Boolean(productId && it.productId && it.productId === productId);
-      const matchName = Boolean(normName && it.productName && normalizeArabicText(it.productName) === normName);
-      if (matchId || matchName) {
-        const p = Number(it.unitPrice || it.costPrice || (it as any).price) || 0;
-        if (p > 0) {
-          return {
-            hasVerifiedPurchase: true,
-            price: p,
-            date: inv.date,
-            invoiceNumber: inv.number,
-            supplierName: inv.partyName
-          };
-        }
-      }
-    }
-  }
-
-  // Fallback: check product catalog card ONLY if recorded buyPrice > 0
-  const prod = db.products?.find(p =>
-    (productId && p.id === productId) ||
-    (normName && normalizeArabicText(p.name) === normName)
-  );
-  if (prod && Number(prod.buyPrice) > 0) {
     return {
       hasVerifiedPurchase: true,
-      price: Number(prod.buyPrice),
-      date: undefined,
-      invoiceNumber: undefined,
-      supplierName: undefined
+      price: activePrice,
+      avgCost: costInfo.avgCost,
+      latestBuyPrice: costInfo.latestBuyPrice,
+      date: costInfo.lastPurchaseDate,
+      invoiceNumber: costInfo.lastInvoiceNumber,
+      supplierName: costInfo.lastSupplierName
     };
   }
 
@@ -725,16 +823,20 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
 
   const seenSmKeys = new Set<string>();
   const deduplicatedMovements: StockMovement[] = [];
+  const validInvoiceIds = new Set((db.invoices || []).map(i => i.id));
+
   for (const sm of db.stockMovements) {
-    if (!sm.sourceId) {
-      deduplicatedMovements.push(sm);
-      continue;
+    // إزالة الحركات الشبحية أو اليتيمة التي ليس لها فاتورة فعلية مسجلة
+    if (sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') {
+      if (!sm.sourceId || !validInvoiceIds.has(sm.sourceId)) {
+        continue;
+      }
     }
     // إذا كان للصنف فاتورة شراء، فإن فواتير المشتريات هي مصدر رصيده المعتمد، ولا يُحتسب له رصيد افتتاحي مكرر
     if (sm.type === 'opening' && (productsWithPurchases.has(sm.productId) || (sm.sourceId && sm.sourceId.startsWith('prod_')))) {
       continue;
     }
-    const key = `${sm.sourceId}::${sm.productId}`;
+    const key = sm.sourceId ? `${sm.sourceId}::${sm.productId}` : sm.id;
     if (!seenSmKeys.has(key)) {
       seenSmKeys.add(key);
       deduplicatedMovements.push(sm);
@@ -742,7 +844,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
   }
   db.stockMovements = deduplicatedMovements;
 
-  // 5. إعادة احتساب أرصدة الأصناف بدقة تامة من سجل حركات المخزون، وتحديث متوسط التكلفة المرجح
+  // 5. إعادة احتساب أرصدة الأصناف بدقة تامة من سجل حركات المخزون، وتحديث سعر الشراء ومتوسط التكلفة
   let correctedProductsCount = 0;
   db.products.forEach(p => {
     const normPName = normalizeArabicText(p.name);
@@ -753,23 +855,19 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
 
     const totalQty = prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0);
 
-    const purchaseMoves = prodMovements.filter(sm => sm.type === 'purchase' && sm.qtyChange > 0);
-    let avgCost = p.buyPrice || 0;
-    if (purchaseMoves.length > 0) {
-      const totalCostSum = purchaseMoves.reduce((sum, sm) => sum + (sm.qtyChange * (sm.unitCost || 0)), 0);
-      const totalPurchasedQty = purchaseMoves.reduce((sum, sm) => sum + sm.qtyChange, 0);
-      if (totalPurchasedQty > 0) {
-        avgCost = totalCostSum / totalPurchasedQty;
-      }
-      // تثبيت آخر سعر شراء مسجل للصنف كافتراضي في الكتالوج دون المساس بالفواتير التاريخية
-      const latestPurchase = [...purchaseMoves].sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.id || '').localeCompare(a.id || ''))[0];
-      if (latestPurchase && latestPurchase.unitCost > 0) {
-        p.buyPrice = latestPurchase.unitCost;
-      }
+    // احتساب متوسط التكلفة وآخر سعر شراء حصرياً من فواتير الشراء المسجلة فعلياً لكل صنف
+    const costInfo = calculateProductAverageCost(db, p.id, p.name);
+    let latestBuy = p.buyPrice || 0;
+    let avgCost = p.avgCost || p.buyPrice || 0;
+
+    if (costInfo.hasPurchases) {
+      latestBuy = costInfo.latestBuyPrice;
+      avgCost = costInfo.avgCost;
     }
 
-    if (p.currentQty !== totalQty || p.avgCost !== avgCost) {
+    if (p.currentQty !== totalQty || p.buyPrice !== latestBuy || p.avgCost !== avgCost) {
       p.currentQty = totalQty;
+      p.buyPrice = latestBuy;
       p.avgCost = avgCost;
       correctedProductsCount++;
     }
@@ -778,7 +876,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     p.branchesData = bData;
     const branchInfo: BranchProductData = {
       currentQty: totalQty,
-      buyPrice: p.buyPrice,
+      buyPrice: latestBuy,
       sellPrice: p.sellPrice,
       wholesalePrice: p.wholesalePrice,
       minStock: p.minStock || 5,
@@ -790,6 +888,33 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       db.branches.forEach(b => {
         bData[b.id] = { ...branchInfo };
       });
+    }
+  });
+
+  // 6. مطابقة تكلفة بضاعة المبيعات حصرياً مع فواتير الشراء المسجلة وإزالة أي معادلات تقديرية قديمة
+  (db.invoices || []).forEach(inv => {
+    if (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') {
+      inv.items?.forEach(it => {
+        const itemCost = calculateProductAverageCost(db, it.productId, it.productName);
+        if (itemCost.hasPurchases) {
+          const verifiedCost = (db.settings?.cost === 'average')
+            ? (itemCost.avgCost || itemCost.latestBuyPrice)
+            : (itemCost.latestBuyPrice || itemCost.avgCost);
+          it.costPrice = verifiedCost;
+        }
+      });
+    }
+  });
+
+  // تحديث تكلفة الوحدة في حركات مبيعات المخزون وفقاً للتكلفة الحقيقية
+  db.stockMovements.forEach(sm => {
+    if (sm.type === 'sale') {
+      const itemCost = calculateProductAverageCost(db, sm.productId, sm.productName);
+      if (itemCost.hasPurchases) {
+        sm.unitCost = (db.settings?.cost === 'average')
+          ? (itemCost.avgCost || itemCost.latestBuyPrice)
+          : (itemCost.latestBuyPrice || itemCost.avgCost);
+      }
     }
   });
 

@@ -18,7 +18,8 @@ import {
   AccountingDB,
   Invoice,
   Product,
-  Branch
+  Branch,
+  AppSettings
 } from './types/accounting';
 import {
   getCompaniesList,
@@ -301,8 +302,23 @@ export default function App() {
         const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
         const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || []);
 
+        const safeSettings: AppSettings = {
+          ...ensuredCloud.settings,
+          ...prevDb.settings,
+          company: (ensuredCloud.settings?.company && ensuredCloud.settings.company.trim()) ? ensuredCloud.settings.company : (prevDb.settings?.company || 'شركة الموان'),
+          companyCode: (ensuredCloud.settings?.companyCode && ensuredCloud.settings.companyCode.trim()) ? ensuredCloud.settings.companyCode : (prevDb.settings?.companyCode || 'COMP-102'),
+          companyPin: (ensuredCloud.settings?.companyPin && ensuredCloud.settings.companyPin.trim()) ? ensuredCloud.settings.companyPin : (prevDb.settings?.companyPin || '2919'),
+          logo: (ensuredCloud.settings?.logo && ensuredCloud.settings.logo.trim()) ? ensuredCloud.settings.logo : (prevDb.settings?.logo || ''),
+          phone: (ensuredCloud.settings?.phone && ensuredCloud.settings.phone.trim()) ? ensuredCloud.settings.phone : (prevDb.settings?.phone || ''),
+          address: (ensuredCloud.settings?.address && ensuredCloud.settings.address.trim()) ? ensuredCloud.settings.address : (prevDb.settings?.address || 'المقر الرئيسي'),
+          invoiceTitle: (ensuredCloud.settings?.invoiceTitle && ensuredCloud.settings.invoiceTitle.trim()) ? ensuredCloud.settings.invoiceTitle : (prevDb.settings?.invoiceTitle || 'بيان'),
+          notes: (ensuredCloud.settings?.notes && ensuredCloud.settings.notes.trim()) ? ensuredCloud.settings.notes : (prevDb.settings?.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية'),
+          currency: (ensuredCloud.settings?.currency && ensuredCloud.settings.currency.trim()) ? ensuredCloud.settings.currency : (prevDb.settings?.currency || 'ج.م')
+        };
+
         const merged: AccountingDB = {
           ...ensuredCloud,
+          settings: safeSettings,
           invoices: mergedInvoices,
           vouchers: mergedVouchers,
           treasury: mergedTreasury,
@@ -336,7 +352,12 @@ export default function App() {
             const cloudAuditTime = cloudDb.audit?.[0]?.at ? new Date(cloudDb.audit[0].at).getTime() : 0;
             const prevAuditTime = prevDb.audit?.[0]?.at ? new Date(prevDb.audit[0].at).getTime() : 0;
 
-            if (cloudInvoicesCount !== prevInvoicesCount || cloudAuditCount !== prevAuditCount || cloudAuditTime > prevAuditTime) {
+            // Robust multi-device comparison: checks count, missing invoice IDs, and newer audits
+            const hasCountDiff = cloudInvoicesCount !== prevInvoicesCount;
+            const hasMissingInvoice = (cloudDb.invoices || []).some(ci => !(prevDb.invoices || []).some(pi => pi.id === ci.id || (pi.number === ci.number && pi.type === ci.type)));
+            const hasNewerAudit = cloudAuditTime > prevAuditTime || cloudAuditCount !== prevAuditCount;
+
+            if (hasCountDiff || hasMissingInvoice || hasNewerAudit) {
               const storedSession = getStoredAuthSession();
               const currentLocalUser = storedSession?.user || prevDb.currentUser;
               const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
@@ -348,8 +369,23 @@ export default function App() {
               const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
               const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || []);
 
+              const safeSettings: AppSettings = {
+                ...ensuredCloud.settings,
+                ...prevDb.settings,
+                company: (ensuredCloud.settings?.company && ensuredCloud.settings.company.trim()) ? ensuredCloud.settings.company : (prevDb.settings?.company || 'شركة الموان'),
+                companyCode: (ensuredCloud.settings?.companyCode && ensuredCloud.settings.companyCode.trim()) ? ensuredCloud.settings.companyCode : (prevDb.settings?.companyCode || 'COMP-102'),
+                companyPin: (ensuredCloud.settings?.companyPin && ensuredCloud.settings.companyPin.trim()) ? ensuredCloud.settings.companyPin : (prevDb.settings?.companyPin || '2919'),
+                logo: (ensuredCloud.settings?.logo && ensuredCloud.settings.logo.trim()) ? ensuredCloud.settings.logo : (prevDb.settings?.logo || ''),
+                phone: (ensuredCloud.settings?.phone && ensuredCloud.settings.phone.trim()) ? ensuredCloud.settings.phone : (prevDb.settings?.phone || ''),
+                address: (ensuredCloud.settings?.address && ensuredCloud.settings.address.trim()) ? ensuredCloud.settings.address : (prevDb.settings?.address || 'المقر الرئيسي'),
+                invoiceTitle: (ensuredCloud.settings?.invoiceTitle && ensuredCloud.settings.invoiceTitle.trim()) ? ensuredCloud.settings.invoiceTitle : (prevDb.settings?.invoiceTitle || 'بيان'),
+                notes: (ensuredCloud.settings?.notes && ensuredCloud.settings.notes.trim()) ? ensuredCloud.settings.notes : (prevDb.settings?.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية'),
+                currency: (ensuredCloud.settings?.currency && ensuredCloud.settings.currency.trim()) ? ensuredCloud.settings.currency : (prevDb.settings?.currency || 'ج.م')
+              };
+
               const merged: AccountingDB = {
                 ...ensuredCloud,
+                settings: safeSettings,
                 invoices: mergedInvoices,
                 vouchers: mergedVouchers,
                 treasury: mergedTreasury,
@@ -370,12 +406,16 @@ export default function App() {
     const handleFocus = () => pullLatest();
     window.addEventListener('focus', handleFocus);
     window.addEventListener('visibilitychange', handleFocus);
+    window.addEventListener('online', handleFocus);
+    window.addEventListener('resume', handleFocus);
 
-    const intervalId = setInterval(pullLatest, 7000);
+    const intervalId = setInterval(pullLatest, 3500);
 
     return () => {
       window.removeEventListener('focus', handleFocus);
       window.removeEventListener('visibilitychange', handleFocus);
+      window.removeEventListener('online', handleFocus);
+      window.removeEventListener('resume', handleFocus);
       clearInterval(intervalId);
     };
   }, [db.settings.companyCode]);
@@ -570,12 +610,39 @@ export default function App() {
           setShowLoginView(true);
         }}
         onManualSync={async () => {
-          const cloudDb = await fetchDatabaseFromCloud();
-          if (cloudDb) {
-            setDb(cloudDb);
-            saveDatabase(cloudDb);
-          } else {
-            await pushDatabaseToCloud(db, true);
+          try {
+            const cloudDb = await fetchDatabaseFromCloud();
+            if (cloudDb) {
+              const mergedInvoices = mergeInvoices(db.invoices || [], cloudDb.invoices || []);
+              const mergedVouchers = mergeVouchers(db.vouchers || [], cloudDb.vouchers || []);
+              const mergedTreasury = mergeTreasury(db.treasury || [], cloudDb.treasury || []);
+              const mergedStockMovements = mergeStockMovements(db.stockMovements || [], cloudDb.stockMovements || []);
+              const unified: AccountingDB = {
+                ...cloudDb,
+                invoices: mergedInvoices,
+                vouchers: mergedVouchers,
+                treasury: mergedTreasury,
+                stockMovements: mergedStockMovements,
+                currentUser: db.currentUser || cloudDb.currentUser || cloudDb.users[0]
+              };
+              setDb(unified);
+              saveDatabase(unified);
+              await pushDatabaseToCloud(unified, true);
+              setLiveSyncNotification({
+                message: `تمت المزامنة اللحظية بنجاح: تم تحديث ${mergedInvoices.length} فاتورة متزامنة مع كافة الأجهزة`,
+                author: 'النظام السحابي'
+              });
+              setTimeout(() => setLiveSyncNotification(null), 5000);
+            } else {
+              await pushDatabaseToCloud(db, true);
+              setLiveSyncNotification({
+                message: 'تم إرسال ومزامنة كافة بيانات جهازك إلى السحابة بنجاح',
+                author: 'النظام السحابي'
+              });
+              setTimeout(() => setLiveSyncNotification(null), 4000);
+            }
+          } catch (e) {
+            console.error('Manual sync error:', e);
           }
         }}
         onQuickAction={(action) => {

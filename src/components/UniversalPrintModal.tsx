@@ -354,9 +354,15 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                       </div>
 
                       <div className="header-left">
-                        <div><strong>هاتف:</strong> {settings.phone || phoneList[0] || '—'}</div>
-                        {phoneList[1] ? (
-                          <div><strong>هاتف 2:</strong> {phoneList[1]}</div>
+                        {phoneList.length > 0 ? (
+                          phoneList.map((ph, idx) => (
+                            <div key={idx}>
+                              <strong>{phoneList.length === 1 ? 'هاتف:' : `هاتف ${idx + 1}:`}</strong>{' '}
+                              <bdi dir="ltr" className="font-mono">{ph}</bdi>
+                            </div>
+                          ))
+                        ) : settings.phone ? (
+                          <div><strong>هاتف:</strong> <bdi dir="ltr" className="font-mono">{settings.phone}</bdi></div>
                         ) : null}
                       </div>
                     </div>
@@ -431,17 +437,14 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                     <div className="table-wrapper">
                       <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse' }}>
                         <colgroup>
-                          {doc.tableHeaders.map((th, thIdx) => {
-                            const isDate = (th.label || '').includes('تاريخ');
-                            return (
-                              <col
-                                key={thIdx}
-                                style={{
-                                  width: isDate ? Math.max(parseFloat(th.width || '16') || 16, 18) + '%' : th.width || 'auto'
-                                }}
-                              />
-                            );
-                          })}
+                          {doc.tableHeaders.map((th, thIdx) => (
+                            <col
+                              key={thIdx}
+                              style={{
+                                width: th.width || 'auto'
+                              }}
+                            />
+                          ))}
                         </colgroup>
                         <thead>
                           <tr>
@@ -452,7 +455,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                   width: th.width,
                                   textAlign: th.align || 'center',
                                   whiteSpace: 'normal',
-                                  wordBreak: 'break-word',
+                                  wordBreak: 'keep-all',
                                   overflowWrap: 'break-word',
                                   fontSize: paperSize === 'A5' ? '10px' : paperSize === 'thermal' ? '9px' : '11px',
                                   padding: '4px 3px',
@@ -480,7 +483,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                     style={{
                                       fontWeight: tr.isBold || cIdx === 0 ? 700 : 600,
                                       textAlign: doc.tableHeaders[cIdx]?.align || 'center',
-                                      wordBreak: 'break-word',
+                                      wordBreak: 'keep-all',
                                       overflowWrap: 'break-word',
                                       padding: '4px 3px',
                                       fontSize: paperSize === 'A5' ? '10px' : paperSize === 'thermal' ? '9px' : '11px',

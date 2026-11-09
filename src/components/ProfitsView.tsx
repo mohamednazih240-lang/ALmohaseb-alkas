@@ -26,7 +26,8 @@ import {
   getTodayDate,
   getProductForBranch,
   deleteInvoiceAndRevert,
-  getLatestVerifiedPurchaseInfo
+  getLatestVerifiedPurchaseInfo,
+  calculateProductAverageCost
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -113,9 +114,12 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       let hasUndefinedCost = false;
 
       inv.items.forEach(it => {
-        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName);
-        if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined) {
-          invoiceCost += it.qty * pInfo.price;
+        const costInfo = calculateProductAverageCost(db, it.productId, it.productName);
+        if (costInfo.hasPurchases) {
+          const unitCost = (db.settings.cost === 'average')
+            ? (costInfo.avgCost || costInfo.latestBuyPrice)
+            : (costInfo.latestBuyPrice || costInfo.avgCost);
+          invoiceCost += it.qty * unitCost;
         } else if (it.costPrice && it.costPrice > 0) {
           invoiceCost += it.qty * it.costPrice;
         } else {
@@ -192,9 +196,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     sales.forEach(inv => {
       inv.items.forEach(it => {
         const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode || p.name === it.productName);
-        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName);
-        const hasVerified = pInfo.hasVerifiedPurchase && pInfo.price !== undefined;
-        const verifiedCost = hasVerified ? pInfo.price! : (it.costPrice && it.costPrice > 0 ? it.costPrice : 0);
+        const costInfo = calculateProductAverageCost(db, it.productId, it.productName);
+        const hasVerified = costInfo.hasPurchases;
+        const verifiedCost = hasVerified
+          ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
+          : (it.costPrice && it.costPrice > 0 ? it.costPrice : 0);
         const itemRev = it.total;
         const itemCost = it.qty * verifiedCost;
 
@@ -228,11 +234,13 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     const list = Array.from(map.values()).map(item => {
       const profit = item.hasVerifiedCost ? (item.totalRevenue - item.totalCost) : 0;
       const margin = (item.hasVerifiedCost && item.totalRevenue > 0) ? (profit / item.totalRevenue) * 100 : 0;
-      const avgSellPrice = item.qtySold > 0 ? item.totalRevenue / item.qtySold : 0;
+      const actualSellPrice = (item.product?.sellPrice && item.product.sellPrice > 0)
+        ? item.product.sellPrice
+        : (item.qtySold > 0 ? item.totalRevenue / item.qtySold : 0);
 
       return {
         ...item,
-        avgSellPrice,
+        actualSellPrice,
         profit,
         margin
       };
@@ -296,8 +304,10 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         { label: 'ربح الصنف', width: '16%', align: 'center' }
       ],
       tableRows: row.invoice.items.map(it => {
-        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName);
-        const cost = (pInfo.hasVerifiedPurchase && pInfo.price !== undefined) ? pInfo.price : (it.costPrice || 0);
+        const costInfo = calculateProductAverageCost(db, it.productId, it.productName);
+        const cost = costInfo.hasPurchases
+          ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
+          : (it.costPrice || 0);
         const lineProfit = it.total - (it.qty * cost);
         return {
           cols: [
@@ -463,7 +473,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       it.category,
       it.unit,
       it.qtySold,
-      it.avgSellPrice.toFixed(2),
+      it.actualSellPrice.toFixed(2),
       it.hasVerifiedCost ? it.verifiedCostPrice.toFixed(2) : 'غير محدد',
       it.totalRevenue,
       it.totalCost,
@@ -664,7 +674,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
               {/* Responsive Cards / Table */}
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
                 <div className="overflow-x-auto">
-                  <table className="w-full text-right text-xs">
+                  <table className="w-full min-w-[850px] text-right text-xs whitespace-nowrap">
                     <thead className="bg-slate-50 border-b border-slate-200 font-black text-slate-700">
                       <tr>
                         <th className="p-2.5">رقم الفاتورة</th>
@@ -816,15 +826,15 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             <div className="space-y-3">
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
                 <div className="overflow-x-auto">
-                  <table className="w-full text-right text-xs">
+                  <table className="w-full min-w-[960px] text-right text-xs whitespace-nowrap">
                     <thead className="bg-slate-50 border-b border-slate-200 font-black text-slate-700">
                       <tr>
                         <th className="p-2.5">كود الصنف</th>
                         <th className="p-2.5">اسم الصنف</th>
                         <th className="p-2.5">التصنيف</th>
                         <th className="p-2.5 text-center">الكمية المباعة</th>
-                        <th className="p-2.5 text-center">آخر تكلفة شراء موثقة</th>
-                        <th className="p-2.5 text-center">متوسط سعر البيع</th>
+                        <th className="p-2.5 text-center">متوسط التكلفة الفعلي</th>
+                        <th className="p-2.5 text-center">سعر البيع الفعلي</th>
                         <th className="p-2.5 text-center">إجمالي المبيعات</th>
                         <th className="p-2.5 text-center">إجمالي التكلفة</th>
                         <th className="p-2.5 text-center">إجمالي ربح الصنف</th>
@@ -855,8 +865,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                               </span>
                             )}
                           </td>
-                          <td className="p-2.5 text-center font-mono text-slate-900">
-                            {formatMoney(it.avgSellPrice, db.settings.currency)}
+                          <td className="p-2.5 text-center font-mono font-bold text-slate-900">
+                            {formatMoney(it.actualSellPrice, db.settings.currency)}
                           </td>
                           <td className="p-2.5 text-center font-mono font-bold text-slate-950">
                             {formatMoney(it.totalRevenue, db.settings.currency)}

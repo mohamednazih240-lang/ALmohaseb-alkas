@@ -389,14 +389,28 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
     try {
       const compressedBase64 = await compressLogoImage(file);
-      setSettingsForm(prev => ({ ...prev, logo: compressedBase64 }));
+      const newForm = { ...settingsForm, logo: compressedBase64 };
+      setSettingsForm(newForm);
+
+      // Auto-persist logo immediately to DB and cloud so it's impossible to lose
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.settings = { ...updated.settings, ...newForm, logo: compressedBase64 };
+      logAudit(updated, 'تحديث شعار المنشأة', 'تم رفع لوجو جديد');
+      onUpdateDb(updated);
+      pushDatabaseToCloud(updated, true);
     } catch {
       alert('تعذر معالجة الصورة، يرجى المحاولة بصيغة أخرى (PNG أو JPG).');
     }
   };
 
   const handleRemoveLogo = () => {
-    setSettingsForm(prev => ({ ...prev, logo: '' }));
+    const newForm = { ...settingsForm, logo: '' };
+    setSettingsForm(newForm);
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    updated.settings = { ...updated.settings, logo: '' };
+    logAudit(updated, 'حذف شعار المنشأة', '');
+    onUpdateDb(updated);
+    pushDatabaseToCloud(updated, true);
   };
 
   // Audit integrity check results
@@ -1544,11 +1558,11 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                 <input
                   type="text"
                   required
-                  value={settingsForm.companyCode || 'COMP-101'}
+                  value={settingsForm.companyCode || 'COMP-102'}
                   onChange={e => setSettingsForm({ ...settingsForm, companyCode: e.target.value.toUpperCase() })}
                   onBlur={e => setSettingsForm({ ...settingsForm, companyCode: normalizeCompanyCode(e.target.value) })}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold font-mono uppercase tracking-wider text-blue-900 focus:bg-white focus:border-black outline-none"
-                  placeholder="COMP-101"
+                  placeholder="COMP-102"
                 />
               </div>
 

@@ -398,9 +398,15 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                     ) : null}
                   </div>
                   <div className="header-left">
-                    <div><strong>هاتف:</strong> {settings.phone || phoneList[0] || '—'}</div>
-                    {phoneList[1] ? (
-                      <div><strong>هاتف 2:</strong> {phoneList[1]}</div>
+                    {phoneList.length > 0 ? (
+                      phoneList.map((ph, idx) => (
+                        <div key={idx}>
+                          <strong>{phoneList.length === 1 ? 'هاتف:' : `هاتف ${idx + 1}:`}</strong>{' '}
+                          <bdi dir="ltr" className="font-mono">{ph}</bdi>
+                        </div>
+                      ))
+                    ) : settings.phone ? (
+                      <div><strong>هاتف:</strong> <bdi dir="ltr" className="font-mono">{settings.phone}</bdi></div>
                     ) : null}
                   </div>
                 </div>
