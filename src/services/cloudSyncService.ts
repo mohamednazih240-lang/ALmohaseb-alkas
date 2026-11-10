@@ -19,6 +19,8 @@ import {
   mergeVouchers,
   mergeTreasury,
   mergeStockMovements,
+  mergeProducts,
+  verifyAndCorrectStockMovements,
   PURGED_COMP101_INVOICE_IDS,
   isPurgedEkhwaInvoice
 } from './accountingStorage';
@@ -555,6 +557,7 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
         vouchers: mergeVouchers(unified.vouchers || [], other.vouchers || []),
         treasury: mergeTreasury(unified.treasury || [], other.treasury || []),
         stockMovements: mergeStockMovements(unified.stockMovements || [], other.stockMovements || []),
+        products: mergeProducts(unified.products || [], other.products || []),
         users: Array.from(new Map<string, AppUser>([
           ...(unified.users || []).map((u): [string, AppUser] => [u.id || u.username, u]),
           ...(other.users || []).map((u): [string, AppUser] => [u.id || u.username, u])
@@ -569,7 +572,7 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
         ]).values()),
       };
     }
-    return sanitizeCompanyDatabase(unified, clean);
+    return verifyAndCorrectStockMovements(sanitizeCompanyDatabase(unified, clean)).db;
   } catch (err) {
     console.warn('Firestore cloud sync fetch warning:', err);
     return null;

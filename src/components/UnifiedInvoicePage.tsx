@@ -41,7 +41,8 @@ import {
   PaymentMethod,
   Product,
   Party,
-  TreasuryEntry
+  TreasuryEntry,
+  StockMovement
 } from '../types/accounting';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import {
@@ -1174,9 +1175,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     const isSale = mode === 'sale' || mode === 'wholesale';
 
-    // Deduplicate: check if a product with the same name already exists in the catalog
+    // Deduplicate: check if a product with the same normalized Arabic name already exists in the catalog
+    const normQuickName = normalizeArabicText(name);
     let existingProd = updated.products.find(
-      p => p.name.trim().toLowerCase() === name.trim().toLowerCase()
+      p => normQuickName && normalizeArabicText(p.name) === normQuickName
     );
 
     let newProd: Product;
@@ -1944,12 +1946,22 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           updated.stockMovements.unshift(movementPayload);
         }
 
-        // Recalculate true product stock balance directly from movements ledger & average cost strictly from purchase invoices
-        const prodMovements = updated.stockMovements.filter(sm =>
-          sm.productId === prod.id ||
-          normalizeArabicText(sm.productName) === normProdName
+        // Recalculate true product stock balance directly from deduplicated movements ledger & average cost strictly from purchase invoices
+        const hasAnyPurchaseSm = mode === 'purchase' || updated.stockMovements.some(sm =>
+          (sm.productId === prod.id || normalizeArabicText(sm.productName) === normProdName) && sm.type === 'purchase'
         );
-        const accurateQty = prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0);
+        const seenProdSmKeys = new Set<string>();
+        const prodMovements: StockMovement[] = [];
+        for (const sm of updated.stockMovements) {
+          if (sm.productId !== prod.id && normalizeArabicText(sm.productName) !== normProdName) continue;
+          if (sm.type === 'opening' && hasAnyPurchaseSm) continue;
+          const k = sm.sourceId ? `${sm.sourceId}::${prod.id}` : sm.id;
+          if (!seenProdSmKeys.has(k)) {
+            seenProdSmKeys.add(k);
+            prodMovements.push(sm);
+          }
+        }
+        const accurateQty = Number(prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0).toFixed(4));
 
         const realCostStats = calculateProductAverageCost(
           { ...updated, invoices: [savedInvoice, ...(updated.invoices || []).filter(i => i.id !== savedInvoice.id)] },

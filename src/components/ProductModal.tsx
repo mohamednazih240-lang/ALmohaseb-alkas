@@ -170,6 +170,9 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           unit,
         };
 
+        const prevBp = getProductForBranch(updated.products[idx], selectedBranchId);
+        const qtyDiff = Number((initialQty - (prevBp.currentQty ?? updated.products[idx].currentQty ?? 0)).toFixed(4));
+
         // 2. Update branch-specific pricing and stock for the selected branch only!
         targetProd = updateProductBranchData(targetProd, selectedBranchId, {
           buyPrice,
@@ -181,6 +184,29 @@ export const ProductModal: React.FC<ProductModalProps> = ({
         });
 
         updated.products[idx] = targetProd;
+
+        if (Math.abs(qtyDiff) > 0.0001) {
+          const whId = updated.warehouses[0]?.id || 'wh_mawan';
+          const wh = updated.warehouses.find(w => w.id === whId);
+          const adjId = generateId('adj_edit');
+          updated.stockMovements.unshift({
+            id: generateId('sm'),
+            date: getTodayDate(),
+            productId: targetProd.id,
+            productName: targetProd.name,
+            warehouseId: whId,
+            warehouseName: wh ? wh.name : 'المخزن الرئيسي',
+            qtyChange: qtyDiff,
+            balanceAfter: initialQty,
+            unitCost: buyPrice > 0 ? buyPrice : (targetProd.avgCost || targetProd.buyPrice || 0),
+            type: 'adjustment',
+            refNumber: `تعديل يدوي`,
+            sourceId: adjId,
+            branchId: selectedBranchId,
+            branchName
+          });
+        }
+
         logAudit(updated, `تعديل صنف في ${branchName}`, `${name.trim()} (سعر: ${sellPrice} | مخزون: ${initialQty})`);
       }
       onUpdateDb(updated);

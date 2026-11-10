@@ -995,14 +995,14 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
   const validInvoiceIds = new Set((db.invoices || []).map(i => i.id));
 
   for (const sm of db.stockMovements) {
-    // إزالة الحركات الشبحية أو اليتيمة التي ليس لها فاتورة فعلية مسجلة
+    // إزالة الحركات الشبحية أو اليتيمة التي ليس لها فاتورة فعلية مسجلة (مع الحفاظ على أذون الاستلام GRN)
     if (sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') {
-      if (!sm.sourceId || !validInvoiceIds.has(sm.sourceId)) {
+      if (!sm.sourceId || (!validInvoiceIds.has(sm.sourceId) && !sm.sourceId.startsWith('grn_'))) {
         continue;
       }
     }
     // إذا كان للصنف فاتورة شراء، فإن فواتير المشتريات هي مصدر رصيده المعتمد، ولا يُحتسب له رصيد افتتاحي مكرر
-    if (sm.type === 'opening' && (productsWithPurchases.has(sm.productId) || (sm.sourceId && sm.sourceId.startsWith('prod_')))) {
+    if (sm.type === 'opening' && productsWithPurchases.has(sm.productId)) {
       continue;
     }
     const key = sm.sourceId ? `${sm.sourceId}::${sm.productId}` : sm.id;
@@ -1020,20 +1020,23 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
   const costIndex = buildPurchaseCostMap(db);
   const qtyByProdId = new Map<string, number>();
   const qtyByNormName = new Map<string, number>();
+  const prodIdsSet = new Set(db.products.map(p => p.id));
   for (const sm of db.stockMovements) {
     const chg = Number(sm.qtyChange) || 0;
-    if (sm.productId) {
+    if (sm.productId && prodIdsSet.has(sm.productId)) {
       qtyByProdId.set(sm.productId, (qtyByProdId.get(sm.productId) || 0) + chg);
     } else if (sm.productName) {
       const nName = normalizeArabicText(sm.productName);
-      qtyByNormName.set(nName, (qtyByNormName.get(nName) || 0) + chg);
+      if (nName) {
+        qtyByNormName.set(nName, (qtyByNormName.get(nName) || 0) + chg);
+      }
     }
   }
 
   let correctedProductsCount = 0;
   db.products.forEach(p => {
     const normPName = normalizeArabicText(p.name);
-    const totalQty = (qtyByProdId.get(p.id) || 0) + (qtyByNormName.get(normPName) || 0);
+    const totalQty = Number(((qtyByProdId.get(p.id) || 0) + (qtyByNormName.get(normPName) || 0)).toFixed(4));
 
     // احتساب متوسط التكلفة وآخر سعر شراء حصرياً من فواتير الشراء المسجلة فعلياً لكل صنف
     const costInfo = costIndex.getCost(p.id, p.name);
@@ -2584,6 +2587,47 @@ export function mergeStockMovements(existingList: StockMovement[] = [], incoming
     }
   });
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+
+/**
+ * Union & merge product catalogs across devices by normalized Arabic name or ID,
+ * preserving newly created products and updated pricing before stock verification recalculates balances/costs.
+ */
+export function mergeProducts(existingList: Product[] = [], incomingList: Product[] = []): Product[] {
+  const byKey = new Map<string, Product>();
+  const idToKey = new Map<string, string>();
+
+  const registerProduct = (p: Product, isIncoming: boolean) => {
+    if (!p || !p.name) return;
+    const norm = normalizeArabicText(p.name);
+    const key = (p.id && idToKey.get(p.id)) || (norm ? `name:${norm}` : `id:${p.id}`);
+    const existing = byKey.get(key);
+
+    if (!existing) {
+      byKey.set(key, p);
+      if (p.id) idToKey.set(p.id, key);
+    } else {
+      const merged = isIncoming
+        ? {
+            ...existing,
+            ...p,
+            barcode: (p.barcode && p.barcode.trim()) ? p.barcode : existing.barcode,
+            notes: (p.notes && p.notes.trim()) ? p.notes : existing.notes,
+            sellPrice: (Number(p.sellPrice) > 0) ? p.sellPrice : existing.sellPrice,
+            wholesalePrice: (Number(p.wholesalePrice) > 0) ? p.wholesalePrice : existing.wholesalePrice,
+            buyPrice: (Number(p.buyPrice) > 0) ? p.buyPrice : existing.buyPrice,
+            avgCost: (Number(p.avgCost) > 0) ? p.avgCost : existing.avgCost,
+          }
+        : existing;
+      byKey.set(key, merged);
+      if (p.id) idToKey.set(p.id, key);
+    }
+  };
+
+  (existingList || []).forEach(p => registerProduct(p, false));
+  (incomingList || []).forEach(p => registerProduct(p, true));
+
+  return Array.from(byKey.values());
 }
 
 /**

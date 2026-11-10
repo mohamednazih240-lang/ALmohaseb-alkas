@@ -49,7 +49,8 @@ import {
   getProductForBranch,
   updateProductBranchData,
   isBranchMatch,
-  normalizeArabicText
+  normalizeArabicText,
+  calculateProductAverageCost
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import {
@@ -732,6 +733,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
     const totalIn = Number(moves.reduce((s, m) => s + m.inQty, 0).toFixed(4));
     const totalOut = Number(moves.reduce((s, m) => s + m.outQty, 0).toFixed(4));
+    const verifiedCardCost = calculateProductAverageCost(db, product.id, product.name);
+    const displayCardCost = verifiedCardCost.hasPurchases
+      ? (db.settings?.cost === 'average' ? (verifiedCardCost.avgCost || verifiedCardCost.latestBuyPrice) : (verifiedCardCost.latestBuyPrice || verifiedCardCost.avgCost))
+      : (product.avgCost || product.buyPrice);
+    const effectiveClosingBalance = moves.length > 0 ? run : product.currentQty;
 
     const doc: MovementPrintBlock = {
       title: 'كارت حركة صنف',
@@ -766,9 +772,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       summaryLines: [
         { label: 'إجمالي الكميات الواردة', value: `${totalIn} ${product.unit}` },
         { label: 'إجمالي الكميات المنصرفة', value: `${totalOut} ${product.unit}` },
-        { label: 'الرصيد الحالي بالمخزن', value: `${product.currentQty} ${product.unit}`, isTotal: true, highlight: true }
+        { label: 'الرصيد الحالي بالمخزن', value: `${effectiveClosingBalance} ${product.unit}`, isTotal: true, highlight: true }
       ],
-      footerNotes: `باركود: ${product.barcode || '—'} | الحد الأدنى: ${product.minStock} | متوسط التكلفة: ${formatMoney(product.avgCost || product.buyPrice, curr)}`
+      footerNotes: `باركود: ${product.barcode || '—'} | الحد الأدنى: ${product.minStock} | متوسط التكلفة: ${formatMoney(displayCardCost, curr)}`
     };
 
     setPrintDocTitle(`كارت صنف - ${product.name}`);

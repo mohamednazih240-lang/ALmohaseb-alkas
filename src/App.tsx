@@ -11,6 +11,8 @@ import {
   mergeVouchers,
   mergeTreasury,
   mergeStockMovements,
+  mergeProducts,
+  verifyAndCorrectStockMovements,
   PURGED_COMP101_INVOICE_IDS
 } from './services/accountingStorage';
 import {
@@ -220,8 +222,10 @@ export default function App() {
               return true;
             });
 
-          const merged: AccountingDB = {
+          const mergedProducts = mergeProducts(prevDb.products || [], ensuredCloud.products || []);
+          const rawMerged: AccountingDB = {
             ...ensuredCloud,
+            products: mergedProducts,
             invoices: mergedInvoices,
             vouchers: mergedVouchers,
             treasury: mergedTreasury,
@@ -229,14 +233,16 @@ export default function App() {
             deletedInvoiceIds: Array.from(deletedIdsSet),
             currentUser: effectiveUser || prevDb.currentUser || ensuredCloud.currentUser || ensuredCloud.users[0]
           };
+          const verifiedStartup = verifyAndCorrectStockMovements(rawMerged);
+          const merged = verifiedStartup.db;
           saveDatabase(merged);
 
-          // If local had richer invoice data (e.g. newly added items), push the merged state back to cloud immediately
+          // If local had richer invoice data or product quantities/costs were repaired from movements, push merged state back to cloud immediately
           const hasRicherLocal = mergedInvoices.some(inv => {
-            const cloudInv = (ensuredCloud.invoices || []).find(ci => ci.id === inv.id || ci.number === inv.number);
+            const cloudInv = (ensuredCloud.invoices || []).find(ci => ci.id === inv.id || (ci.number === inv.number && ci.type === inv.type));
             return !cloudInv || (inv.items?.length || 0) > (cloudInv.items?.length || 0);
           });
-          if (hasRicherLocal) {
+          if (hasRicherLocal || verifiedStartup.report.correctedProductsCount > 0 || verifiedStartup.report.missingMovementsAdded > 0) {
             pushDatabaseToCloud(merged, true);
           }
 
@@ -339,9 +345,11 @@ export default function App() {
           currency: (ensuredCloud.settings?.currency && ensuredCloud.settings.currency.trim()) ? ensuredCloud.settings.currency : (prevDb.settings?.currency || 'ج.م')
         };
 
-        const merged: AccountingDB = {
+        const mergedProducts = mergeProducts(prevDb.products || [], ensuredCloud.products || []);
+        const rawMerged: AccountingDB = {
           ...ensuredCloud,
           settings: safeSettings,
+          products: mergedProducts,
           invoices: mergedInvoices,
           vouchers: mergedVouchers,
           treasury: mergedTreasury,
@@ -349,6 +357,7 @@ export default function App() {
           deletedInvoiceIds: Array.from(deletedIdsSet),
           currentUser: effectiveUser || prevDb.currentUser || ensuredCloud.users[0]
         };
+        const merged = verifyAndCorrectStockMovements(rawMerged).db;
         saveDatabase(merged);
         return merged;
       });
@@ -431,9 +440,11 @@ export default function App() {
                 currency: (ensuredCloud.settings?.currency && ensuredCloud.settings.currency.trim()) ? ensuredCloud.settings.currency : (prevDb.settings?.currency || 'ج.م')
               };
 
-              const merged: AccountingDB = {
+              const mergedProducts = mergeProducts(prevDb.products || [], ensuredCloud.products || []);
+              const rawMerged: AccountingDB = {
                 ...ensuredCloud,
                 settings: safeSettings,
+                products: mergedProducts,
                 invoices: mergedInvoices,
                 vouchers: mergedVouchers,
                 treasury: mergedTreasury,
@@ -441,6 +452,8 @@ export default function App() {
                 deletedInvoiceIds: Array.from(deletedIdsSet),
                 currentUser: effectiveUser || prevDb.currentUser || ensuredCloud.users[0]
               };
+              const verifiedPull = verifyAndCorrectStockMovements(rawMerged);
+              const merged = verifiedPull.db;
               saveDatabase(merged);
               return merged;
             }
@@ -677,8 +690,10 @@ export default function App() {
                   if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
                   return true;
                 });
-              const unified: AccountingDB = {
+              const mergedProducts = mergeProducts(db.products || [], cloudDb.products || []);
+              const rawUnified: AccountingDB = {
                 ...cloudDb,
+                products: mergedProducts,
                 invoices: mergedInvoices,
                 vouchers: mergedVouchers,
                 treasury: mergedTreasury,
@@ -686,6 +701,7 @@ export default function App() {
                 deletedInvoiceIds: Array.from(deletedIdsSet),
                 currentUser: db.currentUser || cloudDb.currentUser || cloudDb.users[0]
               };
+              const unified = verifyAndCorrectStockMovements(rawUnified).db;
               setDb(unified);
               saveDatabase(unified);
               await pushDatabaseToCloud(unified, true);
