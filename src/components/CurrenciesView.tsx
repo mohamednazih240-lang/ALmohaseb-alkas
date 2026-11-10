@@ -174,7 +174,41 @@ export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }
             </span>
           </div>
 
-          <div className="overflow-x-auto">
+          {/* Mobile Cards (Zero Horizontal Scroll) */}
+          <div className="md:hidden divide-y divide-slate-100">
+            {db.currencies.map(c => (
+              <div key={c.id} className="p-3.5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono font-black text-sm text-slate-900">{c.code}</span>
+                    <span className="text-xs font-bold text-slate-700">{c.name}</span>
+                    {c.isBase && (
+                      <span className="text-[9px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.5 rounded">
+                        رئيسية
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => openEditModal(c)} className="p-1.5 text-slate-600 hover:text-black rounded-lg hover:bg-slate-100" title="تعديل السعر">
+                      <Edit className="w-3.5 h-3.5" />
+                    </button>
+                    {!c.isBase && (
+                      <button onClick={() => handleDelete(c.id, c.name, c.isBase)} className="p-1.5 text-rose-500 hover:text-rose-700 rounded-lg hover:bg-rose-50" title="حذف">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between text-xs bg-slate-50 p-2 rounded-lg border border-slate-100">
+                  <span className="font-mono font-bold text-slate-900">1 {c.code} = {c.rate.toFixed(4)} {baseCurrency.symbol}</span>
+                  <span className="font-mono text-slate-400 text-[10px]">{c.lastUpdated}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop Table (No Horizontal Scroll) */}
+          <div className="hidden md:block">
             <table className="w-full text-right text-xs">
               <thead className="bg-slate-100/70 text-slate-700 font-bold border-b border-slate-200">
                 <tr>

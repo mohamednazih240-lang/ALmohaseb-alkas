@@ -971,7 +971,34 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
                 </div>
               </div>
 
-              <div className="border border-slate-200 rounded-xl overflow-hidden">
+              {/* Mobile Statement Cards View (No Horizontal Scroll) */}
+              <div className="md:hidden space-y-2.5">
+                {getStatementRows(statementParty).map((r, i) => (
+                  <div key={i} className="p-3 rounded-xl border border-slate-200 bg-slate-50/70 space-y-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-900 break-words flex-1">{r.desc}</span>
+                      <span className="font-mono text-[11px] text-slate-500 shrink-0">{r.date}</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5 pt-2 border-t border-slate-200 font-mono text-center">
+                      <div className="bg-white p-1.5 rounded-lg border border-slate-200">
+                        <span className="block text-[9px] text-slate-400 font-sans">مدين (+)</span>
+                        <span className="font-bold text-slate-950">{r.debit > 0 ? formatMoney(r.debit, db.settings.currency) : '—'}</span>
+                      </div>
+                      <div className="bg-white p-1.5 rounded-lg border border-slate-200">
+                        <span className="block text-[9px] text-slate-400 font-sans">دائن (-)</span>
+                        <span className="font-bold text-emerald-700">{r.credit > 0 ? formatMoney(r.credit, db.settings.currency) : '—'}</span>
+                      </div>
+                      <div className="bg-white p-1.5 rounded-lg border border-slate-200">
+                        <span className="block text-[9px] text-slate-400 font-sans">الرصيد</span>
+                        <span className="font-black text-slate-950">{formatMoney(r.balance, db.settings.currency)}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop Statement Table View */}
+              <div className="hidden md:block border border-slate-200 rounded-xl overflow-hidden">
                 <table className="w-full text-right text-xs">
                   <thead>
                     <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 font-black">

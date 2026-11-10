@@ -1405,7 +1405,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       wholesalePrice: invoiceBranchId === 'br_main' ? wholesale : 0,
       minStock: 5,
       currentQty: invoiceBranchId === 'br_main' ? stock : 0,
-      avgCost: buy > 0 ? buy : cash * 0.8,
+      avgCost: buy > 0 ? buy : 0,
       branchesData: {
         [invoiceBranchId]: {
           currentQty: stock,
@@ -1413,7 +1413,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           sellPrice: cash,
           wholesalePrice: wholesale,
           minStock: 5,
-          avgCost: buy > 0 ? buy : cash * 0.8
+          avgCost: buy > 0 ? buy : 0
         }
       }
     };
@@ -1843,11 +1843,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           : `P-${maxCode + 1}`;
         const unitBuy = mode === 'purchase'
           ? item.unitPrice
-          : (item.costPrice || (item.unitPrice > 0 ? item.unitPrice * 0.75 : 0));
+          : (item.costPrice || 0);
         const unitSell = (mode === 'sale' || mode === 'wholesale')
           ? item.unitPrice
-          : (unitBuy > 0 ? unitBuy * 1.25 : 100);
-        const unitWholesale = unitSell * 0.9;
+          : 0;
+        const unitWholesale = unitSell > 0 ? unitSell : 0;
         const newProdId = item.productId && item.productId.startsWith('prod_') ? item.productId : generateId('prod');
 
         const newProd: Product = {
@@ -1931,23 +1931,27 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           updated.stockMovements.unshift(movementPayload);
         }
 
-        // Recalculate true product stock balance and average cost directly from movements ledger
+        // Recalculate true product stock balance directly from movements ledger & average cost strictly from purchase invoices
         const prodMovements = updated.stockMovements.filter(sm =>
           sm.productId === prod.id ||
           normalizeArabicText(sm.productName) === normProdName
         );
         const accurateQty = prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0);
 
-        const purchaseMoves = prodMovements.filter(sm => sm.type === 'purchase' && sm.qtyChange > 0);
-        let accurateAvgCost = prod.buyPrice || 0;
-        if (purchaseMoves.length > 0) {
-          const totalCostSum = purchaseMoves.reduce((sum, sm) => sum + (sm.qtyChange * (sm.unitCost || 0)), 0);
-          const totalPurchasedQty = purchaseMoves.reduce((sum, sm) => sum + sm.qtyChange, 0);
-          if (totalPurchasedQty > 0) {
-            accurateAvgCost = totalCostSum / totalPurchasedQty;
-          }
+        const realCostStats = calculateProductAverageCost(
+          { ...updated, invoices: [savedInvoice, ...(updated.invoices || []).filter(i => i.id !== savedInvoice.id)] },
+          prod.id,
+          prod.name
+        );
+        const accurateAvgCost = realCostStats.hasPurchases ? realCostStats.avgCost : (prod.buyPrice || 0);
+        const accurateBuyPrice = realCostStats.hasPurchases ? realCostStats.latestBuyPrice : (prod.buyPrice || 0);
+
+        if (mode === 'sale' || mode === 'wholesale') {
+          item.costPrice = realCostStats.hasPurchases
+            ? ((updated.settings?.cost === 'average') ? (realCostStats.avgCost || realCostStats.latestBuyPrice) : (realCostStats.latestBuyPrice || realCostStats.avgCost))
+            : (prod.avgCost || prod.buyPrice || 0);
+          movementPayload.unitCost = item.costPrice;
         }
-        const accurateBuyPrice = purchaseMoves.length > 0 ? (purchaseMoves[0].unitCost || prod.buyPrice || 0) : (prod.buyPrice || 0);
 
         movementPayload.balanceAfter = accurateQty;
 
@@ -2977,17 +2981,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
 
           {/* Invoice Items Table */}
-          <div className="flex-1 border border-slate-300 rounded bg-white overflow-x-auto overflow-y-auto max-h-[360px] min-h-[160px]">
-            <table className="w-full min-w-[340px] sm:min-w-full text-center text-[8.5px] border-collapse">
+          <div className="flex-1 border border-slate-300 rounded bg-white overflow-y-auto max-h-[360px] min-h-[160px]">
+            <table className="w-full table-fixed text-center text-[8.5px] border-collapse">
               <thead>
                 <tr className="bg-slate-100 text-slate-800 font-bold border-b border-slate-300 sticky top-0 z-10">
-                  <th className="py-1 px-1 border-l border-slate-300 w-6">م</th>
-                  <th className="py-1 px-1 border-l border-slate-300 text-right w-1/3">الصنف</th>
+                  <th className="py-1 px-0.5 border-l border-slate-300 w-5">م</th>
+                  <th className="py-1 px-1 border-l border-slate-300 text-right w-[28%]">الصنف</th>
                   <th className="py-1 px-1 border-l border-slate-300 text-right">الوصف</th>
-                  <th className="py-1 px-1 border-l border-slate-300 w-12">الكمية</th>
-                  <th className="py-1 px-1 border-l border-slate-300 w-14">السعر</th>
-                  <th className="py-1 px-1 border-l border-slate-300 w-16">الإجمالي</th>
-                  <th className="py-1 px-1 w-14">إجراء</th>
+                  <th className="py-1 px-0.5 border-l border-slate-300 w-10">الكمية</th>
+                  <th className="py-1 px-0.5 border-l border-slate-300 w-12">السعر</th>
+                  <th className="py-1 px-0.5 border-l border-slate-300 w-14">الإجمالي</th>
+                  <th className="py-1 px-0.5 w-11">إجراء</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">

@@ -396,44 +396,82 @@ export const ProcurementView: React.FC<ProcurementViewProps> = ({
                     <span className="font-mono text-slate-500">{db.settings.company}</span>
                   </div>
 
-                  <div className="overflow-x-auto">
+                  {/* Mobile 3-Way Match Cards (Zero Horizontal Scroll) */}
+                  <div className="md:hidden space-y-2.5">
+                    {matchRows.map((r, idx) => (
+                      <div key={idx} className="p-3 border border-slate-200 rounded-xl bg-white space-y-2 text-xs">
+                        <div className="flex items-start justify-between border-b border-slate-100 pb-1.5">
+                          <div>
+                            <span className="font-bold text-slate-900 block">{r.productName}</span>
+                            <span className="text-[10px] text-slate-500 font-mono">{r.productCode}</span>
+                          </div>
+                          {r.qtyMatch && r.priceMatch ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                              <CheckCircle2 className="w-3 h-3" /> مطابق
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800">
+                              <XCircle className="w-3 h-3" /> فارق
+                            </span>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                          <div className="bg-blue-50/50 p-1.5 rounded border border-blue-100">
+                            <span className="text-[9px] text-blue-800 block">أمر الشراء (PO)</span>
+                            <span className="font-mono font-bold">{r.poQty} {r.unit} × {formatMoney(r.poPrice, db.settings.currency)}</span>
+                          </div>
+                          <div className="bg-amber-50/50 p-1.5 rounded border border-amber-100">
+                            <span className="text-[9px] text-amber-800 block">الاستلام (GRN)</span>
+                            <span className="font-mono font-bold">{r.grnQty > 0 ? `${r.grnQty} ${r.unit}` : 'بانتظار الاستلام'}</span>
+                          </div>
+                          <div className="col-span-2 bg-teal-50/50 p-1.5 rounded border border-teal-100 flex items-center justify-between">
+                            <span className="text-[9px] text-teal-800">الفاتورة:</span>
+                            <span className="font-mono font-bold">{r.invQty} {r.unit} × {formatMoney(r.invPrice, db.settings.currency)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Desktop 3-Way Match Table (No Horizontal Scroll) */}
+                  <div className="hidden md:block">
                     <table className="w-full text-right text-xs border border-slate-300">
                       <thead className="bg-slate-100 text-slate-800 font-bold border-b border-slate-300">
                         <tr>
-                          <th className="p-2.5 border-l border-slate-300">الصنف والوصف</th>
-                          <th className="p-2.5 border-l border-slate-300 text-center bg-blue-50 text-blue-950">كمية أمر الشراء (PO)</th>
-                          <th className="p-2.5 border-l border-slate-300 text-center bg-blue-50 text-blue-950">سعر أمر الشراء</th>
-                          <th className="p-2.5 border-l border-slate-300 text-center bg-amber-50 text-amber-950">الكمية المستلمة (GRN)</th>
-                          <th className="p-2.5 border-l border-slate-300 text-center bg-teal-50 text-teal-950">كمية الفاتورة</th>
-                          <th className="p-2.5 border-l border-slate-300 text-center bg-teal-50 text-teal-950">سعر الفاتورة</th>
-                          <th className="p-2.5 text-center">حالة المطابقة</th>
+                          <th className="p-2 border-l border-slate-300">الصنف والوصف</th>
+                          <th className="p-2 border-l border-slate-300 text-center bg-blue-50 text-blue-950">كمية PO</th>
+                          <th className="p-2 border-l border-slate-300 text-center bg-blue-50 text-blue-950">سعر PO</th>
+                          <th className="p-2 border-l border-slate-300 text-center bg-amber-50 text-amber-950">المستلم (GRN)</th>
+                          <th className="p-2 border-l border-slate-300 text-center bg-teal-50 text-teal-950">كمية الفاتورة</th>
+                          <th className="p-2 border-l border-slate-300 text-center bg-teal-50 text-teal-950">سعر الفاتورة</th>
+                          <th className="p-2 text-center">الحالة</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200">
                         {matchRows.map((r, idx) => (
                           <tr key={idx} className="hover:bg-slate-50">
-                            <td className="p-2.5 border-l border-slate-200 font-bold text-slate-900">
+                            <td className="p-2 border-l border-slate-200 font-bold text-slate-900">
                               {r.productName}
                               <span className="block text-[10px] text-slate-500 font-mono font-normal">
                                 {r.productCode}
                               </span>
                             </td>
-                            <td className="p-2.5 border-l border-slate-200 text-center font-mono font-bold bg-blue-50/40">
+                            <td className="p-2 border-l border-slate-200 text-center font-mono font-bold bg-blue-50/40">
                               {r.poQty} {r.unit}
                             </td>
-                            <td className="p-2.5 border-l border-slate-200 text-center font-mono bg-blue-50/40">
+                            <td className="p-2 border-l border-slate-200 text-center font-mono bg-blue-50/40">
                               {formatMoney(r.poPrice, db.settings.currency)}
                             </td>
-                            <td className="p-2.5 border-l border-slate-200 text-center font-mono font-bold bg-amber-50/40">
+                            <td className="p-2 border-l border-slate-200 text-center font-mono font-bold bg-amber-50/40">
                               {r.grnQty > 0 ? `${r.grnQty} ${r.unit}` : <span className="text-amber-700 italic">بانتظار الاستلام</span>}
                             </td>
-                            <td className="p-2.5 border-l border-slate-200 text-center font-mono font-bold bg-teal-50/40">
+                            <td className="p-2 border-l border-slate-200 text-center font-mono font-bold bg-teal-50/40">
                               {r.invQty} {r.unit}
                             </td>
-                            <td className="p-2.5 border-l border-slate-200 text-center font-mono bg-teal-50/40">
+                            <td className="p-2 border-l border-slate-200 text-center font-mono bg-teal-50/40">
                               {formatMoney(r.invPrice, db.settings.currency)}
                             </td>
-                            <td className="p-2.5 text-center">
+                            <td className="p-2 text-center">
                               {r.qtyMatch && r.priceMatch ? (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
                                   <CheckCircle2 className="w-3 h-3" /> مطابق
@@ -481,7 +519,33 @@ export const ProcurementView: React.FC<ProcurementViewProps> = ({
             </span>
           </div>
 
-          <div className="overflow-x-auto">
+          {/* Mobile GRN Cards (Zero Horizontal Scroll) */}
+          <div className="md:hidden divide-y divide-slate-100">
+            {db.goodsReceivedNotes.length === 0 ? (
+              <div className="p-8 text-center text-xs text-slate-400">
+                لا توجد أذون استلام مخزنية حتى الآن. يتم إصدارها تلقائياً عند فحص واستلام أمر الشراء.
+              </div>
+            ) : (
+              db.goodsReceivedNotes.map(g => (
+                <div key={g.id} className="p-3.5 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono font-bold text-slate-900">{g.number}</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                      {g.status}
+                    </span>
+                  </div>
+                  <div className="font-bold text-slate-800">{g.supplierName}</div>
+                  <div className="flex items-center justify-between text-[11px] text-slate-500">
+                    <span>PO: {g.orderNumber || '—'} • {g.warehouseName}</span>
+                    <span className="font-mono">{g.date}</span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Desktop GRN Table (No Horizontal Scroll) */}
+          <div className="hidden md:block">
             <table className="w-full text-right text-xs">
               <thead className="bg-slate-100/70 text-slate-700 font-bold border-b border-slate-200">
                 <tr>

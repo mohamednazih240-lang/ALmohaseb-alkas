@@ -490,8 +490,57 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
           </div>
         </div>
 
-        {/* Transactions Table */}
-        <div className="overflow-x-auto">
+        {/* Mobile Cards (Zero Horizontal Scroll) */}
+        <div className="md:hidden divide-y divide-slate-100">
+          {filteredItems.length === 0 ? (
+            <div className="p-8 text-center text-xs text-slate-400">
+              لا توجد حركات مسجلة بهذا الحساب حتى تاريخ {statementDate}
+            </div>
+          ) : (
+            filteredItems.map(it => {
+              const isChecked = clearedIds.has(it.id);
+              const isDeposit = it.type === 'deposit';
+              return (
+                <div
+                  key={it.id}
+                  onClick={() => toggleCleared(it.id)}
+                  className={`p-3.5 cursor-pointer transition-colors space-y-2 text-xs ${
+                    isChecked ? 'bg-indigo-50/40' : 'hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 ${
+                        isChecked ? 'bg-indigo-600 text-white' : 'border-2 border-slate-300 bg-white'
+                      }`}>
+                        {isChecked && <Check className="w-3.5 h-3.5" />}
+                      </div>
+                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        isDeposit ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                      }`}>
+                        {isDeposit ? <ArrowDownLeft className="w-3 h-3" /> : <ArrowUpRight className="w-3 h-3" />}
+                        {it.source}
+                      </span>
+                    </div>
+                    <span className="font-mono text-slate-500 text-[11px]">{it.date}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-bold text-slate-900 truncate">{it.reference}</div>
+                      <div className="text-[11px] text-slate-500 truncate">{it.partyName || '—'}</div>
+                    </div>
+                    <span className={`font-mono font-black shrink-0 ${isDeposit ? 'text-emerald-700' : 'text-rose-700'}`}>
+                      {formatMoney(it.amount, db.settings.currency)}
+                    </span>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Desktop Transactions Table (No Horizontal Scroll) */}
+        <div className="hidden md:block">
           <table className="w-full text-right text-xs">
             <thead className="bg-slate-100/70 text-slate-700 font-bold border-b border-slate-200">
               <tr>

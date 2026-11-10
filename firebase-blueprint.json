@@ -28,9 +28,17 @@
         "deviceId": {
           "type": "string",
           "description": "Originating device or browser instance ID"
+        },
+        "sharded": {
+          "type": "boolean",
+          "description": "True when heavy collections are sharded into chunked shard documents"
+        },
+        "shardCounts": {
+          "type": "object",
+          "description": "Count of shards per sharded collection"
         }
       },
-      "required": ["companyCode", "data", "updatedAt"]
+      "required": ["companyCode", "updatedAt"]
     }
   },
   "firestore": {

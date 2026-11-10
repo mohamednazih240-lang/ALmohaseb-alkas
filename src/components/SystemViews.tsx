@@ -267,9 +267,6 @@ export function countActivePermissions(u: User): number {
 import {
   generateId,
   getTodayDate,
-  createSeedData,
-  cleanAllDemoTransactions,
-  wipeEntireSystemToCleanSlate,
   defaultSettings,
   logAudit,
   formatMoney,
@@ -711,24 +708,6 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     reader.readAsText(file);
   };
 
-  // Clean all transactions, invoices, products, customers, and suppliers while preserving company info and chart of accounts
-  const handleCleanAllTransactions = () => {
-    if (!confirm('تأكيد هام: هل ترغب في تنظيف وتصفير النظام بالكامل من كافة الفواتير، الحركات، الأصناف، العملاء، الموردين، سندات القبض والصرف، وقيود اليومية والتقارير للبدء على نظيف 100%؟\n\n• سيتم الإبقاء على دليل الحسابات القياسي وبيانات منشأة «شركة الموان».\n• ستبدأ كافة ترقيمات الفواتير من رقم 1 فوراً.\n• تتم المزامنة السحابية فوراً لكافة الأجهزة.')) return;
-    const cleaned = wipeEntireSystemToCleanSlate(db);
-    onUpdateDb(cleaned);
-    pushDatabaseToCloud(cleaned, true);
-    alert('تم تفريغ وتنظيف النظام بالكامل بنجاح من كافة الأصناف والعملاء والموردين والحركات والفواتير! أصبح النظام نظيفاً 100% وجاهزاً للبدء الفعلي.');
-  };
-
-  // Reset data to factory clean state
-  const handleResetData = () => {
-    if (!confirm('تحذير: سيتم إعادة تعيين البرنامج بالكامل إلى الحالة الأولية الفارغة النظيفة (بدون أي بيانات تجريبية). هل أنت متأكد؟')) return;
-    const fresh = createSeedData();
-    onUpdateDb(fresh);
-    pushDatabaseToCloud(fresh, true);
-    alert('تمت إعادة ضبط النظام بنجاح إلى الحالة الفارغة النظيفة الجاهزة للعمل.');
-  };
-
   // Save Settings
   const handleSaveSettings = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -986,44 +965,92 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                 </span>
               </div>
 
-              <div className="overflow-x-auto">
+              {/* Mobile Permissions Matrix Cards (Zero Horizontal Scroll) */}
+              <div className="md:hidden p-3 space-y-3">
+                {db.users.map(u => {
+                  const activeCount = countActivePermissions(u);
+                  const percent = Math.round((activeCount / TOTAL_SYSTEM_PERMISSIONS_COUNT) * 100);
+                  return (
+                    <div key={u.id} className="p-3 rounded-xl border border-slate-200 bg-slate-50/60 space-y-2.5 text-xs">
+                      <div className="flex items-start justify-between border-b border-slate-200 pb-2">
+                        <div>
+                          <div className="font-bold text-slate-900">{u.name}</div>
+                          <div className="font-mono text-[10px] text-slate-500">@{u.username} • {u.role}</div>
+                        </div>
+                        <div className="text-left">
+                          <div className="font-mono font-black text-emerald-700">{activeCount} / {TOTAL_SYSTEM_PERMISSIONS_COUNT}</div>
+                          <div className="text-[10px] text-slate-400 font-bold">{percent}%</div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {ALL_SYSTEM_PERMISSIONS.map((cat, catIdx) => {
+                          const enabledInCat = cat.items.filter(it => (u.permissions as any)?.[it.key] === true).length;
+                          const isAllInCat = enabledInCat === cat.items.length;
+                          const isNone = enabledInCat === 0;
+                          return (
+                            <div key={catIdx} className="bg-white p-1.5 rounded-lg border border-slate-200 flex items-center justify-between gap-1">
+                              <span className="text-[10px] font-bold text-slate-700 truncate">{cat.badge}</span>
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold font-mono shrink-0 ${
+                                isAllInCat ? 'bg-emerald-100 text-emerald-800' : !isNone ? 'bg-blue-100 text-blue-800' : 'bg-slate-100 text-slate-400'
+                              }`}>
+                                {enabledInCat}/{cat.items.length}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditUser(u)}
+                        className="w-full py-1.5 bg-slate-900 hover:bg-black text-white rounded-lg text-[11px] font-bold cursor-pointer transition-all flex items-center justify-center gap-1"
+                      >
+                        <SlidersHorizontal className="w-3 h-3 text-emerald-400" />
+                        <span>تخصيص الصلاحيات</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Desktop Permissions Matrix Table (No Horizontal Scroll) */}
+              <div className="hidden md:block">
                 <table className="w-full text-right border-collapse">
                   <thead>
-                    <tr className="bg-slate-100/80 text-[11px] font-black text-slate-700 border-b border-slate-200">
-                      <th className="p-3">المستخدم</th>
-                      <th className="p-3">الدور</th>
-                      <th className="p-3">الفرع</th>
-                      <th className="p-3 text-center">الإجمالي ({TOTAL_SYSTEM_PERMISSIONS_COUNT})</th>
+                    <tr className="bg-slate-100/80 text-[10px] font-black text-slate-700 border-b border-slate-200">
+                      <th className="p-2">المستخدم</th>
+                      <th className="p-2">الدور</th>
+                      <th className="p-2">الفرع</th>
+                      <th className="p-2 text-center">الإجمالي ({TOTAL_SYSTEM_PERMISSIONS_COUNT})</th>
                       {ALL_SYSTEM_PERMISSIONS.map((cat, idx) => (
-                        <th key={idx} className="p-2.5 text-center whitespace-nowrap">
+                        <th key={idx} className="p-1.5 text-center">
                           {cat.badge} ({cat.items.length})
                         </th>
                       ))}
-                      <th className="p-3 text-center">إجراءات</th>
+                      <th className="p-2 text-center">إجراءات</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 text-xs">
+                  <tbody className="divide-y divide-slate-100 text-[11px]">
                     {db.users.map(u => {
                       const activeCount = countActivePermissions(u);
                       const percent = Math.round((activeCount / TOTAL_SYSTEM_PERMISSIONS_COUNT) * 100);
 
                       return (
                         <tr key={u.id} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="p-3">
+                          <td className="p-2">
                             <div className="font-bold text-slate-900">{u.name}</div>
                             <div className="font-mono text-[10px] text-slate-500">@{u.username}</div>
                           </td>
-                          <td className="p-3">
-                            <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-slate-100 border border-slate-200 text-slate-800">
+                          <td className="p-2">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 border border-slate-200 text-slate-800">
                               {u.role}
                             </span>
                           </td>
-                          <td className="p-3">
-                            <span className="text-[11px] font-bold text-slate-700">
+                          <td className="p-2">
+                            <span className="text-[10px] font-bold text-slate-700">
                               {u.branchName || db.branches?.find(b => b.id === u.branchId)?.name || 'الفرع الرئيسي'}
                             </span>
                           </td>
-                          <td className="p-3 text-center">
+                          <td className="p-2 text-center">
                             <div className="font-mono font-black text-xs text-emerald-700">
                               {activeCount} / {TOTAL_SYSTEM_PERMISSIONS_COUNT}
                             </div>
@@ -1035,9 +1062,9 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                             const isNone = enabledInCat === 0;
 
                             return (
-                              <td key={catIdx} className="p-2.5 text-center">
+                              <td key={catIdx} className="p-1.5 text-center">
                                 <span
-                                  className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold font-mono ${
+                                  className={`inline-block px-1.5 py-0.5 rounded-full text-[10px] font-bold font-mono ${
                                     isAllInCat
                                       ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                                       : !isNone
@@ -1045,19 +1072,19 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                                       : 'bg-slate-100 text-slate-400'
                                   }`}
                                 >
-                                  {enabledInCat} / {cat.items.length}
+                                  {enabledInCat}/{cat.items.length}
                                 </span>
                               </td>
                             );
                           })}
-                          <td className="p-3 text-center">
+                          <td className="p-2 text-center">
                             <button
                               type="button"
                               onClick={() => handleOpenEditUser(u)}
-                              className="px-2.5 py-1 bg-slate-900 hover:bg-black text-white rounded-lg text-[11px] font-bold cursor-pointer transition-all inline-flex items-center gap-1 shadow-2xs"
+                              className="px-2 py-1 bg-slate-900 hover:bg-black text-white rounded-lg text-[10px] font-bold cursor-pointer transition-all inline-flex items-center gap-1 shadow-2xs"
                             >
                               <SlidersHorizontal className="w-3 h-3 text-emerald-400" />
-                              <span>تخصيص الصلاحيات</span>
+                              <span>تخصيص</span>
                             </button>
                           </td>
                         </tr>
@@ -1416,37 +1443,6 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
               </label>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl border border-amber-200 shadow-2xs space-y-3 bg-amber-50/20">
-              <div className="flex items-center gap-2 text-slate-900 font-black text-sm">
-                <Trash2 className="w-5 h-5 text-amber-600" />
-                <span>تفريغ وتنظيف النظام من البيانات التجريبية</span>
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                حذف وتصفير جميع الأصناف والعملاء والموردين والفواتير والحركات وسندات الصرف والقبض وقيود اليومية والتقارير لتفريغ النظام للعمل الفعلي، مع الحفاظ على دليل الحسابات القياسي وبيانات المنشأة.
-              </p>
-              <button
-                onClick={handleCleanAllTransactions}
-                className="w-full py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs"
-              >
-                تفريغ النظام من أي بيانات تجريبية الآن
-              </button>
-            </div>
-
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
-              <div className="flex items-center gap-2 text-slate-900 font-black text-sm">
-                <RefreshCw className="w-5 h-5 text-rose-600" />
-                <span>إعادة ضبط المصنع الشامل</span>
-              </div>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                إعادة ضبط قاعدة البيانات بالكامل إلى الحالة الأولية النظيفة مع تهيئة دليل الحسابات القياسي.
-              </p>
-              <button
-                onClick={handleResetData}
-                className="w-full py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition-all"
-              >
-                إعادة ضبط قاعدة البيانات
-              </button>
-            </div>
           </div>
         </>
       )}

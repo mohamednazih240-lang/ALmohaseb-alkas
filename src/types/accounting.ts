@@ -599,4 +599,5 @@ export interface AccountingDB {
   branches?: Branch[];
   audit: AuditLog[];
   cleanGeneration?: number;
+  deletedInvoiceIds?: string[];
 }

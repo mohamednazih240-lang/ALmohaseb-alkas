@@ -27,7 +27,7 @@ import {
   getProductForBranch,
   deleteInvoiceAndRevert,
   getLatestVerifiedPurchaseInfo,
-  calculateProductAverageCost
+  buildPurchaseCostMap
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -105,7 +105,9 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     return true;
   };
 
-  // 1. INVOICE PROFITS CALCULATION (Strict Rule 4: Latest Verified Purchase Price, No Averaging)
+  // 1. INVOICE PROFITS CALCULATION (O(N) Indexed Purchase Cost Lookup)
+  const costIndex = useMemo(() => buildPurchaseCostMap(db), [db.invoices, db.products]);
+
   const invoiceProfitsData = useMemo(() => {
     const sales = db.invoices.filter(i => (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') && isDateMatch(i.date) && isTargetBranch(i.branchId));
 
@@ -114,7 +116,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       let hasUndefinedCost = false;
 
       inv.items.forEach(it => {
-        const costInfo = calculateProductAverageCost(db, it.productId, it.productName);
+        const costInfo = costIndex.getCost(it.productId, it.productName);
         if (costInfo.hasPurchases) {
           const unitCost = (db.settings.cost === 'average')
             ? (costInfo.avgCost || costInfo.latestBuyPrice)
@@ -196,7 +198,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     sales.forEach(inv => {
       inv.items.forEach(it => {
         const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode || p.name === it.productName);
-        const costInfo = calculateProductAverageCost(db, it.productId, it.productName);
+        const costInfo = costIndex.getCost(it.productId, it.productName);
         const hasVerified = costInfo.hasPurchases;
         const verifiedCost = hasVerified
           ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
@@ -234,9 +236,9 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     const list = Array.from(map.values()).map(item => {
       const profit = item.hasVerifiedCost ? (item.totalRevenue - item.totalCost) : 0;
       const margin = (item.hasVerifiedCost && item.totalRevenue > 0) ? (profit / item.totalRevenue) * 100 : 0;
-      const actualSellPrice = (item.product?.sellPrice && item.product.sellPrice > 0)
-        ? item.product.sellPrice
-        : (item.qtySold > 0 ? item.totalRevenue / item.qtySold : 0);
+      const actualSellPrice = item.qtySold > 0
+        ? Number((item.totalRevenue / item.qtySold).toFixed(2))
+        : (item.product?.sellPrice && item.product.sellPrice > 0 ? item.product.sellPrice : 0);
 
       return {
         ...item,
@@ -304,7 +306,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         { label: 'ربح الصنف', width: '16%', align: 'center' }
       ],
       tableRows: row.invoice.items.map(it => {
-        const costInfo = calculateProductAverageCost(db, it.productId, it.productName);
+        const costInfo = costIndex.getCost(it.productId, it.productName);
         const cost = costInfo.hasPurchases
           ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
           : (it.costPrice || 0);
@@ -570,7 +572,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs space-y-2.5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           {/* Quick Date Filters */}
-          <div className="flex items-center gap-1 overflow-x-auto text-xs font-bold">
+          <div className="flex flex-wrap items-center gap-1 text-xs font-bold">
             {[
               { id: 'all', label: 'الكل' },
               { id: 'today', label: 'اليوم' },
@@ -671,99 +673,129 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             </div>
           ) : (
             <div className="space-y-3">
-              {/* Responsive Cards / Table */}
-              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[850px] text-right text-xs whitespace-nowrap">
-                    <thead className="bg-slate-50 border-b border-slate-200 font-black text-slate-700">
-                      <tr>
-                        <th className="p-2.5">رقم الفاتورة</th>
-                        <th className="p-2.5">التاريخ</th>
-                        <th className="p-2.5">العميل</th>
-                        <th className="p-2.5">طريقة الدفع</th>
-                        <th className="p-2.5 text-center">المبيعات</th>
-                        <th className="p-2.5 text-center">التكلفة (COGS)</th>
-                        <th className="p-2.5 text-center">صافي الربح</th>
-                        <th className="p-2.5 text-center">نسبة الربح %</th>
-                        <th className="p-2.5 text-center">إجراءات</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {invoiceProfitsData.map(row => (
-                        <tr key={row.id} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="p-2.5 font-bold font-mono text-slate-950">
-                            {row.number}
-                          </td>
-                          <td className="p-2.5 font-mono text-slate-600">
-                            {row.date}
-                          </td>
-                          <td className="p-2.5 font-bold text-slate-900">
-                            {row.customer}
-                          </td>
-                          <td className="p-2.5 text-slate-600">
-                            <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px]">
-                              {row.paymentMethod}
-                            </span>
-                          </td>
-                          <td className="p-2.5 text-center font-mono font-bold text-slate-950">
-                            {formatMoney(row.revenue, db.settings.currency)}
-                          </td>
-                          <td className="p-2.5 text-center font-mono text-slate-600">
-                            {formatMoney(row.cost, db.settings.currency)}
-                          </td>
-                          <td className="p-2.5 text-center font-mono font-black text-emerald-700">
-                            {formatMoney(row.profit, db.settings.currency)}
-                          </td>
-                          <td className="p-2.5 text-center font-mono font-bold text-amber-700">
-                            {row.margin.toFixed(1)}%
-                          </td>
-                          <td className="p-2.5 text-center">
-                            <div className="flex items-center justify-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => handlePrintSingleInvoice(row)}
-                                className="p-1 text-slate-600 hover:text-black hover:bg-slate-100 rounded cursor-pointer"
-                                title="طباعة وتحميل تفاصيل ربح الفاتورة"
-                              >
-                                <Printer className="w-3.5 h-3.5" />
+              {/* Mobile Responsive Cards (Zero Horizontal Scroll) */}
+              <div className="md:hidden grid grid-cols-1 gap-3">
+                {invoiceProfitsData.map(row => (
+                  <div key={row.id} className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs space-y-2.5">
+                    <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
+                      <div>
+                        <span className="font-mono font-black text-sm text-slate-950 block">{row.number}</span>
+                        <span className="text-[11px] text-slate-500 font-mono">{row.date}</span>
+                      </div>
+                      <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px] font-bold text-slate-700">
+                        {row.paymentMethod}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-500">العميل:</span>
+                      <span className="font-bold text-slate-900 truncate max-w-[65%]">{row.customer}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-xs">
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">المبيعات</span>
+                        <span className="font-mono font-bold text-slate-950">{formatMoney(row.revenue, db.settings.currency)}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">التكلفة (COGS)</span>
+                        <span className="font-mono text-slate-700">{formatMoney(row.cost, db.settings.currency)}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">صافي الربح</span>
+                        <span className="font-mono font-black text-emerald-700">{formatMoney(row.profit, db.settings.currency)}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">نسبة الربح %</span>
+                        <span className="font-mono font-bold text-amber-700">{row.margin.toFixed(1)}%</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-end gap-1 pt-1 border-t border-slate-100">
+                      <button type="button" onClick={() => handlePrintSingleInvoice(row)} className="px-2 py-1 text-slate-700 hover:bg-slate-100 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer">
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>طباعة</span>
+                      </button>
+                      {onPreviewInvoice && (
+                        <button type="button" onClick={() => onPreviewInvoice(row.invoice)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded cursor-pointer" title="معاينة الفاتورة الأصلية">
+                          <Eye className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {onEditInvoice && (
+                        <button type="button" onClick={() => onEditInvoice(row.invoice)} className="p-1.5 text-slate-600 hover:text-blue-600 hover:bg-slate-100 rounded cursor-pointer" title="تعديل الفاتورة">
+                          <Edit className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {canDeleteSales && (
+                        <button type="button" onClick={() => handleDeleteInvoice(row.invoice)} className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded cursor-pointer" title="حذف الفاتورة">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop Responsive Table (No Horizontal Scroll) */}
+              <div className="hidden md:block bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
+                <table className="w-full text-right text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 font-black text-slate-700">
+                    <tr>
+                      <th className="p-2.5">رقم الفاتورة</th>
+                      <th className="p-2.5">التاريخ</th>
+                      <th className="p-2.5">العميل</th>
+                      <th className="p-2.5">طريقة الدفع</th>
+                      <th className="p-2.5 text-center">المبيعات</th>
+                      <th className="p-2.5 text-center">التكلفة (COGS)</th>
+                      <th className="p-2.5 text-center">صافي الربح</th>
+                      <th className="p-2.5 text-center">نسبة الربح %</th>
+                      <th className="p-2.5 text-center">إجراءات</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {invoiceProfitsData.map(row => (
+                      <tr key={row.id} className="hover:bg-slate-50/80 transition-colors">
+                        <td className="p-2.5 font-bold font-mono text-slate-950">{row.number}</td>
+                        <td className="p-2.5 font-mono text-slate-600">{row.date}</td>
+                        <td className="p-2.5 font-bold text-slate-900">{row.customer}</td>
+                        <td className="p-2.5 text-slate-600">
+                          <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px]">{row.paymentMethod}</span>
+                        </td>
+                        <td className="p-2.5 text-center font-mono font-bold text-slate-950">
+                          {formatMoney(row.revenue, db.settings.currency)}
+                        </td>
+                        <td className="p-2.5 text-center font-mono text-slate-600">
+                          {formatMoney(row.cost, db.settings.currency)}
+                        </td>
+                        <td className="p-2.5 text-center font-mono font-black text-emerald-700">
+                          {formatMoney(row.profit, db.settings.currency)}
+                        </td>
+                        <td className="p-2.5 text-center font-mono font-bold text-amber-700">
+                          {row.margin.toFixed(1)}%
+                        </td>
+                        <td className="p-2.5 text-center">
+                          <div className="flex items-center justify-center gap-1">
+                            <button type="button" onClick={() => handlePrintSingleInvoice(row)} className="p-1 text-slate-600 hover:text-black hover:bg-slate-100 rounded cursor-pointer" title="طباعة وتحميل تفاصيل ربح الفاتورة">
+                              <Printer className="w-3.5 h-3.5" />
+                            </button>
+                            {onPreviewInvoice && (
+                              <button type="button" onClick={() => onPreviewInvoice(row.invoice)} className="p-1 text-blue-600 hover:bg-blue-50 rounded cursor-pointer" title="معاينة الفاتورة الأصلية">
+                                <Eye className="w-3.5 h-3.5" />
                               </button>
-                              {onPreviewInvoice && (
-                                <button
-                                  type="button"
-                                  onClick={() => onPreviewInvoice(row.invoice)}
-                                  className="p-1 text-blue-600 hover:bg-blue-50 rounded cursor-pointer"
-                                  title="معاينة الفاتورة الأصلية"
-                                >
-                                  <Eye className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                              {onEditInvoice && (
-                                <button
-                                  type="button"
-                                  onClick={() => onEditInvoice(row.invoice)}
-                                  className="p-1 text-slate-600 hover:text-blue-600 hover:bg-slate-100 rounded cursor-pointer"
-                                  title="تعديل الفاتورة"
-                                >
-                                  <Edit className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                              {canDeleteSales && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteInvoice(row.invoice)}
-                                  className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded cursor-pointer"
-                                  title="حذف الفاتورة"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                            )}
+                            {onEditInvoice && (
+                              <button type="button" onClick={() => onEditInvoice(row.invoice)} className="p-1 text-slate-600 hover:text-blue-600 hover:bg-slate-100 rounded cursor-pointer" title="تعديل الفاتورة">
+                                <Edit className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {canDeleteSales && (
+                              <button type="button" onClick={() => handleDeleteInvoice(row.invoice)} className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded cursor-pointer" title="حذف الفاتورة">
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
 
               {/* BOTTOM SECTION: Gross Merchandise Profit, Operating Expenses & Net Business Profit */}
@@ -824,79 +856,107 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             </div>
           ) : (
             <div className="space-y-3">
-              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[960px] text-right text-xs whitespace-nowrap">
-                    <thead className="bg-slate-50 border-b border-slate-200 font-black text-slate-700">
-                      <tr>
-                        <th className="p-2.5">كود الصنف</th>
-                        <th className="p-2.5">اسم الصنف</th>
-                        <th className="p-2.5">التصنيف</th>
-                        <th className="p-2.5 text-center">الكمية المباعة</th>
-                        <th className="p-2.5 text-center">متوسط التكلفة الفعلي</th>
-                        <th className="p-2.5 text-center">سعر البيع الفعلي</th>
-                        <th className="p-2.5 text-center">إجمالي المبيعات</th>
-                        <th className="p-2.5 text-center">إجمالي التكلفة</th>
-                        <th className="p-2.5 text-center">إجمالي ربح الصنف</th>
-                        <th className="p-2.5 text-center">نسبة الربح %</th>
+              {/* Mobile Responsive Cards (Zero Horizontal Scroll) */}
+              <div className="md:hidden grid grid-cols-1 gap-3">
+                {itemProfitsData.map(it => (
+                  <div key={it.productId} className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs space-y-2.5">
+                    <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
+                      <div className="min-w-0">
+                        <h4 className="font-bold text-sm text-slate-900 truncate">{it.name}</h4>
+                        <div className="text-[11px] text-slate-500 font-mono flex items-center gap-2">
+                          <span>كود: {it.code}</span>
+                          <span>• {it.category}</span>
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px] font-mono font-bold text-slate-900 shrink-0">
+                        {it.qtySold} {it.unit}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-xs">
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">متوسط التكلفة الفعلي</span>
+                        <span className="font-mono font-bold text-slate-700">
+                          {it.hasVerifiedCost ? formatMoney(it.verifiedCostPrice, db.settings.currency) : 'غير محدد'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">سعر البيع الفعلي</span>
+                        <span className="font-mono font-bold text-slate-900">{formatMoney(it.actualSellPrice, db.settings.currency)}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">إجمالي المبيعات</span>
+                        <span className="font-mono font-bold text-slate-950">{formatMoney(it.totalRevenue, db.settings.currency)}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">إجمالي التكلفة</span>
+                        <span className="font-mono text-slate-700">{it.hasVerifiedCost ? formatMoney(it.totalCost, db.settings.currency) : '—'}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">إجمالي ربح الصنف</span>
+                        <span className="font-mono font-black text-emerald-700">{it.hasVerifiedCost ? formatMoney(it.profit, db.settings.currency) : '—'}</span>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500 block">نسبة الربح %</span>
+                        <span className="font-mono font-bold text-amber-700">{it.hasVerifiedCost ? `${it.margin.toFixed(1)}%` : '—'}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop Responsive Table (No Horizontal Scroll) */}
+              <div className="hidden md:block bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
+                <table className="w-full text-right text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 font-black text-slate-700">
+                    <tr>
+                      <th className="p-2">كود الصنف</th>
+                      <th className="p-2">اسم الصنف</th>
+                      <th className="p-2">التصنيف</th>
+                      <th className="p-2 text-center">الكمية المباعة</th>
+                      <th className="p-2 text-center">متوسط التكلفة</th>
+                      <th className="p-2 text-center">سعر البيع</th>
+                      <th className="p-2 text-center">إجمالي المبيعات</th>
+                      <th className="p-2 text-center">إجمالي التكلفة</th>
+                      <th className="p-2 text-center">إجمالي الربح</th>
+                      <th className="p-2 text-center">النسبة %</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {itemProfitsData.map(it => (
+                      <tr key={it.productId} className="hover:bg-slate-50/80 transition-colors">
+                        <td className="p-2 font-bold font-mono text-slate-600">{it.code}</td>
+                        <td className="p-2 font-bold text-slate-900">{it.name}</td>
+                        <td className="p-2 text-slate-500">{it.category}</td>
+                        <td className="p-2 text-center font-mono font-bold text-slate-900">{it.qtySold} {it.unit}</td>
+                        <td className="p-2 text-center font-mono text-slate-600">
+                          {it.hasVerifiedCost ? (
+                            formatMoney(it.verifiedCostPrice, db.settings.currency)
+                          ) : (
+                            <span className="text-amber-700 font-bold text-[10px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                              غير محدد
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-2 text-center font-mono font-bold text-slate-900">
+                          {formatMoney(it.actualSellPrice, db.settings.currency)}
+                        </td>
+                        <td className="p-2 text-center font-mono font-bold text-slate-950">
+                          {formatMoney(it.totalRevenue, db.settings.currency)}
+                        </td>
+                        <td className="p-2 text-center font-mono text-slate-600">
+                          {it.hasVerifiedCost ? formatMoney(it.totalCost, db.settings.currency) : '—'}
+                        </td>
+                        <td className="p-2 text-center font-mono font-black text-emerald-700">
+                          {it.hasVerifiedCost ? formatMoney(it.profit, db.settings.currency) : '—'}
+                        </td>
+                        <td className="p-2 text-center font-mono font-bold text-amber-700">
+                          {it.hasVerifiedCost ? `${it.margin.toFixed(1)}%` : '—'}
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {itemProfitsData.map(it => (
-                        <tr key={it.productId} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="p-2.5 font-bold font-mono text-slate-600">
-                            {it.code}
-                          </td>
-                          <td className="p-2.5 font-bold text-slate-900">
-                            {it.name}
-                          </td>
-                          <td className="p-2.5 text-slate-500">
-                            {it.category}
-                          </td>
-                          <td className="p-2.5 text-center font-mono font-bold text-slate-900">
-                            {it.qtySold} {it.unit}
-                          </td>
-                          <td className="p-2.5 text-center font-mono text-slate-600">
-                            {it.hasVerifiedCost ? (
-                              formatMoney(it.verifiedCostPrice, db.settings.currency)
-                            ) : (
-                              <span className="text-amber-700 font-bold text-[10.5px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
-                                غير محدد (لم يُشترَ)
-                              </span>
-                            )}
-                          </td>
-                          <td className="p-2.5 text-center font-mono font-bold text-slate-900">
-                            {formatMoney(it.actualSellPrice, db.settings.currency)}
-                          </td>
-                          <td className="p-2.5 text-center font-mono font-bold text-slate-950">
-                            {formatMoney(it.totalRevenue, db.settings.currency)}
-                          </td>
-                          <td className="p-2.5 text-center font-mono text-slate-600">
-                            {it.hasVerifiedCost ? (
-                              formatMoney(it.totalCost, db.settings.currency)
-                            ) : (
-                              <span className="text-slate-400 font-mono">—</span>
-                            )}
-                          </td>
-                          <td className="p-2.5 text-center font-mono font-black text-emerald-700">
-                            {it.hasVerifiedCost ? (
-                              formatMoney(it.profit, db.settings.currency)
-                            ) : (
-                              <span className="text-slate-400 font-mono">—</span>
-                            )}
-                          </td>
-                          <td className="p-2.5 text-center font-mono font-bold text-amber-700">
-                            {it.hasVerifiedCost ? (
-                              `${it.margin.toFixed(1)}%`
-                            ) : (
-                              <span className="text-slate-400 font-mono">—</span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                    ))}
+                  </tbody>
+                </table>
               </div>
 
               {/* BOTTOM SECTION: Gross Merchandise Profit & Net Business Profit */}

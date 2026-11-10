@@ -57,8 +57,29 @@ const IDB_NAME = 'hesabaty_accounting_db';
 const IDB_STORE = 'erp_storage';
 const IDB_KEY = 'main_database_state';
 
-// Whitelist / Blacklist: No automatic purging or filtering. All user transactions are preserved permanently.
-export const PURGED_EKHWA_INVOICE_IDS = new Set<string>();
+export const PURGED_COMP101_INVOICE_IDS = new Set<string>([
+  'inv_mvt8tz8g_bdbs8',
+  'inv_mvt8m7y6_b60qr',
+  'inv_mvt7x4uk_0llcd',
+  'inv_mvobnimq_4pxcf',
+  'inv_mvob1d3h_4g7xe',
+  'inv_mvnuoaar_6fiye',
+  'inv_mvnsulgb_3d4sv',
+  'inv_mvcqzqlx_yq274',
+  'inv_mvcrfi1p_z3y8d',
+  'inv_mvcqlpcp_or9qr'
+]);
+
+export const PURGED_COMP101_PRODUCT_IDS = new Set<string>([
+  'prod_mw90wanc_6izgx', 'prod_mw90wand_an42q', 'prod_mw90wand_c0ziy', 'prod_mw90wane_ohkll',
+  'prod_mw90wane_2kuzh', 'prod_mw90wanf_jquk5', 'prod_mw90wanf_xlngl', 'prod_mw90wanf_obefl',
+  'prod_mw90wang_skvwl', 'prod_mw90wang_40mxx', 'prod_mw90wanh_mozaf', 'prod_mw90wanh_0zogi',
+  'prod_mw90wanh_8rkcq', 'prod_mw90wanh_w73hv', 'prod_mw90wani_ihfj8', 'prod_mw90wani_kf92f',
+  'prod_mw90wanj_9mjiy', 'prod_mw90wanj_4ioh9', 'prod_mw90wank_u54so', 'prod_mw90wanl_98dhq',
+  'prod_mw90wanl_dpmzr', 'prod_mw90wanm_iye24'
+]);
+
+export const PURGED_EKHWA_INVOICE_IDS = PURGED_COMP101_INVOICE_IDS;
 
 function openIndexedDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -392,6 +413,142 @@ export function calculateProductAverageCost(
   };
 }
 
+export interface FastPurchaseCostIndex {
+  getCost: (productId?: string, productName?: string) => ProductCostFromPurchases;
+}
+
+/**
+ * تبني فهرس تكلفة المشتريات الفعلي في دورة خطية واحدة O(N) لكافة الأصناف
+ * بدل مسح جميع فواتير المشتريات لكل صنف على حدة — مثالية لآلاف وملايين الفواتير
+ */
+export function buildPurchaseCostMap(db: AccountingDB): FastPurchaseCostIndex {
+  const byId = new Map<string, {
+    totalQty: number;
+    totalAmt: number;
+    count: number;
+    latestPrice: number;
+    latestKey: string;
+    lastDate?: string;
+    lastNumber?: string;
+    lastSupplier?: string;
+  }>();
+  const byName = new Map<string, {
+    totalQty: number;
+    totalAmt: number;
+    count: number;
+    latestPrice: number;
+    latestKey: string;
+    lastDate?: string;
+    lastNumber?: string;
+    lastSupplier?: string;
+  }>();
+
+  const accum = (
+    map: Map<string, any>,
+    key: string,
+    qty: number,
+    price: number,
+    invSortKey: string,
+    invDate?: string,
+    invNumber?: string,
+    supplierName?: string
+  ) => {
+    let rec = map.get(key);
+    if (!rec) {
+      rec = {
+        totalQty: 0,
+        totalAmt: 0,
+        count: 0,
+        latestPrice: 0,
+        latestKey: '',
+        lastDate: invDate,
+        lastNumber: invNumber,
+        lastSupplier: supplierName
+      };
+      map.set(key, rec);
+    }
+    rec.totalQty += qty;
+    rec.totalAmt += qty * price;
+    rec.count += 1;
+    if (invSortKey > rec.latestKey) {
+      rec.latestKey = invSortKey;
+      rec.latestPrice = price;
+      rec.lastDate = invDate;
+      rec.lastNumber = invNumber;
+      rec.lastSupplier = supplierName;
+    }
+  };
+
+  for (const inv of db?.invoices || []) {
+    if (!((inv.type === 'purchase' || inv.invoiceKind === 'purchase') && (inv.status as string) !== 'ملغي')) {
+      continue;
+    }
+    if (!Array.isArray(inv.items)) continue;
+    const invSortKey = `${inv.date || ''}_${inv.createdAt || ''}_${inv.number || ''}_${inv.id || ''}`;
+    for (const it of inv.items) {
+      const qty = Number(it.qty) || 0;
+      const price = Number(it.unitPrice || it.costPrice || (it as any).price || (qty > 0 && it.total > 0 ? it.total / qty : 0)) || 0;
+      if (qty > 0 && price > 0) {
+        if (it.productId) {
+          accum(byId, it.productId, qty, price, invSortKey, inv.date, inv.number, inv.partyName);
+        }
+        if (it.productName) {
+          const norm = normalizeArabicText(it.productName);
+          if (norm) accum(byName, norm, qty, price, invSortKey, inv.date, inv.number, inv.partyName);
+        }
+      }
+    }
+  }
+
+  const prodById = new Map<string, Product>();
+  const prodByName = new Map<string, Product>();
+  for (const p of db?.products || []) {
+    if (p.id) prodById.set(p.id, p);
+    if (p.name) prodByName.set(normalizeArabicText(p.name), p);
+  }
+
+  return {
+    getCost: (productId?: string, productName?: string): ProductCostFromPurchases => {
+      const rec = (productId ? byId.get(productId) : undefined) ||
+                  (productName ? byName.get(normalizeArabicText(productName)) : undefined);
+      if (rec && rec.count > 0 && rec.totalQty > 0) {
+        return {
+          hasPurchases: true,
+          avgCost: Number((rec.totalAmt / rec.totalQty).toFixed(2)),
+          latestBuyPrice: Number(rec.latestPrice.toFixed(2)),
+          totalPurchasedQty: rec.totalQty,
+          totalPurchasedAmount: Number(rec.totalAmt.toFixed(2)),
+          purchasesCount: rec.count,
+          lastPurchaseDate: rec.lastDate,
+          lastInvoiceNumber: rec.lastNumber,
+          lastSupplierName: rec.lastSupplier
+        };
+      }
+      const prod = (productId ? prodById.get(productId) : undefined) ||
+                   (productName ? prodByName.get(normalizeArabicText(productName)) : undefined);
+      if (prod && Number(prod.buyPrice) > 0) {
+        const recordedPrice = Number(prod.buyPrice);
+        return {
+          hasPurchases: true,
+          avgCost: recordedPrice,
+          latestBuyPrice: recordedPrice,
+          totalPurchasedQty: prod.currentQty > 0 ? prod.currentQty : 0,
+          totalPurchasedAmount: (prod.currentQty > 0 ? prod.currentQty : 0) * recordedPrice,
+          purchasesCount: 1
+        };
+      }
+      return {
+        hasPurchases: false,
+        avgCost: 0,
+        latestBuyPrice: 0,
+        totalPurchasedQty: 0,
+        totalPurchasedAmount: 0,
+        purchasesCount: 0
+      };
+    }
+  };
+}
+
 /**
  * Retrieves verified purchase pricing details for a product directly from purchase invoices.
  * Strictly adheres to ERP integrity: never estimates or invents costs.
@@ -678,8 +835,8 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
         const newCode = `P-${maxCodeNum}`;
         const unitBuy = isPurchase
           ? (Number(item.unitPrice || item.costPrice || (item as any).price) || 0)
-          : (Number(item.costPrice) || (Number(item.unitPrice) > 0 ? Number(item.unitPrice) * 0.75 : 0));
-        const unitSell = isSale ? (Number(item.unitPrice) || 0) : (unitBuy > 0 ? unitBuy * 1.25 : 100);
+          : (Number(item.costPrice) || 0);
+        const unitSell = isSale ? (Number(item.unitPrice) || 0) : 0;
         const newProdId = generateId('prod');
 
         prod = {
@@ -844,19 +1001,27 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
   }
   db.stockMovements = deduplicatedMovements;
 
-  // 5. إعادة احتساب أرصدة الأصناف بدقة تامة من سجل حركات المخزون، وتحديث سعر الشراء ومتوسط التكلفة
+  // 5. إعادة احتساب أرصدة الأصناف بدقة تامة في تمريرة واحدة O(N) من سجل حركات المخزون وفواتير المشتريات الفعلية
+  const costIndex = buildPurchaseCostMap(db);
+  const qtyByProdId = new Map<string, number>();
+  const qtyByNormName = new Map<string, number>();
+  for (const sm of db.stockMovements) {
+    const chg = Number(sm.qtyChange) || 0;
+    if (sm.productId) {
+      qtyByProdId.set(sm.productId, (qtyByProdId.get(sm.productId) || 0) + chg);
+    } else if (sm.productName) {
+      const nName = normalizeArabicText(sm.productName);
+      qtyByNormName.set(nName, (qtyByNormName.get(nName) || 0) + chg);
+    }
+  }
+
   let correctedProductsCount = 0;
   db.products.forEach(p => {
     const normPName = normalizeArabicText(p.name);
-    const prodMovements = db.stockMovements.filter(sm =>
-      sm.productId === p.id ||
-      normalizeArabicText(sm.productName) === normPName
-    );
-
-    const totalQty = prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0);
+    const totalQty = (qtyByProdId.get(p.id) || 0) + (qtyByNormName.get(normPName) || 0);
 
     // احتساب متوسط التكلفة وآخر سعر شراء حصرياً من فواتير الشراء المسجلة فعلياً لكل صنف
-    const costInfo = calculateProductAverageCost(db, p.id, p.name);
+    const costInfo = costIndex.getCost(p.id, p.name);
     let latestBuy = p.buyPrice || 0;
     let avgCost = p.avgCost || p.buyPrice || 0;
 
@@ -895,7 +1060,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
   (db.invoices || []).forEach(inv => {
     if (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') {
       inv.items?.forEach(it => {
-        const itemCost = calculateProductAverageCost(db, it.productId, it.productName);
+        const itemCost = costIndex.getCost(it.productId, it.productName);
         if (itemCost.hasPurchases) {
           const verifiedCost = (db.settings?.cost === 'average')
             ? (itemCost.avgCost || itemCost.latestBuyPrice)
@@ -909,7 +1074,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
   // تحديث تكلفة الوحدة في حركات مبيعات المخزون وفقاً للتكلفة الحقيقية
   db.stockMovements.forEach(sm => {
     if (sm.type === 'sale') {
-      const itemCost = calculateProductAverageCost(db, sm.productId, sm.productName);
+      const itemCost = costIndex.getCost(sm.productId, sm.productName);
       if (itemCost.hasPurchases) {
         sm.unitCost = (db.settings?.cost === 'average')
           ? (itemCost.avgCost || itemCost.latestBuyPrice)
@@ -989,6 +1154,37 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   if (!db.journals) db.journals = [];
   if (!db.quotes) db.quotes = [];
   if (!db.orders) db.orders = [];
+  if (!db.deletedInvoiceIds) db.deletedInvoiceIds = [];
+
+  // إزالة نهائية ودائمة لفواتير COMP-101 المدمجة الـ 10 (Muhammed Raşad) وأي فواتير محذوفة مسجلة في سجل الحذف
+  const blockedIds = new Set<string>([
+    ...PURGED_COMP101_INVOICE_IDS,
+    ...(db.deletedInvoiceIds || [])
+  ]);
+  const removedInvNumbers = new Set<string>();
+  const removedInvIds = new Set<string>(blockedIds);
+
+  db.invoices = db.invoices.filter(inv => {
+    if (!inv) return false;
+    if (isPurgedEkhwaInvoice(inv) || blockedIds.has(inv.id)) {
+      if (inv.id) removedInvIds.add(inv.id);
+      if (inv.number) removedInvNumbers.add(String(inv.number));
+      return false;
+    }
+    return true;
+  });
+
+  if (removedInvIds.size > 0) {
+    db.stockMovements = db.stockMovements.filter(sm => !sm.sourceId || !removedInvIds.has(sm.sourceId));
+    db.vouchers = db.vouchers.filter(v => !((v as any).invoiceId && removedInvIds.has((v as any).invoiceId)) && !((v as any).sourceId && removedInvIds.has((v as any).sourceId)));
+    db.treasury = db.treasury.filter(tr => !tr.sourceId || !removedInvIds.has(tr.sourceId));
+    db.journals = db.journals.filter(j => !j.sourceId || !removedInvIds.has(j.sourceId));
+  }
+
+  // إزالة الأصناف الـ 22 الدخيلة الخاصة بفواتير COMP-101 المدمجة فقط إذا لم تعد مستخدمة في أي فاتورة حقيقية
+  const activeProductIds = new Set<string>();
+  db.invoices.forEach(inv => inv.items?.forEach(it => { if (it.productId) activeProductIds.add(it.productId); }));
+  db.products = db.products.filter(p => !(PURGED_COMP101_PRODUCT_IDS.has(p.id) && !activeProductIds.has(p.id)));
 
   if (!db.users) db.users = [];
 
@@ -1132,11 +1328,8 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     }
   }
 
-  // Retroactively verify and correct all purchase invoice items, stock movements, and treasury impacts
+  // Retroactively verify and correct all purchase invoice items, stock movements, and treasury impacts (single O(N) pass)
   db = verifyAndCorrectStockMovements(db).db;
-
-  // Retroactively ensure all purchase & sale invoice items are posted to stock movements and catalog
-  db = reconcileAndEnsureAllInvoiceStock(db).db;
 
   // Retroactively audit and deduplicate all vouchers, treasury entries, and phantom deductions
   db = reconcileAndDeduplicateAllFinancialRecords(db).db;
@@ -1448,11 +1641,17 @@ export function saveTenantDatabase(tenantId: string, db: AccountingDB): void {
   const storageKey = getTenantStorageKey(tenantId);
   const idbKey = getTenantIdbKey(tenantId);
 
-  // Asynchronously store in IndexedDB
+  // Asynchronously store full database in IndexedDB (supports millions of records & gigabytes)
   saveToIndexedDB(db, idbKey);
 
   try {
-    localStorage.setItem(storageKey, JSON.stringify(db));
+    // Only cache in localStorage when compact enough (< 3.5MB) to prevent quota lockups & UI lag at high scale
+    if ((db.invoices?.length || 0) <= 1200) {
+      const json = JSON.stringify(db);
+      if (json.length < 3_500_000) {
+        localStorage.setItem(storageKey, json);
+      }
+    }
   } catch (err) {
     console.warn(`localStorage size limit reached for tenant ${tenantId}, data safely in IndexedDB:`, err);
   }
@@ -1520,12 +1719,17 @@ export function saveDatabase(db: AccountingDB): void {
     saveTenantDatabase(activeTenantId, db);
   }
 
-  // Always save a primary fallback copy to ensure no data is ever lost between sessions
+  // Always save full database to IndexedDB (scalable to millions of invoices)
   saveToIndexedDB(db, IDB_KEY);
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+    if ((db.invoices?.length || 0) <= 1200) {
+      const json = JSON.stringify(db);
+      if (json.length < 3_500_000) {
+        localStorage.setItem(STORAGE_KEY, json);
+      }
+    }
   } catch (err) {
-    console.warn('localStorage limit notice:', err);
+    console.warn('localStorage limit notice (safely persisted in IndexedDB):', err);
   }
 }
 
@@ -2192,11 +2396,19 @@ export function updateProductBranchData(
 /**
  * Union & merge invoices safely by ID to prevent any loss across phones and concurrent updates
  */
-export function isPurgedEkhwaInvoice(_inv: Invoice | null | undefined): boolean {
+export function isPurgedEkhwaInvoice(inv: Invoice | null | undefined): boolean {
+  if (!inv) return true;
+  if (inv.id && PURGED_COMP101_INVOICE_IDS.has(inv.id)) return true;
+  const creator = (inv.createdBy || '').trim();
+  if (creator === 'Muhammed Raşad') return true;
   return false;
 }
 
-export function mergeInvoices(existingList: Invoice[] = [], incomingList: Invoice[] = []): Invoice[] {
+export function mergeInvoices(
+  existingList: Invoice[] = [],
+  incomingList: Invoice[] = [],
+  deletedIds?: Set<string>
+): Invoice[] {
   const map = new Map<string, Invoice>();
 
   const mergeTwoInvoices = (a: Invoice, b: Invoice): Invoice => {
@@ -2244,14 +2456,16 @@ export function mergeInvoices(existingList: Invoice[] = [], incomingList: Invoic
   };
 
   (existingList || []).forEach(inv => {
-    if (inv && (inv.id || inv.number)) {
+    if (!inv || isPurgedEkhwaInvoice(inv) || (inv.id && deletedIds?.has(inv.id))) return;
+    if (inv.id || inv.number) {
       if (inv.id) map.set(inv.id, inv);
       if (inv.number) map.set(`${inv.type || inv.invoiceKind}_${inv.number}`, inv);
     }
   });
 
   (incomingList || []).forEach(inv => {
-    if (inv && (inv.id || inv.number)) {
+    if (!inv || isPurgedEkhwaInvoice(inv) || (inv.id && deletedIds?.has(inv.id))) return;
+    if (inv.id || inv.number) {
       const byId = inv.id ? map.get(inv.id) : undefined;
       const byNum = inv.number ? map.get(`${inv.type || inv.invoiceKind}_${inv.number}`) : undefined;
       const existing = byId || byNum;
@@ -2528,8 +2742,9 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     }
   }
 
-  // 6. Remove the invoice itself
+  // 6. Remove the invoice itself & record permanent deletion tombstone so it never resurrects across devices
   updated.invoices = updated.invoices.filter(i => i.id !== invoice.id);
+  updated.deletedInvoiceIds = Array.from(new Set([...(updated.deletedInvoiceIds || []), invoice.id]));
 
   // 7. Update party balance if party exists
   if (invoice.partyId) {

@@ -433,27 +433,7 @@ export const QuickMenuPage: React.FC<QuickMenuPageProps> = ({
           </h2>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {/* Feature 1: Past Vouchers Generator */}
-          <div className="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-2xl p-4 border-2 border-emerald-300 shadow-xs flex flex-col justify-between">
-            <div>
-              <div className="flex items-center gap-1.5 text-xs font-black text-emerald-950 mb-1.5">
-                <Sparkles className="w-4 h-4 text-emerald-600 animate-pulse" />
-                <span>توليد سندات الفواتير السابقة</span>
-              </div>
-              <p className="text-xs text-emerald-900 leading-relaxed mb-3">
-                يقوم بفحص كافة فواتير المبيعات والمشتريات المسجلة سابقاً في النظام وتوليد سندات قبض وصرف فورية لأي مبالغ مسددة دون تكرار لضمان الربط المالي الشامل.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => onQuickAction('sync_past_vouchers')}
-              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white rounded-xl text-xs font-black shadow transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>فحص وتوليد السندات الآن</span>
-            </button>
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
 
           {/* Feature 2: Realtime Cloud Sync */}
           <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs flex flex-col justify-between">

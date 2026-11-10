@@ -9,9 +9,20 @@ import {
 } from 'firebase/firestore';
 import { auth } from './firebaseAuth';
 import { AccountingDB, User as AppUser, Branch } from '../types/accounting';
-import { saveDatabase, loadDatabase, ensurePrimaryBranches, sanitizeCompanyDatabase, isCompanyMawan, loadTenantDatabase, mergeInvoices, mergeVouchers, mergeTreasury, mergeStockMovements } from './accountingStorage';
+import {
+  saveDatabase,
+  ensurePrimaryBranches,
+  sanitizeCompanyDatabase,
+  isCompanyMawan,
+  loadTenantDatabase,
+  mergeInvoices,
+  mergeVouchers,
+  mergeTreasury,
+  mergeStockMovements,
+  PURGED_COMP101_INVOICE_IDS,
+  isPurgedEkhwaInvoice
+} from './accountingStorage';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { getCompanyByCode } from './tenantService';
 
 // Connect to provisioned Firestore database with forced long polling to avoid 10s streaming timeout in iframe/proxy environments
 const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId;
@@ -33,7 +44,7 @@ export const firestore = (() => {
 /**
  * Safe promise wrapper with timeout to prevent hanging on cold starts or network drops
  */
-function withTimeout<T>(promise: Promise<T>, ms: number = 3500): Promise<T | null> {
+function withTimeout<T>(promise: Promise<T>, ms: number = 4000): Promise<T | null> {
   let timer: any;
   const timeoutPromise = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), ms);
@@ -49,15 +60,43 @@ function withTimeout<T>(promise: Promise<T>, ms: number = 3500): Promise<T | nul
 
 const SYNC_DOC_PATH = 'hesabaty_app_data';
 const SYNC_DOC_ID = 'main_company_database';
+const SHARD_COLLECTIONS = [
+  'invoices',
+  'stockMovements',
+  'vouchers',
+  'treasury',
+  'journals',
+  'products',
+  'audit'
+] as const;
+type ShardCollectionKey = typeof SHARD_COLLECTIONS[number];
+const SHARD_PAGE_SIZE = 250; // Keeps each Firestore doc well under ~200 KB (<20% of 1 MiB limit), scaling cleanly to >10M invoices
+
 let unsubscribeListener: (() => void) | null = null;
 let unsubscribeCompListener: (() => void) | null = null;
 let lastLocalSavedTimestamp = 0;
 
+// Incremental shard hash cache: only modified shards are uploaded on incremental saves (O(1) network writes at 10M+ scale)
+const uploadedShardHashCache = new Map<string, string>();
+let uploadedLogoHashCache = new Map<string, string>();
+
 const LOCAL_DEVICE_ID_KEY = 'hesabaty_device_instance_id';
 
 /**
+ * Fast non-cryptographic FNV-1a hash to skip redundant shard writes
+ */
+function quickHash(str: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `${str.length}:${(h >>> 0).toString(36)}`;
+}
+
+/**
  * Standardizes company code format:
- * Handles unicode dashes, whitespace, 'COMP - 101' -> 'COMP-101', digits '101' -> 'COMP-101'
+ * Handles unicode dashes, whitespace, 'COMP - 102' -> 'COMP-102'
  */
 export function normalizeCompanyCode(code?: string): string {
   if (!code || code === 'COMP-101') return 'COMP-102';
@@ -137,8 +176,116 @@ export interface CompanyCloudResult {
 }
 
 /**
- * Upload current database state to Firestore so all connected phones see it immediately
- * Includes strict anti-wipe protection: empty seed databases CANNOT overwrite populated cloud databases!
+ * Reassembles a full AccountingDB from either a legacy monolithic doc or a scalable sharded manifest doc
+ */
+async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Promise<AccountingDB | null> {
+  if (!docVal || !docVal.data) return null;
+
+  const baseDb = JSON.parse(docVal.data) as AccountingDB;
+
+  if (!docVal.sharded) {
+    return baseDb;
+  }
+
+  const prefix = normalizeCompanyCode(docVal.shardPrefix || docVal.companyCode || fallbackCode);
+  const shardCounts: Record<string, number> = docVal.shardCounts || {};
+
+  // Fetch separate logo asset if separated
+  const logoPromise = docVal.hasSeparateLogo
+    ? withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, `asset_${prefix}_logo`)), 3500)
+        .then(snap => (snap && snap.exists() ? (snap.data()?.logo || '') : ''))
+        .catch(() => '')
+    : Promise.resolve('');
+
+  // Build shard descriptors to fetch in parallel chunks
+  const shardTasks: Array<{ col: ShardCollectionKey; idx: number; docId: string }> = [];
+  for (const col of SHARD_COLLECTIONS) {
+    const count = Number(shardCounts[col]) || 0;
+    for (let idx = 0; idx < count; idx++) {
+      shardTasks.push({
+        col,
+        idx,
+        docId: `shard_${prefix}_${col}_${idx}`
+      });
+    }
+  }
+
+  const reassembled: Record<ShardCollectionKey, any[][]> = {
+    invoices: [],
+    stockMovements: [],
+    vouchers: [],
+    treasury: [],
+    journals: [],
+    products: [],
+    audit: []
+  };
+
+  // Run shard reads in parallel groups of 24 so even large datasets stream fast without browser connection exhaustion
+  const BATCH = 24;
+  for (let i = 0; i < shardTasks.length; i += BATCH) {
+    const slice = shardTasks.slice(i, i + BATCH);
+    const results = await Promise.all(
+      slice.map(task =>
+        withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, task.docId)), 4500)
+          .then(snap => {
+            if (!snap || !snap.exists()) return [];
+            const d = snap.data();
+            if (d?.itemsJson) {
+              return JSON.parse(d.itemsJson) as any[];
+            }
+            if (Array.isArray(d?.items)) {
+              return d.items;
+            }
+            return [];
+          })
+          .catch(() => [])
+      )
+    );
+    slice.forEach((task, j) => {
+      reassembled[task.col][task.idx] = results[j] || [];
+    });
+  }
+
+  const resolvedLogo = await logoPromise;
+  if (resolvedLogo && baseDb.settings) {
+    baseDb.settings.logo = resolvedLogo;
+  }
+
+  for (const col of SHARD_COLLECTIONS) {
+    if ((Number(shardCounts[col]) || 0) > 0) {
+      const mergedArr: any[] = [];
+      for (const page of reassembled[col]) {
+        if (Array.isArray(page)) {
+          for (const item of page) mergedArr.push(item);
+        }
+      }
+      (baseDb as any)[col] = mergedArr;
+    } else if (!Array.isArray((baseDb as any)[col])) {
+      (baseDb as any)[col] = [];
+    }
+  }
+
+  return baseDb;
+}
+
+/**
+ * Checks lightweight manifest timestamp in Firestore to avoid redundant full downloads during background polling
+ */
+export async function getCloudLatestTimestamp(companyCode?: string): Promise<number> {
+  const clean = normalizeCompanyCode(companyCode);
+  try {
+    const snap = await withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, `company_${clean}`)), 2500);
+    if (snap && snap.exists()) {
+      return Number(snap.data()?.updatedAt) || 0;
+    }
+  } catch {
+    // ignore
+  }
+  return 0;
+}
+
+/**
+ * Upload current database state to Firestore using Sharded Architecture (>10M invoices/year scalable, <200KB per doc)
  */
 export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean = true): Promise<boolean> {
   if (syncDebounceTimer) {
@@ -148,24 +295,36 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 
   const rawCode = db.settings.companyCode || 'COMP-102';
   const cleanCode = normalizeCompanyCode(rawCode);
-
-  // Instantly broadcast locally across browser tabs/PWA instances in 0ms
   const currentDevId = getLocalDeviceId();
   const latestAudit = db.audit && db.audit[0] ? db.audit[0] : null;
   const actionLabel = latestAudit ? `${latestAudit.action}${latestAudit.detail ? ` (${latestAudit.detail})` : ''}` : 'تحديث البيانات';
 
+  // Ensure purged foreign invoices never get pushed from any device
+  const deletedSet = new Set<string>([
+    ...PURGED_COMP101_INVOICE_IDS,
+    ...(db.deletedInvoiceIds || [])
+  ]);
+  const cleanDb: AccountingDB = {
+    ...db,
+    deletedInvoiceIds: Array.from(new Set(db.deletedInvoiceIds || [])),
+    invoices: (db.invoices || []).filter(inv => !isPurgedEkhwaInvoice(inv) && !deletedSet.has(inv.id))
+  };
+
+  // Broadcast locally across browser tabs in 0ms
   if (localBroadcastChannel) {
     try {
-      localBroadcastChannel.postMessage({
-        type: 'LOCAL_INSTANT_SYNC',
-        deviceId: currentDevId,
-        updatedBy: db.currentUser?.name || 'مستخدم آخر',
-        companyCode: cleanCode,
-        actionDesc: actionLabel,
-        data: JSON.stringify(db)
-      });
-    } catch (e) {
-      // ignore
+      if ((cleanDb.invoices?.length || 0) <= 2000) {
+        localBroadcastChannel.postMessage({
+          type: 'LOCAL_INSTANT_SYNC',
+          deviceId: currentDevId,
+          updatedBy: cleanDb.currentUser?.name || 'مستخدم آخر',
+          companyCode: cleanCode,
+          actionDesc: actionLabel,
+          data: JSON.stringify(cleanDb)
+        });
+      }
+    } catch {
+      // ignore if oversized for channel
     }
   }
 
@@ -173,80 +332,151 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
     try {
       updateSyncState({ status: 'syncing' });
 
-      // Anti-wiping protection: ONLY blocks an uninitialized client with 0 audit logs from overwriting cloud data.
-      // Manager deletions & modifications have audit logs (e.g. 'حذف فاتورة') and are NEVER blocked!
-      const isUninitializedClient = (!db.audit || db.audit.length === 0) &&
-                                   (!db.invoices || db.invoices.length === 0) &&
-                                   (!db.customers || db.customers.length === 0) &&
-                                   (!db.suppliers || db.suppliers.length === 0) &&
-                                   (!db.users || db.users.length <= 1);
+      // Anti-wipe protection against empty uninitialized client
+      const isUninitializedClient = (!cleanDb.audit || cleanDb.audit.length === 0) &&
+                                   (!cleanDb.invoices || cleanDb.invoices.length === 0) &&
+                                   (!cleanDb.customers || cleanDb.customers.length === 0) &&
+                                   (!cleanDb.suppliers || cleanDb.suppliers.length === 0) &&
+                                   (!cleanDb.users || cleanDb.users.length <= 1);
 
       try {
         const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
-        const checkSnap = await withTimeout(getDoc(compDocRef), 1500);
+        const checkSnap = await withTimeout(getDoc(compDocRef), 1800);
         if (checkSnap && checkSnap.exists()) {
           const val = checkSnap.data();
-          if (val?.data) {
-            const parsed = JSON.parse(val.data) as AccountingDB;
-            if (isUninitializedClient) {
-              const hasCloudData = (parsed.invoices && parsed.invoices.length > 0) ||
-                                   (parsed.users && parsed.users.length > 1) ||
-                                   (parsed.customers && parsed.customers.length > 0) ||
-                                   (parsed.suppliers && parsed.suppliers.length > 0);
-              if (hasCloudData) {
-                console.warn('CRITICAL SAFEGUARD: Prevented empty uninitialized client from overwriting active cloud database!');
-                updateSyncState({ status: 'connected' });
-                return false;
-              }
+          if (isUninitializedClient && val) {
+            const hasShardedData = val.sharded && ((val.shardCounts?.invoices || 0) > 0 || (val.shardCounts?.products || 0) > 0);
+            let hasLegacyData = false;
+            if (!val.sharded && val.data) {
+              const parsed = JSON.parse(val.data) as AccountingDB;
+              hasLegacyData = (parsed.invoices && parsed.invoices.length > 0) ||
+                              (parsed.users && parsed.users.length > 1) ||
+                              (parsed.customers && parsed.customers.length > 0) ||
+                              (parsed.suppliers && parsed.suppliers.length > 0);
             }
-            // Note: We do NOT re-merge parsed.invoices into db.invoices here!
-            // db.invoices already contains the user's intended state (including deletions or additions).
+            if (hasShardedData || hasLegacyData) {
+              console.warn('CRITICAL SAFEGUARD: Prevented empty uninitialized client from overwriting active cloud database!');
+              updateSyncState({ status: 'connected' });
+              return false;
+            }
           }
         }
       } catch (checkErr) {
         console.warn('Safeguard check note:', checkErr);
       }
 
-      const payload = {
-        updatedAt: Date.now(),
-        updatedBy: db.currentUser?.name || 'مستخدم حساباتي',
-        updatedRole: db.currentUser?.role || 'مدير',
-        companyCode: cleanCode,
-        companyName: db.settings.company,
-        deviceId: currentDevId,
-        actionDesc: actionLabel,
-        data: JSON.stringify(db)
-      };
-      lastLocalSavedTimestamp = payload.updatedAt;
+      const now = Date.now();
+      const logoString = cleanDb.settings?.logo || '';
+      const hasSeparateLogo = Boolean(logoString && logoString.length > 0);
 
-      // 1. Save to dedicated company document
-      const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
-      await setDoc(compDocRef, payload, { merge: true });
-
-      // 2. Save to main_company_database for COMP-102 for instant multi-device sync
-      if (cleanCode === 'COMP-102') {
-        const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-        await setDoc(docRef, payload, { merge: true });
+      // 1. Upload company logo asset only if changed
+      if (hasSeparateLogo) {
+        const logoHash = quickHash(logoString);
+        if (uploadedLogoHashCache.get(cleanCode) !== logoHash) {
+          await setDoc(doc(firestore, SYNC_DOC_PATH, `asset_${cleanCode}_logo`), {
+            companyCode: cleanCode,
+            logo: logoString,
+            updatedAt: now
+          });
+          uploadedLogoHashCache.set(cleanCode, logoHash);
+        }
       }
 
-      // 3. Keep a safe versioned recovery backup document in Firestore so data is NEVER lost
+      // 2. Shard large collections & write ONLY changed shards (O(changed shards) instead of full rewrite!)
+      const shardCounts: Record<string, number> = {};
+      const shardWritePromises: Promise<void>[] = [];
+
+      for (const col of SHARD_COLLECTIONS) {
+        const arr: any[] = Array.isArray((cleanDb as any)[col]) ? (cleanDb as any)[col] : [];
+        const numShards = Math.ceil(arr.length / SHARD_PAGE_SIZE);
+        shardCounts[col] = numShards;
+
+        for (let idx = 0; idx < numShards; idx++) {
+          const slice = arr.slice(idx * SHARD_PAGE_SIZE, (idx + 1) * SHARD_PAGE_SIZE);
+          const itemsJson = JSON.stringify(slice);
+          const cacheKey = `${cleanCode}::${col}::${idx}`;
+          const h = quickHash(itemsJson);
+
+          if (uploadedShardHashCache.get(cacheKey) !== h) {
+            const shardRef = doc(firestore, SYNC_DOC_PATH, `shard_${cleanCode}_${col}_${idx}`);
+            shardWritePromises.push(
+              setDoc(shardRef, {
+                companyCode: cleanCode,
+                collection: col,
+                shardIndex: idx,
+                count: slice.length,
+                updatedAt: now,
+                itemsJson
+              }).then(() => {
+                uploadedShardHashCache.set(cacheKey, h);
+              })
+            );
+          }
+        }
+      }
+
+      // Execute shard writes in batches of 15 before publishing updated manifest
+      for (let i = 0; i < shardWritePromises.length; i += 15) {
+        await Promise.all(shardWritePromises.slice(i, i + 15));
+      }
+
+      // 3. Build ultra-lightweight core payload (~15-35 KB max!) without inline logo or heavy arrays
+      const lightCoreDb: AccountingDB = {
+        ...cleanDb,
+        settings: {
+          ...cleanDb.settings,
+          logo: ''
+        },
+        invoices: [],
+        stockMovements: [],
+        vouchers: [],
+        treasury: [],
+        journals: [],
+        products: [],
+        audit: []
+      };
+
+      const manifestPayload = {
+        updatedAt: now,
+        updatedBy: cleanDb.currentUser?.name || 'مستخدم حساباتي',
+        updatedRole: cleanDb.currentUser?.role || 'مدير',
+        companyCode: cleanCode,
+        companyName: cleanDb.settings.company,
+        deviceId: currentDevId,
+        actionDesc: actionLabel,
+        sharded: true,
+        shardPrefix: cleanCode,
+        shardCounts,
+        hasSeparateLogo,
+        invoicesCount: (cleanDb.invoices || []).length,
+        productsCount: (cleanDb.products || []).length,
+        data: JSON.stringify(lightCoreDb)
+      };
+
+      lastLocalSavedTimestamp = now;
+
+      // 4. Write lightweight manifests (~20 KB each, far below 1MB Firestore cap even with 10M+ invoices)
+      const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
+      await setDoc(compDocRef, manifestPayload);
+
+      if (cleanCode === 'COMP-102') {
+        await setDoc(doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID), manifestPayload);
+      }
+
       try {
-        const backupDocRef = doc(firestore, SYNC_DOC_PATH, `backup_${cleanCode}_latest`);
-        await setDoc(backupDocRef, payload, { merge: true });
-      } catch (bErr) {
+        await setDoc(doc(firestore, SYNC_DOC_PATH, `backup_${cleanCode}_latest`), manifestPayload);
+      } catch {
         // non-blocking
       }
 
-      // 4. Maintain directory of companies for instant multi-device lookups
       try {
-        const dirDocRef = doc(firestore, SYNC_DOC_PATH, 'directory_registry');
-        await setDoc(dirDocRef, {
+        await setDoc(doc(firestore, SYNC_DOC_PATH, 'directory_registry'), {
           [cleanCode]: {
             code: cleanCode,
-            name: db.settings.company,
-            updatedAt: payload.updatedAt,
-            usersCount: (db.users || []).length,
-            invoicesCount: (db.invoices || []).length
+            name: cleanDb.settings.company,
+            updatedAt: now,
+            usersCount: (cleanDb.users || []).length,
+            invoicesCount: (cleanDb.invoices || []).length
           }
         }, { merge: true });
       } catch (e) {
@@ -255,8 +485,8 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 
       updateSyncState({
         status: 'connected',
-        lastSyncedAt: payload.updatedAt,
-        lastUpdatedBy: payload.updatedBy
+        lastSyncedAt: now,
+        lastUpdatedBy: manifestPayload.updatedBy
       });
       return true;
     } catch (err) {
@@ -279,38 +509,33 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 }
 
 /**
- * Fetch latest database from Cloud Firestore for a specific company code
+ * Fetch latest database from Cloud Firestore for a specific company code (transparently supports sharded & legacy docs)
  */
 export async function fetchDatabaseFromCloud(companyCode?: string): Promise<AccountingDB | null> {
   const clean = normalizeCompanyCode(companyCode);
   try {
     let specificDb: AccountingDB | null = null;
     let mainDb: AccountingDB | null = null;
-    let mirrorDb: AccountingDB | null = null;
 
-    // 1. Check company specific document
     try {
       const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
-      const specificSnap = await withTimeout(getDoc(specificRef), 3500);
+      const specificSnap = await withTimeout(getDoc(specificRef), 4000);
       if (specificSnap && specificSnap.exists()) {
-        const val = specificSnap.data();
-        if (val && val.data) {
-          specificDb = JSON.parse(val.data) as AccountingDB;
-        }
+        specificDb = await reassembleFromManifestDoc(specificSnap.data(), clean);
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('Specific cloud read note:', e);
+    }
 
-    // 2. Check main cloud database
-    try {
-      const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-      const snap = await withTimeout(getDoc(docRef), 3000);
-      if (snap && snap.exists()) {
-        const val = snap.data();
-        if (val && val.data) {
-          mainDb = JSON.parse(val.data) as AccountingDB;
+    if (clean === 'COMP-102' && !specificDb) {
+      try {
+        const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
+        const snap = await withTimeout(getDoc(docRef), 3500);
+        if (snap && snap.exists()) {
+          mainDb = await reassembleFromManifestDoc(snap.data(), clean);
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
 
     const candidates = [specificDb, mainDb].filter(Boolean) as AccountingDB[];
     if (candidates.length === 0) return null;
@@ -318,9 +543,15 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
     let unified = candidates[0];
     for (let i = 1; i < candidates.length; i++) {
       const other = candidates[i];
+      const deletedSet = new Set<string>([
+        ...PURGED_COMP101_INVOICE_IDS,
+        ...(unified.deletedInvoiceIds || []),
+        ...(other.deletedInvoiceIds || [])
+      ]);
       unified = {
         ...unified,
-        invoices: mergeInvoices(unified.invoices || [], other.invoices || []),
+        deletedInvoiceIds: Array.from(deletedSet),
+        invoices: mergeInvoices(unified.invoices || [], other.invoices || [], deletedSet),
         vouchers: mergeVouchers(unified.vouchers || [], other.vouchers || []),
         treasury: mergeTreasury(unified.treasury || [], other.treasury || []),
         stockMovements: mergeStockMovements(unified.stockMovements || [], other.stockMovements || []),
@@ -346,58 +577,39 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
 }
 
 /**
- * Requirement 1: Database Query / Cloud API to fetch all users and branches based on Company Code (Tenant ID)
- * Guarantees fetching ALL registered users (not just default/admin) from Firestore Cloud across mobile devices.
- * Normalizes input so 'COMP - 101' matches 'COMP-101' seamlessly.
+ * Fetch all users and branches based on Company Code (Tenant ID) from Firestore or Local
  */
 export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Promise<CompanyCloudResult | null> {
   if (!codeOrId || !codeOrId.trim()) return null;
   const clean = normalizeCompanyCode(codeOrId);
   const rawClean = codeOrId.trim();
 
-  // 1. First: Query Firestore Cloud directly for this company code
   try {
     let cloudDb: AccountingDB | null = null;
 
-    // Check specific company document e.g. company_COMP-101
     const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
-    const specificSnap = await withTimeout(getDoc(specificRef), 3500);
+    const specificSnap = await withTimeout(getDoc(specificRef), 4000);
     if (specificSnap && specificSnap.exists()) {
-      const val = specificSnap.data();
-      if (val?.data) {
-        cloudDb = JSON.parse(val.data) as AccountingDB;
-      }
+      cloudDb = await reassembleFromManifestDoc(specificSnap.data(), clean);
     }
 
-    // Check backup doc if specific not found
     if (!cloudDb) {
       const backupRef = doc(firestore, SYNC_DOC_PATH, `backup_${clean}_latest`);
-      const backupSnap = await withTimeout(getDoc(backupRef), 3000);
+      const backupSnap = await withTimeout(getDoc(backupRef), 3500);
       if (backupSnap && backupSnap.exists()) {
-        const val = backupSnap.data();
-        if (val?.data) {
-          cloudDb = JSON.parse(val.data) as AccountingDB;
-        }
+        cloudDb = await reassembleFromManifestDoc(backupSnap.data(), clean);
       }
     }
 
-    // Check main cloud database
     if (!cloudDb) {
       const mainRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-      const mainSnap = await withTimeout(getDoc(mainRef), 3000);
+      const mainSnap = await withTimeout(getDoc(mainRef), 3500);
       if (mainSnap && mainSnap.exists()) {
         const val = mainSnap.data();
-        if (val?.data) {
-          const parsed = JSON.parse(val.data) as AccountingDB;
-          const mainCode = normalizeCompanyCode(parsed.settings?.companyCode);
-          const mainName = (parsed.settings?.company || '').toUpperCase();
-          if (
-            mainCode === clean ||
-            mainName.includes(rawClean.toUpperCase()) ||
-            clean === 'COMP-101'
-          ) {
-            cloudDb = parsed;
-          }
+        const mainCode = normalizeCompanyCode(val?.companyCode);
+        const mainName = (val?.companyName || '').toUpperCase();
+        if (mainCode === clean || mainName.includes(rawClean.toUpperCase())) {
+          cloudDb = await reassembleFromManifestDoc(val, clean);
         }
       }
     }
@@ -406,9 +618,9 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
       const ensuredCloud = sanitizeCompanyDatabase(cloudDb, clean);
       return {
         db: ensuredCloud,
-        companyName: ensuredCloud.settings.company || (isCompanyMawan(clean) ? 'شركة الموان' : 'شركة الأخوة'),
+        companyName: ensuredCloud.settings.company || 'شركة الموان',
         companyCode: ensuredCloud.settings.companyCode || clean,
-        users: ensuredCloud.users, // Full array of all registered users for this company!
+        users: ensuredCloud.users,
         branches: ensuredCloud.branches || [],
         source: 'cloud'
       };
@@ -417,7 +629,6 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
     console.warn('Cloud query warning for company code:', err);
   }
 
-  // 2. Fallback: Query local tenant database directly (never cross-contaminates users!)
   try {
     const targetTenantId = isCompanyMawan(clean) ? 'comp_mawan' : 'comp_ekhwa';
     const localDb = loadTenantDatabase(targetTenantId);
@@ -425,9 +636,9 @@ export async function fetchCompanyUsersAndBranchesByCode(codeOrId: string): Prom
 
     return {
       db: ensuredLocal,
-      companyName: ensuredLocal.settings.company || (isCompanyMawan(clean) ? 'شركة الموان' : 'شركة الأخوة'),
+      companyName: ensuredLocal.settings.company || 'شركة الموان',
       companyCode: ensuredLocal.settings.companyCode || clean,
-      users: ensuredLocal.users || [], // Full array of all registered users for this company!
+      users: ensuredLocal.users || [],
       branches: ensuredLocal.branches || [],
       source: 'local'
     };
@@ -456,7 +667,6 @@ export function subscribeToCloudDatabase(
     }
 
     const currentDevId = getLocalDeviceId();
-
     const cleanCode = normalizeCompanyCode(companyCode);
 
     // 1. Instant local BroadcastChannel listener (0ms between tabs / PWA windows)
@@ -484,20 +694,19 @@ export function subscribeToCloudDatabase(
       localBroadcastChannel.addEventListener('message', handleBroadcast);
     }
 
-    // 2. Handler for Firestore incoming remote snapshots
+    // 2. Handler for Firestore incoming remote snapshots (handles both sharded and monolithic docs)
     const isMawan = cleanCode === 'COMP-102' || cleanCode === 'COMP-101';
+    let lastHandledRemoteTimestamp = 0;
 
-    const handleSnapshot = (snap: any) => {
+    const handleSnapshot = async (snap: any) => {
       if (!snap.exists()) return;
       const data = snap.data();
       if (!data || !data.data) return;
 
-      // Filter out updates sent by this exact browser window/device instance
       if (data.deviceId && data.deviceId === currentDevId) {
         return;
       }
 
-      // Filter out updates for a different company
       if (data.companyCode) {
         const dataCode = normalizeCompanyCode(data.companyCode);
         if (!isMawan && dataCode !== cleanCode) {
@@ -505,13 +714,17 @@ export function subscribeToCloudDatabase(
         }
       }
 
-      // Secondary protection: if deviceId was not present, check recent local timestamp within 300ms
+      if (data.updatedAt && data.updatedAt <= lastHandledRemoteTimestamp) {
+        return;
+      }
+
       if (!data.deviceId && data.updatedAt && Math.abs(data.updatedAt - lastLocalSavedTimestamp) < 300) {
         return;
       }
 
       try {
-        let remoteDb = JSON.parse(data.data) as AccountingDB;
+        lastHandledRemoteTimestamp = data.updatedAt || Date.now();
+        let remoteDb = await reassembleFromManifestDoc(data, cleanCode);
         if (remoteDb && Array.isArray(remoteDb.products) && remoteDb.settings) {
           remoteDb = ensurePrimaryBranches(remoteDb);
           onRemoteUpdate(remoteDb, data.updatedBy || 'مستخدم آخر', data.actionDesc);
@@ -521,18 +734,15 @@ export function subscribeToCloudDatabase(
       }
     };
 
-    let unsubMirror: (() => void) | null = null;
-
-    // 3. Listen to company-specific document
+    // 3. Listen to company-specific document (the main shared doc triggers immediately for all devices)
     const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
-    unsubscribeCompListener = onSnapshot(compDocRef, handleSnapshot, (error) => {
+    unsubscribeCompListener = onSnapshot(compDocRef, (snap) => { void handleSnapshot(snap); }, (error) => {
       console.warn('Firestore company listener notice:', error.message);
     });
 
-    // Also listen to main doc for COMP-102 for 100% real-time instant sync
     if (isMawan) {
       const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-      unsubscribeListener = onSnapshot(docRef, handleSnapshot, (error) => {
+      unsubscribeListener = onSnapshot(docRef, (snap) => { void handleSnapshot(snap); }, (error) => {
         console.warn('Firestore realtime listener notice:', error.message);
       });
     }

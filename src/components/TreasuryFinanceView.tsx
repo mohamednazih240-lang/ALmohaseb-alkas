@@ -38,8 +38,7 @@ import {
   calculateTreasuryBalance,
   logAudit,
   deleteTreasuryEntryAndRevert,
-  isBranchMatch,
-  reconcileAndDeduplicateAllFinancialRecords
+  isBranchMatch
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
@@ -435,17 +434,6 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
     onUpdateDb(updated);
   };
 
-  const handleReconcileTreasury = async () => {
-    const res = reconcileAndDeduplicateAllFinancialRecords(db);
-    if (res.duplicateVouchersRemoved > 0 || res.duplicateTreasuryRemoved > 0) {
-      onUpdateDb(res.db);
-      await pushDatabaseToCloud(res.db);
-      alert(`✓ تم فحص النظام وتطهير ${res.duplicateVouchersRemoved} سندات مكررة و ${res.duplicateTreasuryRemoved} حركات خصم مكررة ومطابقة رصيد الخزينة بالكامل!`);
-    } else {
-      alert('✓ الخزينة والسندات متطابقة تماماً وخالية من أي تكرار أو فروق حسابية!');
-    }
-  };
-
   const handleDeleteSimpleRecord = (item: SimpleRecord) => {
     const isManager = db.currentUser?.role === 'مدير';
     if (!isManager) {
@@ -774,16 +762,6 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
-                onClick={handleReconcileTreasury}
-                className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
-                title="فحص وتطهير التكرارات ومطابقة الخزينة آلياً"
-              >
-                <ShieldCheck className="w-4 h-4 text-indigo-700" />
-                <span>مطابقة وتطهير الخزينة</span>
-              </button>
-
               <button
                 type="button"
                 onClick={handleExportTreasuryCsv}
@@ -1154,7 +1132,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                   </div>
 
                   {/* Desktop Table View */}
-                  <div className="hidden sm:block overflow-x-auto">
+                  <div className="hidden sm:block">
                     <table className="w-full text-right text-xs">
                       <thead>
                         <tr className="border-b border-slate-100 text-slate-500 bg-slate-50/50">

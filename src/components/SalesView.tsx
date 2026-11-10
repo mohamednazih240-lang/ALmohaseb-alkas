@@ -33,8 +33,6 @@ import {
   formatMoney,
   logAudit,
   deleteInvoiceAndRevert,
-  wipeAllInvoicesFromSystem,
-  wipeEntireSystemToCleanSlate,
   getTodayDate
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
@@ -425,33 +423,6 @@ export const SalesView: React.FC<SalesViewProps> = ({
             </button>
           )}
 
-          {canDeleteSales && (
-            <button
-              type="button"
-              onClick={async () => {
-                const ok = window.confirm(
-                  '⚠️ تنبيه حاسم: تصفير وتنظيف النظام بالكامل للبدء على نظيف\n\n' +
-                  '• سيتم مسح كافة العملاء والموردين نهائياً (0).\n' +
-                  '• سيتم مسح كافة الأصناف والمخزون نهائياً (0).\n' +
-                  '• سيتم مسح كافة فواتير الشراء والبيع والمرتجعات نهائياً (0).\n' +
-                  '• سيتم تصفير الخزينة والحركات المالية نهائياً (0).\n' +
-                  '• ستبدأ الترقيمات من رقم 1 فورياً لكل قسم.\n' +
-                  '• سيتم الحفاظ على اسم الشركة (شركة الموان) وحسابات المديرين والفروع.\n\n' +
-                  'هل أنت متأكد تماماً من رغبتك في البدء على نظيف الآن؟'
-                );
-                if (!ok) return;
-                const wiped = wipeEntireSystemToCleanSlate(db);
-                onUpdateDb(wiped);
-                await pushDatabaseToCloud(wiped, true);
-              }}
-              className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-              title="تصفير وتنظيف النظام بالكامل للبدء على نظيف (0)"
-            >
-              <Trash2 className="w-4 h-4 text-rose-600" />
-              <span>تصفير وتنظيف النظام (0)</span>
-            </button>
-          )}
-
           {canCreateSales && (
             salesSection === 'sales' ? (
               <>
@@ -638,7 +609,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
 
         {/* Filter Badges & Date Range */}
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100">
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+          <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-[11px] font-bold text-slate-500 ml-1">الحالة:</span>
             {(['all', 'مدفوع', 'جزئي', 'آجل'] as const).map(st => (
               <button

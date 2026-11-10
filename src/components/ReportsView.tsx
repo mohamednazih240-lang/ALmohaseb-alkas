@@ -409,7 +409,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-1.5 overflow-x-auto border-b border-slate-200 pb-2">
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 pb-2">
         {[
           { id: 'income', label: 'قائمة الدخل والأرباح', icon: DollarSign },
           { id: 'sales', label: 'تقرير المبيعات والتحصيلات', icon: TrendingUp },

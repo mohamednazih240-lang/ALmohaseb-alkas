@@ -48,9 +48,6 @@ import {
   getProductForBranch,
   updateProductBranchData,
   isBranchMatch,
-  reconcileAndEnsureAllInvoiceStock,
-  verifyAndCorrectStockMovements,
-  StockMovementVerificationReport,
   normalizeArabicText
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
@@ -105,13 +102,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [showWhModal, setShowWhModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [showAdjustModal, setShowAdjustModal] = useState(false);
-  const [showReconciliationModal, setShowReconciliationModal] = useState(false);
 
   // Mobile back buttons: close open modal without leaving the view
   useModalBackHandler(showWhModal, () => setShowWhModal(false), 'inventory_wh_modal');
   useModalBackHandler(showTransferModal, () => setShowTransferModal(false), 'inventory_transfer_modal');
   useModalBackHandler(showAdjustModal, () => setShowAdjustModal(false), 'inventory_adjust_modal');
-  useModalBackHandler(showReconciliationModal, () => setShowReconciliationModal(false), 'inventory_reconciliation_modal');
 
   // Warehouse form state
   const [whName, setWhName] = useState('');
@@ -142,18 +137,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [inventoryAutoPrint, setInventoryAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('طباعة المخزون');
-  const [stockAuditReport, setStockAuditReport] = useState<StockMovementVerificationReport | null>(null);
-
-  const handleVerifyAndReconcileStock = async () => {
-    const res = verifyAndCorrectStockMovements(db);
-    onUpdateDb(res.db);
-    try {
-      await pushDatabaseToCloud(res.db);
-    } catch (e) {
-      console.warn('Sync error on stock verification:', e);
-    }
-    setStockAuditReport(res.report);
-  };
 
   // Resolve products for this specific branch (memoized)
   const branchProducts = useMemo(
@@ -787,16 +770,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
-                onClick={handleVerifyAndReconcileStock}
-                className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-                title="فحص فواتير الشراء ومطابقة أصنافها مع حركات المخزون"
-              >
-                <ShieldCheck className="w-4 h-4 text-indigo-700" />
-                <span>مطابقة أصناف المشتريات</span>
-              </button>
-
-              <button
-                type="button"
                 onClick={handleExportProductsCsv}
                 className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
                 title="تصدير كشف الأصناف إكسل"
@@ -823,16 +796,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               >
                 <Calculator className="w-4 h-4 text-slate-600" />
                 <span>تقييم وجرد</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowReconciliationModal(true)}
-                className="px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
-                title="فحص ومطابقة حركات فواتير الشراء وترحيل الأصناف إلى المخزون"
-              >
-                <CheckCircle2 className="w-4 h-4 text-blue-600" />
-                <span>مطابقة المشتريات والمخزون</span>
               </button>
 
               <button
@@ -1871,15 +1834,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setShowReconciliationModal(true)}
-                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer self-start sm:self-auto shrink-0"
-                  title="فحص ومطابقة حركات فواتير الشراء وترحيل الأصناف إلى المخزون"
-                >
-                  <CheckCircle2 className="w-4 h-4 text-white" />
-                  <span>فحص ومطابقة فواتير الشراء مع المخزون</span>
-                </button>
               </div>
 
               {/* Instant Search Bar for Products */}
@@ -2299,185 +2253,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         </div>
       )}
 
-      {/* Purchase Invoices Stock Reconciliation Modal (Section 18 Audit) */}
-      {showReconciliationModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl border border-slate-200">
-            {/* Header */}
-            <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                <div>
-                  <h2 className="text-base font-black text-slate-900">
-                    تقرير فحص ومطابقة حركات فواتير الشراء مع المخزون
-                  </h2>
-                  <p className="text-[11px] text-slate-500 font-medium">
-                    التأكد من تسجيل وترحيل كافة أصناف فواتير الشراء إلى المخزون واحتسابها بالأرصدة
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowReconciliationModal(false)}
-                className="p-1.5 hover:bg-slate-200 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Body */}
-            <div className="p-4 overflow-y-auto space-y-4 flex-1">
-              {/* Quick Sync Action */}
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div>
-                  <span className="text-xs font-black text-blue-900 block">
-                    ترحيل ومطابقة ذرية لجميع حركات فواتير الشراء
-                  </span>
-                  <span className="text-[11px] text-blue-700 font-medium">
-                    يقوم النظام بفحص كل صنف في كل فاتورة شراء وتوليد حركة المخزون الثابتة وتحديث الأرصدة فورياً دون تكرار
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const res = reconcileAndEnsureAllInvoiceStock(db);
-                    onUpdateDb(res.db);
-                    pushDatabaseToCloud(res.db, true);
-                    setToastMsg(`✓ تم بنجاح فحص ومطابقة كافة فواتير المشتريات (${res.reconciledCount} بند، و ${res.fixedMovementsCount} حركة مخزون جديدة) وتحديث الأرصدة بدقة!`);
-                  }}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-black shadow-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                  <span>إعادة ترحيل ومطابقة كافة الأصناف للمخزون الآن</span>
-                </button>
-              </div>
-
-              {/* List of Purchase Invoices and their items */}
-              {(() => {
-                const purchaseInvoices = db.invoices.filter(i => i.type === 'purchase' || i.invoiceKind === 'purchase');
-                if (purchaseInvoices.length === 0) {
-                  return (
-                    <div className="text-center py-8 text-slate-400 text-xs font-bold">
-                      لا توجد فواتير مشتريات مسجلة حالياً
-                    </div>
-                  );
-                }
-
-                return (
-                  <div className="space-y-3">
-                    {purchaseInvoices.map(inv => {
-                      const totalItems = inv.items?.length || 0;
-                      const totalUnits = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0);
-                      return (
-                        <div key={inv.id} className="border border-slate-200 rounded-xl p-3.5 bg-white shadow-2xs space-y-2.5">
-                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-black text-xs text-slate-900 bg-slate-100 px-2 py-0.5 rounded">
-                                فاتورة رقم {inv.number}
-                              </span>
-                              <span className="text-xs font-bold text-slate-700">
-                                {inv.partyName}
-                              </span>
-                              <span className="text-[10px] text-slate-400 font-mono">
-                                {inv.date}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs font-black font-mono text-emerald-700">
-                                {formatMoney(inv.total, db.settings.currency)}
-                              </span>
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-800 border border-emerald-200">
-                                ✓ مرحلة ({totalItems} أصناف / {totalUnits} قطعة)
-                              </span>
-                              {onPreviewInvoice && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setShowReconciliationModal(false);
-                                    onPreviewInvoice(inv);
-                                  }}
-                                  className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Eye className="w-3.5 h-3.5" />
-                                  <span>معاينة</span>
-                                </button>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Items table */}
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-[11px] text-right border-collapse">
-                              <thead>
-                                <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
-                                  <th className="p-1.5">م</th>
-                                  <th className="p-1.5">اسم الصنف بالفاتورة</th>
-                                  <th className="p-1.5 text-center">الكمية بالفاتورة</th>
-                                  <th className="p-1.5 text-center">سعر الشراء</th>
-                                  <th className="p-1.5 text-center">الإجمالي</th>
-                                  <th className="p-1.5 text-center">حالة حركة المخزون</th>
-                                  <th className="p-1.5 text-center">الرصيد الحالي بالمخزن</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-100">
-                                {(inv.items || []).map((it, idx) => {
-                                  const matchedProd = db.products.find(p =>
-                                    (it.productId && p.id === it.productId) ||
-                                    (it.productCode && p.code.toLowerCase() === it.productCode.toLowerCase()) ||
-                                    (it.productName && p.name.trim().toLowerCase() === it.productName.trim().toLowerCase())
-                                  );
-                                  const hasMovement = db.stockMovements.some(sm =>
-                                    sm.sourceId === inv.id && (sm.productId === it.productId || (matchedProd && sm.productId === matchedProd.id))
-                                  );
-
-                                  return (
-                                    <tr key={idx} className="hover:bg-slate-50/70">
-                                      <td className="p-1.5 font-mono text-slate-400">{idx + 1}</td>
-                                      <td className="p-1.5 font-bold text-slate-900">{it.productName}</td>
-                                      <td className="p-1.5 text-center font-mono font-black text-blue-700">{it.qty} {it.unit || 'قطعة'}</td>
-                                      <td className="p-1.5 text-center font-mono">{it.unitPrice}</td>
-                                      <td className="p-1.5 text-center font-mono font-bold text-slate-800">{it.total}</td>
-                                      <td className="p-1.5 text-center">
-                                        {hasMovement ? (
-                                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                                            ✓ مسجلة ومرحلة
-                                          </span>
-                                        ) : (
-                                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
-                                            ⚠️ تلقائي
-                                          </span>
-                                        )}
-                                      </td>
-                                      <td className="p-1.5 text-center font-mono font-black text-emerald-700">
-                                        {matchedProd ? `${matchedProd.currentQty} ${matchedProd.unit || 'قطعة'}` : '—'}
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Footer */}
-            <div className="p-3 border-t border-slate-200 bg-slate-50 flex justify-end rounded-b-2xl">
-              <button
-                type="button"
-                onClick={() => setShowReconciliationModal(false)}
-                className="px-4 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-bold hover:bg-black cursor-pointer"
-              >
-                إغلاق
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Universal Print Modal for Inventory & Products */}
       <UniversalPrintModal
         isOpen={printModalOpen}
@@ -2487,82 +2262,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         settings={db.settings}
         autoPrint={inventoryAutoPrint}
       />
-
-      {/* Stock Verification & Reconciliation Report Modal */}
-      {stockAuditReport && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-2xl w-full border border-slate-200 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="px-5 py-4 bg-indigo-600 text-white flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-indigo-200" />
-                <h3 className="text-base font-black">تقرير فحص ومطابقة أصناف المشتريات بالمخزون</h3>
-              </div>
-              <button
-                onClick={() => setStockAuditReport(null)}
-                className="text-indigo-200 hover:text-white p-1 rounded-lg cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-5 space-y-4 overflow-y-auto">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-center">
-                  <span className="text-[11px] text-slate-500 font-bold block mb-1">فواتير الشراء المفحوصة</span>
-                  <span className="text-lg font-black font-mono text-slate-900">{stockAuditReport.totalPurchaseInvoices}</span>
-                </div>
-                <div className="bg-emerald-50 p-3 rounded-xl border border-emerald-200 text-center">
-                  <span className="text-[11px] text-emerald-700 font-bold block mb-1">حركات مخزنية تم إدراجها</span>
-                  <span className="text-lg font-black font-mono text-emerald-800">{stockAuditReport.missingMovementsAdded}</span>
-                </div>
-                <div className="bg-blue-50 p-3 rounded-xl border border-blue-200 text-center">
-                  <span className="text-[11px] text-blue-700 font-bold block mb-1">أصناف تم تدقيق أرصدتها</span>
-                  <span className="text-lg font-black font-mono text-blue-800">{stockAuditReport.correctedProductsCount}</span>
-                </div>
-                <div className="bg-amber-50 p-3 rounded-xl border border-amber-200 text-center">
-                  <span className="text-[11px] text-amber-700 font-bold block mb-1">فروق الخزينة المعالجة</span>
-                  <span className="text-lg font-black font-mono text-amber-800">{stockAuditReport.treasuryDiscrepanciesFixed}</span>
-                </div>
-              </div>
-
-              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 space-y-2">
-                <h4 className="text-xs font-black text-slate-800 flex items-center gap-1.5">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>حالة المخزون بعد الفحص والمطابقة:</span>
-                </h4>
-                <div className="text-xs text-slate-600 space-y-1">
-                  <p>• إجمالي الأصناف في الكتالوج: <strong>{stockAuditReport.totalCatalogProducts} صنف</strong></p>
-                  <p>• إجمالي رصيد الوحدات الفعلي بالمخازن: <strong>{stockAuditReport.totalStockUnitsInWarehouse} وحدة</strong></p>
-                  <p className="text-emerald-700 font-bold">✓ كافة حركات الشراء تم تأمينها بمعرفات حتمية فريدة لمنع التكرار المستقبلي.</p>
-                </div>
-              </div>
-
-              {stockAuditReport.details.length > 0 && (
-                <div className="space-y-2">
-                  <h4 className="text-xs font-black text-slate-800">سجل الفواتير التي تم فحص أصنافها:</h4>
-                  <div className="space-y-1 max-h-40 overflow-y-auto bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs font-mono text-slate-700">
-                    {stockAuditReport.details.map((d, idx) => (
-                      <div key={idx} className="py-0.5 border-b border-slate-200/50 last:border-none">
-                        • {d}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setStockAuditReport(null)}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-all cursor-pointer"
-              >
-                إغلاق وتأكيد
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

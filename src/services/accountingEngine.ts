@@ -182,8 +182,8 @@ export function postInvoiceTransaction(
     // Auto-register new item if absent
     if (!prod && item.productName && item.productName.trim()) {
       const newCode = item.productCode || `PRD-${100 + updated.products.length + 1}`;
-      const unitBuy = isPurchase ? item.unitPrice : (item.costPrice || (item.unitPrice > 0 ? item.unitPrice * 0.75 : 0));
-      const unitSell = isSale ? item.unitPrice : (unitBuy > 0 ? unitBuy * 1.25 : 100);
+      const unitBuy = isPurchase ? item.unitPrice : (item.costPrice || 0);
+      const unitSell = isSale ? item.unitPrice : 0;
       prod = {
         id: (item.productId && item.productId.startsWith('prod_')) ? item.productId : `prod_${cleanIdPart(item.productName)}`,
         name: item.productName.trim(),
@@ -630,8 +630,9 @@ export function cancelOrDeleteInvoiceTransaction(
     );
   }
 
-  // 7. Remove the invoice itself
+  // 7. Remove the invoice itself & permanently tombstone its ID
   updated.invoices = updated.invoices.filter(i => i.id !== targetInv.id);
+  updated.deletedInvoiceIds = Array.from(new Set([...(updated.deletedInvoiceIds || []), targetInv.id]));
 
   // 8. Update party balance
   if (targetInv.partyId) {
