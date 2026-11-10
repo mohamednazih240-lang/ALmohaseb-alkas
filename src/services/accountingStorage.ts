@@ -802,14 +802,26 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     const branchName = inv.branchName || db.branches?.find(b => b.id === targetBranch)?.name || defaultBranchName;
     let invHadMissing = false;
 
-    // إعادة احتساب إجمالي بنود الفاتورة لضمان زيادة الإجمالي عند إضافة أصناف
-    const calculatedItemsTotal = inv.items.reduce((s, it) => s + (Number(it.total) || ((Number(it.qty) || 0) * (Number(it.unitPrice || it.costPrice || (it as any).price) || 0))), 0);
-    if (calculatedItemsTotal > 0 && Math.abs((Number(inv.total) || 0) - calculatedItemsTotal) > 0.05) {
+    // إعادة احتساب صافي إجمالي الفاتورة مع الحفاظ الصارم على طرح الخصم وإضافة الضريبة والإيرادات الإضافية
+    const calculatedItemsTotal = Number(
+      inv.items.reduce((s, it) => s + (Number(it.total) || ((Number(it.qty) || 0) * (Number(it.unitPrice || it.costPrice || (it as any).price) || 0))), 0).toFixed(2)
+    );
+    const invDiscAmt = Number(inv.discount) || 0;
+    const invTaxAmt = Number(inv.tax) || 0;
+    const invExtraAmt = Number(inv.extraIncomeVal) || 0;
+    const expectedNetTotal = Math.max(0, Number((calculatedItemsTotal - invDiscAmt + invTaxAmt + invExtraAmt).toFixed(2)));
+
+    if (calculatedItemsTotal > 0) {
       inv.subtotal = calculatedItemsTotal;
-      inv.total = calculatedItemsTotal;
-      if (inv.status === 'مدفوع' || (inv.paymentMethod && inv.paymentMethod !== 'آجل')) {
-        inv.paid = calculatedItemsTotal;
-        inv.remaining = 0;
+      if (Math.abs((Number(inv.total) || 0) - expectedNetTotal) > 0.05) {
+        inv.total = expectedNetTotal;
+        if (inv.status === 'مدفوع' || (inv.paymentMethod && inv.paymentMethod !== 'آجل')) {
+          inv.paid = expectedNetTotal;
+          inv.remaining = 0;
+        } else {
+          inv.paid = Math.min(expectedNetTotal, Number(inv.paid) || 0);
+          inv.remaining = Math.max(0, Number((expectedNetTotal - inv.paid).toFixed(2)));
+        }
       }
     }
 

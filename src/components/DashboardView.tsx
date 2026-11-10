@@ -131,27 +131,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Top Welcome & Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-slate-200">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-              لوحة المؤشرات والرقابة المالية
-            </h1>
-            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
-              <Building className="w-3 h-3" />
-              <span>{currentBranch.name}</span>
-            </span>
-          </div>
-          <p className="text-xs text-slate-500 font-medium">
-            متابعة حية ومستقلة لمبيعات ومشتريات وخزائن ومخزون ({currentBranch.name})
-          </p>
+      {/* Top Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-200">
+        <div className="min-w-0">
+          <h1 className="text-lg sm:text-2xl font-black text-slate-900 tracking-tight">
+            لوحة المؤشرات والرقابة المالية
+          </h1>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 max-w-full">
           {/* Quick Branch Switcher in Dashboard */}
-          <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
-            <span className="font-bold text-slate-600 px-1">الفرع:</span>
+          <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs w-full sm:w-auto max-w-full min-w-0">
+            <span className="font-bold text-slate-600 px-1 shrink-0">الفرع:</span>
             <select
               value={targetBranch}
               onChange={(e) => {
@@ -161,7 +152,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   setSelectedBranchId(e.target.value);
                 }
               }}
-              className="bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-900 shadow-2xs focus:ring-1 focus:ring-black cursor-pointer"
+              className="flex-1 min-w-0 max-w-full truncate bg-white border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-900 shadow-2xs focus:ring-1 focus:ring-black cursor-pointer"
             >
               {branches.map(b => (
                 <option key={b.id} value={b.id}>{b.name} {b.isMain ? '(الرئيسي)' : ''}</option>
@@ -171,14 +162,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           <button
             onClick={() => onOpenInvoiceModal('sale')}
-            className="px-3.5 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+            className="flex-1 sm:flex-initial px-3.5 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
           >
             <ShoppingCart className="w-3.5 h-3.5" />
             <span>+ فاتورة بيع فورية</span>
           </button>
           <button
             onClick={() => onOpenInvoiceModal('purchase')}
-            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+            className="flex-1 sm:flex-initial px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer"
           >
             <ShoppingBag className="w-3.5 h-3.5" />
             <span>+ فاتورة شراء</span>
@@ -186,18 +177,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       </div>
 
-      {/* 1. TOP SECTION: Quick Operations Launchpad (الكروت السريعة بالواجهة الرئيسية بالأعلى) */}
-      <div className="bg-white p-4 sm:p-5 rounded-2xl border-2 border-slate-200 shadow-xs">
-        <div className="flex items-center justify-between mb-3.5">
-          <div>
-            <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span>مركز العمليات والإجراءات السريعة</span>
-            </h2>
-            <p className="text-[11px] text-slate-500">
-              تنفيذ القيود والفواتير والسندات المحاسبية مباشرة بنقرة زر واحدة
-            </p>
-          </div>
+      {/* 1. TOP SECTION: Quick Operations Launchpad */}
+      <div className="bg-white p-3.5 sm:p-5 rounded-2xl border-2 border-slate-200 shadow-xs">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-black text-slate-900 flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+            <span>مركز العمليات والإجراءات السريعة</span>
+          </h2>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
@@ -210,7 +196,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <ShoppingCart className="w-5 h-5" />
             </div>
             <span className="text-xs font-bold text-slate-900">فاتورة بيع</span>
-            <span className="text-[10px] text-slate-400">إيراد ومخزن</span>
           </button>
 
           {/* Card 2: Purchase */}
@@ -222,7 +207,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <ShoppingBag className="w-5 h-5" />
             </div>
             <span className="text-xs font-bold text-slate-900">فاتورة شراء</span>
-            <span className="text-[10px] text-slate-400">توريد وتكلفة</span>
           </button>
 
           {/* Card 3: Receipt */}
@@ -234,7 +218,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Receipt className="w-5 h-5" />
             </div>
             <span className="text-xs font-bold text-slate-900">سند قبض</span>
-            <span className="text-[10px] text-slate-400">تحصيل عميل</span>
           </button>
 
           {/* Card 4: Payment */}
@@ -246,7 +229,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <CreditCard className="w-5 h-5" />
             </div>
             <span className="text-xs font-bold text-slate-900">سند صرف</span>
-            <span className="text-[10px] text-slate-400">سداد مورد</span>
           </button>
 
           {/* Card 5: Add Product */}
@@ -258,7 +240,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Package className="w-5 h-5" />
             </div>
             <span className="text-xs font-bold text-slate-900">صنف جديد</span>
-            <span className="text-[10px] text-slate-400">باركود وتسعير</span>
           </button>
 
           {/* Card 6: Add Customer */}
@@ -270,7 +251,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Users className="w-5 h-5" />
             </div>
             <span className="text-xs font-bold text-slate-900">عميل جديد</span>
-            <span className="text-[10px] text-slate-400">بيانات وائتمان</span>
           </button>
 
           {/* Card 7: Treasury Movement */}
@@ -282,7 +262,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Wallet className="w-5 h-5" />
             </div>
             <span className="text-xs font-bold text-slate-900">حركة خزينة</span>
-            <span className="text-[10px] text-slate-400">إيداع / سحب</span>
           </button>
 
           {/* Card 8: Physical Inventory */}
@@ -294,7 +273,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Boxes className="w-5 h-5" />
             </div>
             <span className="text-xs font-bold text-slate-900">تسوية جرد</span>
-            <span className="text-[10px] text-slate-400">مطابقة الفعلي</span>
           </button>
         </div>
       </div>
@@ -451,9 +429,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <h2 className="text-sm font-black text-slate-900">
                 مقارنة المبيعات والمشتريات خلال آخر 7 أيام
               </h2>
-              <p className="text-[11px] text-slate-500">
-                متابعة حركة النشاط التجاري وتدفق البضائع اليومي
-              </p>
             </div>
             <div className="flex items-center gap-3 text-xs font-bold">
               <div className="flex items-center gap-1.5">
@@ -498,8 +473,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             })}
           </div>
 
-          <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
-            <span>ملاحظة: البيانات تتحدث فورياً مع كل فاتورة مسجلة</span>
+          <div className="mt-3 flex items-center justify-end text-xs text-slate-500">
             <button
               onClick={() => onNavigate('reports')}
               className="font-bold text-black hover:underline flex items-center gap-1"
@@ -513,7 +487,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         {/* Treasury balances per method */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between">
           <div>
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-black text-slate-900">
                 أرصدة قنوات الدفع والخزينة
               </h2>
@@ -524,9 +498,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 إدارة
               </button>
             </div>
-            <p className="text-[11px] text-slate-500 mb-4">
-              الرصيد الفعلي المتوفر في كل حساب وطريقة دفع
-            </p>
 
             <div className="space-y-2.5">
               {channels.map((ch, idx) => (
@@ -613,14 +584,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         {/* Recent Invoices Card System (No Horizontal Scroll) */}
         <div className="lg:col-span-2 bg-white p-4 sm:p-5 rounded-xl border border-slate-200 shadow-2xs">
           <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-sm font-black text-slate-900">
-                أحدث الفواتير والحركات التجارية
-              </h2>
-              <p className="text-[11px] text-slate-500">
-                سجل آخر الفواتير المنشأة للمبيعات والمشتريات
-              </p>
-            </div>
+            <h2 className="text-sm font-black text-slate-900">
+              أحدث الفواتير والحركات التجارية
+            </h2>
             <button
               onClick={() => onNavigate('sales')}
               className="text-xs text-black font-bold hover:underline"

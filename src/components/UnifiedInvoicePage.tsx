@@ -594,7 +594,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setInvoiceItems([...editingInvoice.items]);
 
       setGlobalInvDisc(editingInvoice.discount > 0 ? String(editingInvoice.discount) : '');
-      setInvDiscType(editingInvoice.discountType || 'val');
+      setInvDiscType('val');
       setGlobalInvTax(editingInvoice.tax > 0 ? String(editingInvoice.tax) : '');
       setInvTaxType(editingInvoice.taxType || 'percent');
       setExtraIncomeName(editingInvoice.extraIncomeName || '');

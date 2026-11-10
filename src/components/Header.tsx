@@ -78,9 +78,9 @@ const HeaderComponent: React.FC<HeaderProps> = ({
 
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 shadow-xs select-none w-full max-w-full">
-      <div className="flex items-center justify-between px-2.5 sm:px-4 py-2 h-14 sm:h-16 max-w-full">
-        {/* Right side (RTL start): Toggle, Brand, Current view, Branch (Desktop) */}
-        <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
+      <div className="flex items-center justify-between gap-2 px-2.5 sm:px-4 py-2 h-13 sm:h-16 max-w-full">
+        {/* Right side (RTL start): Toggle, Brand, Current view, Company Badge (sm+) */}
+        <div className="flex items-center gap-1.5 sm:gap-3 min-w-0 flex-1">
           <button
             onClick={onToggleSidebar}
             className="p-1.5 sm:p-2 text-slate-800 hover:text-black hover:bg-slate-100 rounded-lg transition-colors focus:outline-hidden cursor-pointer shrink-0"
@@ -110,13 +110,13 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Company Badge */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 text-white rounded-xl text-xs font-bold shadow-2xs shrink-0 border border-slate-700">
+          {/* Company Badge (Desktop & Tablet only - mobile gets clean dedicated sub-bar below to prevent icon overlap) */}
+          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 text-white rounded-xl text-xs font-bold shadow-2xs shrink-0 border border-slate-700 max-w-[240px]">
             <Building2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span className="font-black truncate max-w-[120px] sm:max-w-[160px]">
+            <span className="font-black truncate">
               {settings.company || 'شركة الموان'}
             </span>
-            <span className="text-[9.5px] font-mono bg-blue-500 text-white px-1.5 py-0.2 rounded font-bold">
+            <span className="text-[9.5px] font-mono bg-blue-500 text-white px-1.5 py-0.2 rounded font-bold shrink-0">
               {settings.companyCode || 'COMP-102'}
             </span>
           </div>
@@ -337,12 +337,12 @@ const HeaderComponent: React.FC<HeaderProps> = ({
           </button>
         </div>
 
-        {/* MOBILE HEADER (sm:hidden): Clean, spacious, with the 3-dots (⋮) Menu Button requested by user */}
-        <div className="flex sm:hidden items-center gap-1.5 shrink-0">
+        {/* MOBILE HEADER (sm:hidden): Clean, spacious, zero-overlap */}
+        <div className="flex sm:hidden items-center gap-1 shrink-0">
           {/* Quick search button */}
           <button
             onClick={onOpenQuickSearch}
-            className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 rounded-lg cursor-pointer"
+            className="p-1.5 text-slate-700 hover:text-black hover:bg-slate-100 rounded-lg cursor-pointer shrink-0"
             title="بحث"
             aria-label="بحث"
           >
@@ -354,39 +354,52 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             type="button"
             onClick={handleSyncClick}
             disabled={isSyncing}
-            className="flex items-center gap-1 px-2 py-1 bg-emerald-50 active:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-bold cursor-pointer"
+            className="flex items-center gap-1 px-1.5 py-1 bg-emerald-50 active:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-bold cursor-pointer shrink-0"
             title="مزامنة لحظية مباشرة بين الأجهزة (انقر للتحديث الفوري)"
           >
-            <span className="relative flex h-2 w-2">
+            <span className="relative flex h-1.5 w-1.5">
               <span className={`absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 ${isSyncing ? 'animate-ping' : ''}`}></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
             </span>
-            <span className="text-[10px] font-bold">{isSyncing ? 'تحديث...' : 'مزامنة'}</span>
+            <span className="text-[10px] font-bold whitespace-nowrap">{isSyncing ? 'تحديث...' : 'مزامنة'}</span>
           </button>
 
           {/* User Avatar Circle */}
           <div 
             onClick={onOpenLogin}
-            className="w-7 h-7 rounded-full bg-slate-900 text-white flex items-center justify-center font-bold text-xs shadow-2xs cursor-pointer border border-slate-200"
+            className="w-7 h-7 rounded-full bg-slate-900 text-white flex items-center justify-center font-bold text-[11px] shadow-2xs cursor-pointer border border-slate-200 shrink-0"
             title={`المستخدم الحالي: ${currentUser?.name || 'المدير'}`}
           >
             {currentUser?.name ? currentUser.name.charAt(0) : 'م'}
           </div>
 
-          {/* The 3 Vertical Dots (⋮) Menu Button - Opens dedicated full page */}
+          {/* The 3 Vertical Dots (⋮) Menu Button */}
           <button
             type="button"
             onClick={() => onQuickAction('open_quick_menu')}
-            className="p-1.5 text-slate-800 hover:text-black bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 transition-colors cursor-pointer relative"
+            className="p-1.5 text-slate-800 hover:text-black bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 transition-colors cursor-pointer relative shrink-0"
             title="القائمة السريعة ومركز العمليات (ثلاث نقاط)"
             aria-label="خيارات وأدوات الهيدر"
           >
-            <MoreVertical className="w-5 h-5 text-slate-900" />
+            <MoreVertical className="w-4 h-4 text-slate-900" />
             {lowStockCount > 0 && (
               <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-amber-500 rounded-full ring-2 ring-white" />
             )}
           </button>
         </div>
+      </div>
+
+      {/* MOBILE ROW 2 (sm:hidden): Organized Company Name & Code Bar with Zero Collision */}
+      <div className="sm:hidden flex items-center justify-between gap-2 px-2.5 py-1.5 bg-slate-900 text-white border-t border-slate-800 text-[11px]">
+        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+          <Building2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <span className="font-black truncate">
+            {settings.company || 'شركة الموان'}
+          </span>
+        </div>
+        <span className="text-[9.5px] font-mono bg-blue-600 text-white px-2 py-0.5 rounded font-bold shrink-0">
+          {settings.companyCode || 'COMP-102'}
+        </span>
       </div>
     </header>
   );

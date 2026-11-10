@@ -197,19 +197,22 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
     sales.forEach(inv => {
       inv.items.forEach(it => {
-        const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode || p.name === it.productName);
-        const costInfo = costIndex.getCost(it.productId, it.productName);
+        const normName = it.productName ? it.productName.trim().toLowerCase() : '';
+        const prod = db.products.find(p => p.id === it.productId || (it.productCode && p.code === it.productCode) || (normName && p.name.trim().toLowerCase() === normName));
+        const groupKey = prod?.id || it.productId || normName || it.productName;
+        const costInfo = costIndex.getCost(prod?.id || it.productId, it.productName);
         const hasVerified = costInfo.hasPurchases;
         const verifiedCost = hasVerified
-          ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
+          ? ((db.settings.cost === 'average') ? (costInfo.avgCost || costInfo.latestBuyPrice) : (costInfo.latestBuyPrice || costInfo.avgCost))
           : (it.costPrice && it.costPrice > 0 ? it.costPrice : 0);
-        const itemRev = it.total;
-        const itemCost = it.qty * verifiedCost;
+        const itemQty = Number(it.qty) || 0;
+        const itemRev = Number(it.total) || (itemQty * (Number(it.unitPrice) || 0));
+        const itemCost = itemQty * verifiedCost;
 
-        if (!map.has(it.productId)) {
-          map.set(it.productId, {
+        if (!map.has(groupKey)) {
+          map.set(groupKey, {
             product: prod,
-            productId: it.productId,
+            productId: groupKey,
             code: it.productCode || prod?.code || '—',
             name: it.productName || prod?.name || 'صنف',
             category: prod?.category || 'عام',
@@ -222,8 +225,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           });
         }
 
-        const entry = map.get(it.productId)!;
-        entry.qtySold += it.qty;
+        const entry = map.get(groupKey)!;
+        entry.qtySold += itemQty;
         entry.totalRevenue += itemRev;
         entry.totalCost += itemCost;
         if (hasVerified) {
@@ -234,15 +237,21 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     });
 
     const list = Array.from(map.values()).map(item => {
-      const profit = item.hasVerifiedCost ? (item.totalRevenue - item.totalCost) : 0;
-      const margin = (item.hasVerifiedCost && item.totalRevenue > 0) ? (profit / item.totalRevenue) * 100 : 0;
       const actualSellPrice = item.qtySold > 0
         ? Number((item.totalRevenue / item.qtySold).toFixed(2))
         : (item.product?.sellPrice && item.product.sellPrice > 0 ? item.product.sellPrice : 0);
+      const totalCost = item.hasVerifiedCost ? Number(item.totalCost.toFixed(2)) : 0;
+      const profit = item.hasVerifiedCost ? Number((item.totalRevenue - totalCost).toFixed(2)) : 0;
+      const unitNetProfit = item.hasVerifiedCost
+        ? Number((actualSellPrice - item.verifiedCostPrice).toFixed(2))
+        : 0;
+      const margin = (item.hasVerifiedCost && item.totalRevenue > 0) ? (profit / item.totalRevenue) * 100 : 0;
 
       return {
         ...item,
+        totalCost,
         actualSellPrice,
+        unitNetProfit,
         profit,
         margin
       };
@@ -258,7 +267,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         it.category.toLowerCase().includes(q)
       );
     });
-  }, [db, dateFilter, fromDate, toDate, searchQuery]);
+  }, [db, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
 
   // Grand Total of Item Profits
   const grandTotalItemProfits = useMemo(() => {
@@ -353,46 +362,53 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     setPrintModalOpen(true);
   };
 
-  // Batch Print all product profits
+  // Batch Print all product profits (Image 2 clean bordered table style)
   const handleBatchPrintItems = () => {
     if (itemProfitsData.length === 0) {
       alert('لا توجد أصناف للطباعة');
       return;
     }
 
+    const totalItemsRevenue = itemProfitsData.reduce((s, it) => s + it.totalRevenue, 0);
+    const totalItemsCost = itemProfitsData.reduce((s, it) => s + it.totalCost, 0);
+
     const block: MovementPrintBlock = {
-      title: 'تقرير أرباح الأصناف المبيعة',
-      serialNo: `#ITEMS-${Date.now().toString().slice(-4)}`,
+      title: 'تقرير أرباح الأصناف التفصيلي',
+      serialNo: `#PROF-${Date.now().toString().slice(-4)}`,
       date: today,
       time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
       partyLabel: 'النطاق الزمني:',
       partyName: dateFilter === 'all' ? 'جميع الفترات' : `من ${fromDate || today} إلى ${toDate || today}`,
-      partySubId: `إجمالي الأصناف: ${itemProfitsData.length}`,
+      partySubId: `عدد الأصناف المخرجة: ${itemProfitsData.length}`,
       badge: 'تقرير معتمد',
-      typeTitle: 'أرباح ومبيعات الأصناف',
+      typeTitle: 'بيان أرباح الأصناف',
       tableHeaders: [
-        { label: 'كود الصنف', width: '12%', align: 'right' },
-        { label: 'اسم الصنف', width: '30%', align: 'right' },
-        { label: 'الكمية', width: '10%', align: 'center' },
-        { label: 'إجمالي المبيعات', width: '16%', align: 'center' },
-        { label: 'إجمالي التكلفة', width: '16%', align: 'center' },
-        { label: 'صافي الربح', width: '16%', align: 'center' }
+        { label: 'اسم الصنف', width: '32%', align: 'right' },
+        { label: 'الكمية المخرجة', width: '12%', align: 'center' },
+        { label: 'سعر الشراء', width: '14%', align: 'center' },
+        { label: 'سعر البيع', width: '14%', align: 'center' },
+        { label: 'الربح الصافي', width: '14%', align: 'center' },
+        { label: 'إجمالي الربح للصنف', width: '14%', align: 'center' }
       ],
       tableRows: itemProfitsData.map(it => ({
         cols: [
-          it.code,
           it.name,
           formatCleanNumber(it.qtySold),
-          formatCleanNumber(it.totalRevenue),
-          formatCleanNumber(it.totalCost),
-          formatCleanNumber(it.profit)
+          it.hasVerifiedCost ? formatCleanNumber(it.verifiedCostPrice) : 'غير محدد',
+          formatCleanNumber(it.actualSellPrice),
+          it.hasVerifiedCost ? formatCleanNumber(it.unitNetProfit) : '—',
+          it.hasVerifiedCost ? formatCleanNumber(it.profit) : '—'
         ],
         isBold: false
       })),
       summaryLines: [
-        { label: 'إجمالي أرباح الأصناف بالكامل', value: `${formatCleanNumber(grandTotalItemProfits)} ${db.settings.currency}`, isTotal: true }
+        { label: 'إجمالي المبيعات للأصناف', value: `${formatCleanNumber(totalItemsRevenue)} ${db.settings.currency}` },
+        { label: 'إجمالي تكلفة الشراء', value: `${formatCleanNumber(totalItemsCost)} ${db.settings.currency}` },
+        { label: 'إجمالي أرباح الأصناف', value: `${formatCleanNumber(grandTotalItemProfits)} ${db.settings.currency}`, highlight: true },
+        { label: 'المصروفات التشغيلية', value: `${formatCleanNumber(operatingExpenses)} ${db.settings.currency}` },
+        { label: 'صافي ربح النشاط التجاري', value: `${formatCleanNumber(grandTotalItemProfits - operatingExpenses)} ${db.settings.currency}`, isTotal: true }
       ],
-      footerNotes: 'تم احتساب تكلفة الأصناف بدقة بناءً على أسعار الشراء المسجلة بالنظام.',
+      footerNotes: 'تم احتساب سعر الشراء من فواتير الشراء المسجلة وسعر البيع من فواتير البيع الفعلية.',
       createdBy: db.currentUser?.name
     };
 
@@ -502,25 +518,20 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   };
 
   return (
-    <div className="space-y-4 pb-12">
+    <div className="space-y-3.5 pb-12">
       {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-slate-200">
-        <div>
-          <h1 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-            <TrendingUp className="w-6 h-6 text-blue-600" />
-            <span>قسم تحليل الأرباح (أرباح الفواتير والأصناف)</span>
-          </h1>
-          <p className="text-xs text-slate-500 font-medium mt-0.5">
-            عرض الأرباح التفصيلية لكل فاتورة وكل صنف مبيوع، مع إجمالي الأرباح الصافي في الأسفل
-          </p>
-        </div>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-2 border-b border-slate-200">
+        <h1 className="text-base sm:text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
+          <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6 text-blue-600 shrink-0" />
+          <span>قسم تحليل الأرباح (أرباح الفواتير والأصناف)</span>
+        </h1>
 
         {/* Tab switcher */}
         <div className="flex items-center gap-2">
-          <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs font-bold">
+          <div className="flex bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs font-bold w-full sm:w-auto">
             <button
               onClick={() => setProfitTab('invoices')}
-              className={`px-3 py-1.5 rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
+              className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
                 profitTab === 'invoices' ? 'bg-white text-slate-900 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
               }`}
             >
@@ -529,7 +540,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             </button>
             <button
               onClick={() => setProfitTab('items')}
-              className={`px-3 py-1.5 rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
+              className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
                 profitTab === 'items' ? 'bg-white text-slate-900 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
               }`}
             >
@@ -540,32 +551,79 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         </div>
       </div>
 
-      {/* Branch Isolation Filter Bar */}
-      <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex items-center gap-2">
-          <span className="font-bold text-slate-700">تحليل أرباح فرع:</span>
-          <select
-            value={selectedBranchId}
-            onChange={(e) => {
-              if (onSelectBranch && e.target.value !== 'all') {
-                onSelectBranch(e.target.value);
-              } else {
-                setSelectedBranchId(e.target.value);
-              }
-            }}
-            className="bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-bold text-slate-900 shadow-2xs focus:ring-1 focus:ring-black cursor-pointer"
+      {/* TOP SECTION: Grand Total Profit Counter Banner (بأعلى الصفحة) */}
+      <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white rounded-xl p-3 sm:p-4 shadow-md flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 bg-white/20 rounded-xl flex items-center justify-center text-white shrink-0">
+              <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-xs sm:text-sm font-black text-white block truncate">
+                {profitTab === 'invoices' ? 'عداد الأرباح الإجمالية للنشاط' : 'عداد أرباح الأصناف المخرجة'}
+              </span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleBatchPrintItems}
+            className="px-2.5 py-1.5 bg-white text-emerald-900 hover:bg-emerald-50 rounded-lg text-[11px] font-black transition-all flex items-center gap-1 shadow-xs shrink-0 cursor-pointer"
           >
-            <option value="all">🌐 كافة الفروع مجتمعة (مجمّع)</option>
-            {branches.map(b => (
-              <option key={b.id} value={b.id}>
-                📍 {b.name} {b.isMain ? '(الرئيسي)' : ''}
-              </option>
-            ))}
-          </select>
+            <Printer className="w-3.5 h-3.5" />
+            <span>معاينة وطباعة الأرباح</span>
+          </button>
         </div>
-        <div className="text-[11px] text-slate-500 font-medium">
-          يتم احتساب تكلفة البضاعة وهوامش الربح وفقاً لأسعار وتكاليف كل فرع بشكل مستقل تماماً
+
+        <div className="grid grid-cols-3 gap-2">
+          <div className="text-center bg-black/20 px-2 sm:px-3.5 py-2 rounded-xl border border-white/20">
+            <span className="text-[10px] font-bold text-emerald-100 block truncate">
+              {profitTab === 'invoices' ? 'ربح البضاعة' : 'ربح الأصناف'}
+            </span>
+            <span className="text-xs sm:text-base font-black font-mono tracking-tight text-white">
+              {formatMoney(profitTab === 'invoices' ? grandTotalInvoiceProfits : grandTotalItemProfits, db.settings.currency)}
+            </span>
+          </div>
+          <div className="text-center bg-black/20 px-2 sm:px-3.5 py-2 rounded-xl border border-white/20">
+            <span className="text-[10px] font-bold text-rose-200 block truncate">
+              المصروفات
+            </span>
+            <span className="text-xs sm:text-base font-black font-mono tracking-tight text-rose-200">
+              {formatMoney(operatingExpenses, db.settings.currency)}
+            </span>
+          </div>
+          <div className="text-center bg-emerald-950/60 px-2 sm:px-4 py-2 rounded-xl border-2 border-emerald-300 shadow-xs">
+            <span className="text-[10px] font-black text-emerald-300 block truncate">
+              صافي الربح
+            </span>
+            <span className="text-xs sm:text-lg font-black font-mono tracking-tight text-white">
+              {formatMoney((profitTab === 'invoices' ? netBusinessProfit : (grandTotalItemProfits - operatingExpenses)), db.settings.currency)}
+            </span>
+          </div>
         </div>
+      </div>
+
+      {/* Branch Filter Bar (Zero Horizontal Overflow) */}
+      <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex items-center gap-2 text-xs max-w-full min-w-0">
+        <span className="font-bold text-slate-700 shrink-0">الفرع:</span>
+        <select
+          value={selectedBranchId}
+          onChange={(e) => {
+            if (onSelectBranch && e.target.value !== 'all') {
+              onSelectBranch(e.target.value);
+            } else {
+              setSelectedBranchId(e.target.value);
+            }
+          }}
+          className="flex-1 min-w-0 max-w-full truncate bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-bold text-slate-900 shadow-2xs focus:ring-1 focus:ring-black cursor-pointer"
+        >
+          <option value="all">🌐 كافة الفروع مجتمعة (مجمّع)</option>
+          {branches.map(b => (
+            <option key={b.id} value={b.id}>
+              📍 {b.name} {b.isMain ? '(الرئيسي)' : ''}
+            </option>
+          ))}
+        </select>
       </div>
 
       {/* Date Filters & Search Bar */}
@@ -596,12 +654,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           </div>
 
           {/* Export Actions */}
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={profitTab === 'invoices' ? handleExportInvoicesCsv : handleExportItemsCsv}
               className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-              title="تصدير جدول الأرباح الحالي إلى Excel"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
               <span>تصدير Excel</span>
@@ -611,17 +668,16 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
               type="button"
               onClick={profitTab === 'invoices' ? handleBatchPrintInvoices : handleBatchPrintItems}
               className="px-3 py-1.5 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-              title="طباعة وتصدير جماعي للتقرير في PDF بتنسيق رسمي"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>طباعة وتصدير جماعي PDF</span>
+              <span>معاينة وطباعة PDF</span>
             </button>
           </div>
         </div>
 
         {/* Custom Date Inputs if selected */}
         {dateFilter === 'custom' && (
-          <div className="flex items-center gap-2 pt-2 border-t border-slate-100 text-xs">
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100 text-xs">
             <div className="flex items-center gap-1">
               <span className="text-slate-500 font-bold">من تاريخ:</span>
               <input
@@ -661,347 +717,142 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       </div>
 
       {/* -------------------------------------------------------------
-          TAB 1: INVOICE PROFITS VIEW
+          TAB 1: INVOICE PROFITS VIEW (Bordered Compact Table on All Screens)
       -------------------------------------------------------------- */}
       {profitTab === 'invoices' ? (
-        <div className="space-y-4">
+        <div className="space-y-3">
           {invoiceProfitsData.length === 0 ? (
-            <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
+            <div className="p-10 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
               <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2" />
               <div className="text-sm font-bold text-slate-700">لا توجد فواتير مبيعات مطابقة للفترة المحددة</div>
-              <div className="text-xs text-slate-400 mt-1">قم بتغيير نطاق التاريخ أو إصدار فواتير مبيعات جديدة</div>
             </div>
           ) : (
-            <div className="space-y-3">
-              {/* Mobile Responsive Cards (Zero Horizontal Scroll) */}
-              <div className="md:hidden grid grid-cols-1 gap-3">
-                {invoiceProfitsData.map(row => (
-                  <div key={row.id} className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs space-y-2.5">
-                    <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
-                      <div>
-                        <span className="font-mono font-black text-sm text-slate-950 block">{row.number}</span>
-                        <span className="text-[11px] text-slate-500 font-mono">{row.date}</span>
-                      </div>
-                      <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px] font-bold text-slate-700">
-                        {row.paymentMethod}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-slate-500">العميل:</span>
-                      <span className="font-bold text-slate-900 truncate max-w-[65%]">{row.customer}</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-xs">
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">المبيعات</span>
-                        <span className="font-mono font-bold text-slate-950">{formatMoney(row.revenue, db.settings.currency)}</span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">التكلفة (COGS)</span>
-                        <span className="font-mono text-slate-700">{formatMoney(row.cost, db.settings.currency)}</span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">صافي الربح</span>
-                        <span className="font-mono font-black text-emerald-700">{formatMoney(row.profit, db.settings.currency)}</span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">نسبة الربح %</span>
-                        <span className="font-mono font-bold text-amber-700">{row.margin.toFixed(1)}%</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-end gap-1 pt-1 border-t border-slate-100">
-                      <button type="button" onClick={() => handlePrintSingleInvoice(row)} className="px-2 py-1 text-slate-700 hover:bg-slate-100 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer">
-                        <Printer className="w-3.5 h-3.5" />
-                        <span>طباعة</span>
-                      </button>
-                      {onPreviewInvoice && (
-                        <button type="button" onClick={() => onPreviewInvoice(row.invoice)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded cursor-pointer" title="معاينة الفاتورة الأصلية">
-                          <Eye className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                      {onEditInvoice && (
-                        <button type="button" onClick={() => onEditInvoice(row.invoice)} className="p-1.5 text-slate-600 hover:text-blue-600 hover:bg-slate-100 rounded cursor-pointer" title="تعديل الفاتورة">
-                          <Edit className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                      {canDeleteSales && (
-                        <button type="button" onClick={() => handleDeleteInvoice(row.invoice)} className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded cursor-pointer" title="حذف الفاتورة">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Desktop Responsive Table (No Horizontal Scroll) */}
-              <div className="hidden md:block bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
-                <table className="w-full text-right text-xs">
-                  <thead className="bg-slate-50 border-b border-slate-200 font-black text-slate-700">
-                    <tr>
-                      <th className="p-2.5">رقم الفاتورة</th>
-                      <th className="p-2.5">التاريخ</th>
-                      <th className="p-2.5">العميل</th>
-                      <th className="p-2.5">طريقة الدفع</th>
-                      <th className="p-2.5 text-center">المبيعات</th>
-                      <th className="p-2.5 text-center">التكلفة (COGS)</th>
-                      <th className="p-2.5 text-center">صافي الربح</th>
-                      <th className="p-2.5 text-center">نسبة الربح %</th>
-                      <th className="p-2.5 text-center">إجراءات</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {invoiceProfitsData.map(row => (
-                      <tr key={row.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="p-2.5 font-bold font-mono text-slate-950">{row.number}</td>
-                        <td className="p-2.5 font-mono text-slate-600">{row.date}</td>
-                        <td className="p-2.5 font-bold text-slate-900">{row.customer}</td>
-                        <td className="p-2.5 text-slate-600">
-                          <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px]">{row.paymentMethod}</span>
-                        </td>
-                        <td className="p-2.5 text-center font-mono font-bold text-slate-950">
-                          {formatMoney(row.revenue, db.settings.currency)}
-                        </td>
-                        <td className="p-2.5 text-center font-mono text-slate-600">
-                          {formatMoney(row.cost, db.settings.currency)}
-                        </td>
-                        <td className="p-2.5 text-center font-mono font-black text-emerald-700">
-                          {formatMoney(row.profit, db.settings.currency)}
-                        </td>
-                        <td className="p-2.5 text-center font-mono font-bold text-amber-700">
-                          {row.margin.toFixed(1)}%
-                        </td>
-                        <td className="p-2.5 text-center">
-                          <div className="flex items-center justify-center gap-1">
-                            <button type="button" onClick={() => handlePrintSingleInvoice(row)} className="p-1 text-slate-600 hover:text-black hover:bg-slate-100 rounded cursor-pointer" title="طباعة وتحميل تفاصيل ربح الفاتورة">
-                              <Printer className="w-3.5 h-3.5" />
+            <div className="bg-white rounded-xl border border-slate-300 overflow-hidden shadow-2xs">
+              <table className="w-full table-fixed border-collapse text-center text-[10px] sm:text-xs">
+                <colgroup>
+                  <col style={{ width: '14%' }} />
+                  <col style={{ width: '24%' }} />
+                  <col style={{ width: '16%' }} />
+                  <col style={{ width: '16%' }} />
+                  <col style={{ width: '16%' }} />
+                  <col style={{ width: '14%' }} />
+                </colgroup>
+                <thead className="bg-slate-100 border-b border-slate-300 font-black text-slate-900">
+                  <tr>
+                    <th className="py-2 px-1 border-l border-slate-300">الفاتورة</th>
+                    <th className="py-2 px-1 border-l border-slate-300 text-right">العميل</th>
+                    <th className="py-2 px-1 border-l border-slate-300">المبيعات</th>
+                    <th className="py-2 px-1 border-l border-slate-300">التكلفة</th>
+                    <th className="py-2 px-1 border-l border-slate-300">صافي الربح</th>
+                    <th className="py-2 px-1">إجراءات</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {invoiceProfitsData.map(row => (
+                    <tr key={row.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono">
+                        <div className="font-black text-slate-950">{row.number}</div>
+                        <div className="text-[9px] text-slate-500 leading-tight">{row.date.slice(5)}</div>
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 text-right font-bold text-slate-900 break-words">
+                        <div>{row.customer}</div>
+                        <div className="text-[9px] text-slate-500 font-normal">{row.paymentMethod}</div>
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono font-bold text-slate-950 break-words">
+                        {formatCleanNumber(row.revenue)}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono text-slate-700 break-words">
+                        {formatCleanNumber(row.cost)}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono">
+                        <div className="font-black text-emerald-700">{formatCleanNumber(row.profit)}</div>
+                        <div className="text-[9px] font-bold text-amber-700">{row.margin.toFixed(1)}%</div>
+                      </td>
+                      <td className="py-1.5 px-0.5">
+                        <div className="flex flex-wrap items-center justify-center gap-0.5">
+                          <button type="button" onClick={() => handlePrintSingleInvoice(row)} className="p-1 text-slate-700 hover:bg-slate-200 rounded cursor-pointer" title="طباعة أرباح الفاتورة">
+                            <Printer className="w-3.5 h-3.5" />
+                          </button>
+                          {onPreviewInvoice && (
+                            <button type="button" onClick={() => onPreviewInvoice(row.invoice)} className="p-1 text-blue-600 hover:bg-blue-50 rounded cursor-pointer" title="معاينة الفاتورة">
+                              <Eye className="w-3.5 h-3.5" />
                             </button>
-                            {onPreviewInvoice && (
-                              <button type="button" onClick={() => onPreviewInvoice(row.invoice)} className="p-1 text-blue-600 hover:bg-blue-50 rounded cursor-pointer" title="معاينة الفاتورة الأصلية">
-                                <Eye className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                            {onEditInvoice && (
-                              <button type="button" onClick={() => onEditInvoice(row.invoice)} className="p-1 text-slate-600 hover:text-blue-600 hover:bg-slate-100 rounded cursor-pointer" title="تعديل الفاتورة">
-                                <Edit className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                            {canDeleteSales && (
-                              <button type="button" onClick={() => handleDeleteInvoice(row.invoice)} className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded cursor-pointer" title="حذف الفاتورة">
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* BOTTOM SECTION: Gross Merchandise Profit, Operating Expenses & Net Business Profit */}
-              <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white rounded-xl p-4 shadow-md flex flex-col md:flex-row items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center text-white shrink-0">
-                    <TrendingUp className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-emerald-100 block">
-                      ملخص الأرباح التشغيلية وحسابات النشاط التجاري:
-                    </span>
-                    <span className="text-[11px] text-white/80">
-                      محسوبة بدقة وفقاً لآخر سعر شراء معتمد في فواتير المشتريات المستلمة
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <div className="text-center bg-black/20 px-3.5 py-2 rounded-xl border border-white/20 shrink-0">
-                    <span className="text-[10px] font-bold text-emerald-200 block">
-                      إجمالي ربح البضاعة:
-                    </span>
-                    <span className="text-sm sm:text-base font-black font-mono tracking-tight text-white">
-                      {formatMoney(grandTotalInvoiceProfits, db.settings.currency)}
-                    </span>
-                  </div>
-                  <div className="text-center bg-black/20 px-3.5 py-2 rounded-xl border border-white/20 shrink-0">
-                    <span className="text-[10px] font-bold text-rose-200 block">
-                      المصروفات التشغيلية:
-                    </span>
-                    <span className="text-sm sm:text-base font-black font-mono tracking-tight text-rose-200">
-                      {formatMoney(operatingExpenses, db.settings.currency)}
-                    </span>
-                  </div>
-                  <div className="text-center bg-emerald-950/60 px-4 py-2 rounded-xl border-2 border-emerald-300 shrink-0 shadow-xs">
-                    <span className="text-[10px] font-black text-emerald-300 block">
-                      صافي ربح النشاط التجاري:
-                    </span>
-                    <span className="text-base sm:text-lg font-black font-mono tracking-tight text-white">
-                      {formatMoney(netBusinessProfit, db.settings.currency)}
-                    </span>
-                  </div>
-                </div>
-              </div>
+                          )}
+                          {onEditInvoice && (
+                            <button type="button" onClick={() => onEditInvoice(row.invoice)} className="hidden sm:inline-flex p-1 text-slate-600 hover:bg-slate-200 rounded cursor-pointer" title="تعديل">
+                              <Edit className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          {canDeleteSales && (
+                            <button type="button" onClick={() => handleDeleteInvoice(row.invoice)} className="hidden sm:inline-flex p-1 text-slate-400 hover:text-rose-600 rounded cursor-pointer" title="حذف">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
       ) : (
         /* -------------------------------------------------------------
-            TAB 2: PRODUCT / ITEM PROFITS VIEW
+            TAB 2: PRODUCT / ITEM PROFITS VIEW (Image 2 Crisp Bordered Table)
         -------------------------------------------------------------- */
-        <div className="space-y-4">
+        <div className="space-y-3">
           {itemProfitsData.length === 0 ? (
-            <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
+            <div className="p-10 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
               <Package className="w-10 h-10 text-slate-300 mx-auto mb-2" />
               <div className="text-sm font-bold text-slate-700">لا توجد حركات بيع أصناف مطابقة للبحث أو الفترة</div>
             </div>
           ) : (
-            <div className="space-y-3">
-              {/* Mobile Responsive Cards (Zero Horizontal Scroll) */}
-              <div className="md:hidden grid grid-cols-1 gap-3">
-                {itemProfitsData.map(it => (
-                  <div key={it.productId} className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs space-y-2.5">
-                    <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
-                      <div className="min-w-0">
-                        <h4 className="font-bold text-sm text-slate-900 truncate">{it.name}</h4>
-                        <div className="text-[11px] text-slate-500 font-mono flex items-center gap-2">
-                          <span>كود: {it.code}</span>
-                          <span>• {it.category}</span>
-                        </div>
-                      </div>
-                      <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px] font-mono font-bold text-slate-900 shrink-0">
-                        {it.qtySold} {it.unit}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 bg-slate-50 p-2.5 rounded-lg border border-slate-100 text-xs">
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">متوسط التكلفة الفعلي</span>
-                        <span className="font-mono font-bold text-slate-700">
-                          {it.hasVerifiedCost ? formatMoney(it.verifiedCostPrice, db.settings.currency) : 'غير محدد'}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">سعر البيع الفعلي</span>
-                        <span className="font-mono font-bold text-slate-900">{formatMoney(it.actualSellPrice, db.settings.currency)}</span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">إجمالي المبيعات</span>
-                        <span className="font-mono font-bold text-slate-950">{formatMoney(it.totalRevenue, db.settings.currency)}</span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">إجمالي التكلفة</span>
-                        <span className="font-mono text-slate-700">{it.hasVerifiedCost ? formatMoney(it.totalCost, db.settings.currency) : '—'}</span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">إجمالي ربح الصنف</span>
-                        <span className="font-mono font-black text-emerald-700">{it.hasVerifiedCost ? formatMoney(it.profit, db.settings.currency) : '—'}</span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">نسبة الربح %</span>
-                        <span className="font-mono font-bold text-amber-700">{it.hasVerifiedCost ? `${it.margin.toFixed(1)}%` : '—'}</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Desktop Responsive Table (No Horizontal Scroll) */}
-              <div className="hidden md:block bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xs">
-                <table className="w-full text-right text-xs">
-                  <thead className="bg-slate-50 border-b border-slate-200 font-black text-slate-700">
-                    <tr>
-                      <th className="p-2">كود الصنف</th>
-                      <th className="p-2">اسم الصنف</th>
-                      <th className="p-2">التصنيف</th>
-                      <th className="p-2 text-center">الكمية المباعة</th>
-                      <th className="p-2 text-center">متوسط التكلفة</th>
-                      <th className="p-2 text-center">سعر البيع</th>
-                      <th className="p-2 text-center">إجمالي المبيعات</th>
-                      <th className="p-2 text-center">إجمالي التكلفة</th>
-                      <th className="p-2 text-center">إجمالي الربح</th>
-                      <th className="p-2 text-center">النسبة %</th>
+            <div className="bg-white rounded-xl border border-slate-300 overflow-hidden shadow-2xs">
+              <table className="w-full table-fixed border-collapse text-center text-[10px] sm:text-xs">
+                <colgroup>
+                  <col style={{ width: '30%' }} />
+                  <col style={{ width: '12%' }} />
+                  <col style={{ width: '14%' }} />
+                  <col style={{ width: '14%' }} />
+                  <col style={{ width: '14%' }} />
+                  <col style={{ width: '16%' }} />
+                </colgroup>
+                <thead className="bg-slate-100 border-b border-slate-300 font-black text-slate-900">
+                  <tr>
+                    <th className="py-2 px-1 border-l border-slate-300 text-right">اسم الصنف</th>
+                    <th className="py-2 px-1 border-l border-slate-300 leading-tight">الكمية المخرجة</th>
+                    <th className="py-2 px-1 border-l border-slate-300 leading-tight">سعر الشراء</th>
+                    <th className="py-2 px-1 border-l border-slate-300 leading-tight">سعر البيع</th>
+                    <th className="py-2 px-1 border-l border-slate-300 leading-tight">الربح الصافي</th>
+                    <th className="py-2 px-1 leading-tight">إجمالي الربح للصنف</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {itemProfitsData.map(it => (
+                    <tr key={it.productId} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="py-1.5 px-1.5 border-l border-slate-200 text-right font-bold text-slate-900 break-words leading-snug">
+                        {it.name}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono font-bold text-slate-900">
+                        {formatCleanNumber(it.qtySold)}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono text-slate-700">
+                        {it.hasVerifiedCost ? formatCleanNumber(it.verifiedCostPrice) : '—'}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono font-bold text-slate-950">
+                        {formatCleanNumber(it.actualSellPrice)}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono font-bold text-emerald-700">
+                        {it.hasVerifiedCost ? formatCleanNumber(it.unitNetProfit) : '—'}
+                      </td>
+                      <td className="py-1.5 px-1 font-mono font-black text-emerald-700">
+                        {it.hasVerifiedCost ? formatCleanNumber(it.profit) : '—'}
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {itemProfitsData.map(it => (
-                      <tr key={it.productId} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="p-2 font-bold font-mono text-slate-600">{it.code}</td>
-                        <td className="p-2 font-bold text-slate-900">{it.name}</td>
-                        <td className="p-2 text-slate-500">{it.category}</td>
-                        <td className="p-2 text-center font-mono font-bold text-slate-900">{it.qtySold} {it.unit}</td>
-                        <td className="p-2 text-center font-mono text-slate-600">
-                          {it.hasVerifiedCost ? (
-                            formatMoney(it.verifiedCostPrice, db.settings.currency)
-                          ) : (
-                            <span className="text-amber-700 font-bold text-[10px] bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
-                              غير محدد
-                            </span>
-                          )}
-                        </td>
-                        <td className="p-2 text-center font-mono font-bold text-slate-900">
-                          {formatMoney(it.actualSellPrice, db.settings.currency)}
-                        </td>
-                        <td className="p-2 text-center font-mono font-bold text-slate-950">
-                          {formatMoney(it.totalRevenue, db.settings.currency)}
-                        </td>
-                        <td className="p-2 text-center font-mono text-slate-600">
-                          {it.hasVerifiedCost ? formatMoney(it.totalCost, db.settings.currency) : '—'}
-                        </td>
-                        <td className="p-2 text-center font-mono font-black text-emerald-700">
-                          {it.hasVerifiedCost ? formatMoney(it.profit, db.settings.currency) : '—'}
-                        </td>
-                        <td className="p-2 text-center font-mono font-bold text-amber-700">
-                          {it.hasVerifiedCost ? `${it.margin.toFixed(1)}%` : '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* BOTTOM SECTION: Gross Merchandise Profit & Net Business Profit */}
-              <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white rounded-xl p-4 shadow-md flex flex-col md:flex-row items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center text-white shrink-0">
-                    <TrendingUp className="w-6 h-6" />
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-emerald-100 block">
-                      إجمالي أرباح الأصناف المعتمدة:
-                    </span>
-                    <span className="text-[11px] text-white/80">
-                      محسوبة تلقائياً من فروق أسعار الشراء والبيع للأصناف ذات تكلفة شراء موثقة
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <div className="text-center bg-black/20 px-3.5 py-2 rounded-xl border border-white/20 shrink-0">
-                    <span className="text-[10px] font-bold text-emerald-200 block">
-                      إجمالي ربح الأصناف:
-                    </span>
-                    <span className="text-sm sm:text-base font-black font-mono tracking-tight text-white">
-                      {formatMoney(grandTotalItemProfits, db.settings.currency)}
-                    </span>
-                  </div>
-                  <div className="text-center bg-black/20 px-3.5 py-2 rounded-xl border border-white/20 shrink-0">
-                    <span className="text-[10px] font-bold text-rose-200 block">
-                      المصروفات التشغيلية:
-                    </span>
-                    <span className="text-sm sm:text-base font-black font-mono tracking-tight text-rose-200">
-                      {formatMoney(operatingExpenses, db.settings.currency)}
-                    </span>
-                  </div>
-                  <div className="text-center bg-emerald-950/60 px-4 py-2 rounded-xl border-2 border-emerald-300 shrink-0 shadow-xs">
-                    <span className="text-[10px] font-black text-emerald-300 block">
-                      صافي ربح النشاط:
-                    </span>
-                    <span className="text-base sm:text-lg font-black font-mono tracking-tight text-white">
-                      {formatMoney(grandTotalItemProfits - operatingExpenses, db.settings.currency)}
-                    </span>
-                  </div>
-                </div>
-              </div>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>

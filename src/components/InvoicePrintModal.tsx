@@ -496,48 +496,75 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
 
                 {/* 5. قسم الإجماليات وتفاصيل الدفع */}
                 <div className="totals-section">
-                  <div className="total-row" style={{ color: '#475569', fontSize: '10px' }}>
-                    <span>إجمالي عدد الأصناف / الكميات:</span>
-                    <strong className="font-mono text-slate-800">{formatMoneyClean(invoice.items.reduce((s, it) => s + (Number(it.qty) || 0), 0))}</strong>
-                  </div>
+                  {(() => {
+                    const itemsSum = Number(invoice.items.reduce((s, it) => s + (Number(it.total) || ((Number(it.qty) || 0) * (Number(it.unitPrice) || 0))), 0).toFixed(2));
+                    const discVal = Number(invoice.discount) || 0;
+                    const taxVal = Number(invoice.tax) || 0;
+                    const extraVal = hasFees ? feesAmount : 0;
+                    const grossSubtotal = (invoice.subtotal && invoice.subtotal > 0) ? invoice.subtotal : itemsSum;
+                    const computedNetTotal = Math.max(0, Number((grossSubtotal - discVal + taxVal + extraVal).toFixed(2)));
+                    const effectiveTotal = (discVal > 0 && Math.abs((Number(invoice.total) || 0) - grossSubtotal) < 0.05 && Math.abs((Number(invoice.total) || 0) - computedNetTotal) > 0.05)
+                      ? computedNetTotal
+                      : (Number(invoice.total) || computedNetTotal);
+                    const effectivePaid = (discVal > 0 && (invoice.remaining || 0) <= 0 && Math.abs((Number(invoice.paid) || 0) - grossSubtotal) < 0.05)
+                      ? effectiveTotal
+                      : (Number(invoice.paid) || 0);
+                    const effectiveRemaining = Math.max(0, Number((effectiveTotal - effectivePaid).toFixed(2)));
 
-                  <div className="total-row">
-                    <span>إجمالي الفاتورة:</span>
-                    <span>{formatMoneyClean(invoice.total)} {settings.currency || 'ج.م'}</span>
-                  </div>
+                    return (
+                      <>
+                        <div className="total-row" style={{ color: '#475569', fontSize: '10px' }}>
+                          <span>إجمالي عدد الأصناف / الكميات:</span>
+                          <strong className="font-mono text-slate-800">{formatMoneyClean(invoice.items.reduce((s, it) => s + (Number(it.qty) || 0), 0))}</strong>
+                        </div>
 
-                  <div className="total-row" style={{ borderTop: '1px dashed #666', paddingTop: '4px', marginTop: '3px' }}>
-                    <span>طريقة الدفع: <span className="payment-status-badge">{(invoice.remaining || 0) <= 0 ? 'كاش / نقدي' : (invoice.paid || 0) <= 0 ? 'آجل ذمم' : 'سداد جزئي'}</span></span>
-                    <span>المدفوع: <strong>{formatMoneyClean(invoice.paid || 0)} {settings.currency || 'ج.م'}</strong></span>
-                  </div>
+                        {(discVal > 0 || taxVal > 0 || hasFees) ? (
+                          <div className="total-row" style={{ fontWeight: 600, fontSize: '11px', color: '#334155' }}>
+                            <span>المجموع قبل الخصم:</span>
+                            <span>{formatMoneyClean(grossSubtotal)} {settings.currency || 'ج.م'}</span>
+                          </div>
+                        ) : null}
 
-                  {(invoice.remaining || 0) > 0 ? (
-                    <div className="total-row" style={{ color: '#b91c1c' }}>
-                      <span>المبلغ المتبقي (الآجل):</span>
-                      <strong>{formatMoneyClean(invoice.remaining)} {settings.currency || 'ج.م'}</strong>
-                    </div>
-                  ) : null}
+                        {hasFees ? (
+                          <div className="total-row" style={{ fontWeight: 600, fontSize: '11px', color: '#334155' }}>
+                            <span>رسوم النقل / الشحن (+):</span>
+                            <span>{formatMoneyClean(feesAmount)} {settings.currency || 'ج.م'}</span>
+                          </div>
+                        ) : null}
 
-                  {hasFees ? (
-                    <div className="total-row" style={{ fontWeight: 600, fontSize: '11px', color: '#444' }}>
-                      <span>رسوم النقل / الشحن:</span>
-                      <span>{formatMoneyClean(feesAmount)} {settings.currency || 'ج.م'}</span>
-                    </div>
-                  ) : null}
+                        {taxVal > 0 ? (
+                          <div className="total-row tax-discount-row" style={{ fontWeight: 600, fontSize: '11px', color: '#334155' }}>
+                            <span>الضريبة (+):</span>
+                            <span>{formatMoneyClean(taxVal)} {settings.currency || 'ج.م'}</span>
+                          </div>
+                        ) : null}
 
-                  {(invoice.tax || 0) > 0 ? (
-                    <div className="total-row tax-discount-row" style={{ fontWeight: 600, fontSize: '11px', color: '#444' }}>
-                      <span>الضريبة:</span>
-                      <span>{formatMoneyClean(invoice.tax)} {settings.currency || 'ج.م'}</span>
-                    </div>
-                  ) : null}
+                        {discVal > 0 ? (
+                          <div className="total-row tax-discount-row" style={{ fontWeight: 700, fontSize: '11px', color: '#b91c1c' }}>
+                            <span>الخصم (-):</span>
+                            <span>- {formatMoneyClean(discVal)} {settings.currency || 'ج.م'}</span>
+                          </div>
+                        ) : null}
 
-                  {(invoice.discount || 0) > 0 ? (
-                    <div className="total-row tax-discount-row" style={{ fontWeight: 600, fontSize: '11px', color: '#444' }}>
-                      <span>الخصم:</span>
-                      <span>{formatMoneyClean(invoice.discount)} {settings.currency || 'ج.م'}</span>
-                    </div>
-                  ) : null}
+                        <div className="total-row" style={{ borderTop: '1px solid #0f172a', paddingTop: '3px', marginTop: '2px' }}>
+                          <span>{discVal > 0 ? 'صافي إجمالي الفاتورة:' : 'إجمالي الفاتورة:'}</span>
+                          <span>{formatMoneyClean(effectiveTotal)} {settings.currency || 'ج.م'}</span>
+                        </div>
+
+                        <div className="total-row" style={{ borderTop: '1px dashed #666', paddingTop: '4px', marginTop: '3px' }}>
+                          <span>طريقة الدفع: <span className="payment-status-badge">{effectiveRemaining <= 0 ? 'كاش / نقدي' : effectivePaid <= 0 ? 'آجل ذمم' : 'سداد جزئي'}</span></span>
+                          <span>المدفوع: <strong>{formatMoneyClean(effectivePaid)} {settings.currency || 'ج.م'}</strong></span>
+                        </div>
+
+                        {effectiveRemaining > 0 ? (
+                          <div className="total-row" style={{ color: '#b91c1c' }}>
+                            <span>المبلغ المتبقي (الآجل):</span>
+                            <strong>{formatMoneyClean(effectiveRemaining)} {settings.currency || 'ج.م'}</strong>
+                          </div>
+                        ) : null}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
 
