@@ -249,6 +249,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
       return {
         ...item,
+        rawTotalCost: item.hasVerifiedCost ? item.totalCost : 0,
         totalCost,
         actualSellPrice,
         unitNetProfit,
@@ -269,10 +270,43 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     });
   }, [db, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
 
-  // Grand Total of Item Profits
+  // Invoice-level discounts, extra income & taxes for exact reconciliation between Item Profits and Invoice Profits
+  const salesAdjustments = useMemo(() => {
+    const sales = db.invoices.filter(i => (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') && isDateMatch(i.date) && isTargetBranch(i.branchId));
+    let discounts = 0;
+    let extraIncome = 0;
+    let taxes = 0;
+    for (const inv of sales) {
+      discounts += Number(inv.discount) || 0;
+      extraIncome += Number(inv.extraIncomeVal) || 0;
+      taxes += Number(inv.tax) || 0;
+    }
+    return {
+      discounts: Number(discounts.toFixed(2)),
+      extraIncome: Number(extraIncome.toFixed(2)),
+      taxes: Number(taxes.toFixed(2))
+    };
+  }, [db.invoices, dateFilter, fromDate, toDate, selectedBranchId]);
+
+  const totalItemsRevenueSum = useMemo(
+    () => Number(itemProfitsData.reduce((s, it) => s + it.totalRevenue, 0).toFixed(2)),
+    [itemProfitsData]
+  );
+  const totalItemsCostSum = useMemo(
+    () => Number(itemProfitsData.reduce((s, it) => s + it.rawTotalCost, 0).toFixed(2)),
+    [itemProfitsData]
+  );
+
+  // Grand Total of Item Profits (before invoice-level discounts/extra income)
   const grandTotalItemProfits = useMemo(() => {
-    return itemProfitsData.reduce((sum, row) => sum + row.profit, 0);
-  }, [itemProfitsData]);
+    return Number((totalItemsRevenueSum - totalItemsCostSum).toFixed(2));
+  }, [totalItemsRevenueSum, totalItemsCostSum]);
+
+  // Adjusted Item Profits (after invoice-level discounts/extra income/taxes when not filtered by product search) -> matches grandTotalInvoiceProfits identically
+  const adjustedGrandTotalItemProfits = useMemo(() => {
+    if (searchQuery.trim()) return grandTotalItemProfits;
+    return Number((grandTotalItemProfits - salesAdjustments.discounts + salesAdjustments.extraIncome + salesAdjustments.taxes).toFixed(2));
+  }, [grandTotalItemProfits, salesAdjustments, searchQuery]);
 
   // Permission check for invoice deletion
   const userPerms = db.currentUser?.permissions;
@@ -369,8 +403,42 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       return;
     }
 
-    const totalItemsRevenue = itemProfitsData.reduce((s, it) => s + it.totalRevenue, 0);
-    const totalItemsCost = itemProfitsData.reduce((s, it) => s + it.totalCost, 0);
+    const summaryLines: MovementPrintBlock['summaryLines'] = [
+      { label: 'إجمالي مبيعات الأصناف', value: `${formatCleanNumber(totalItemsRevenueSum)} ${db.settings.currency}` },
+      { label: 'إجمالي تكلفة الشراء', value: `${formatCleanNumber(totalItemsCostSum)} ${db.settings.currency}` },
+      { label: 'إجمالي أرباح الأصناف', value: `${formatCleanNumber(grandTotalItemProfits)} ${db.settings.currency}`, highlight: true }
+    ];
+
+    if (!searchQuery.trim()) {
+      if (salesAdjustments.extraIncome > 0) {
+        summaryLines.push({
+          label: 'رسوم شحن / إيراد إضافي (+)',
+          value: `+ ${formatCleanNumber(salesAdjustments.extraIncome)} ${db.settings.currency}`
+        });
+      }
+      if (salesAdjustments.taxes > 0) {
+        summaryLines.push({
+          label: 'الضرائب (+)',
+          value: `+ ${formatCleanNumber(salesAdjustments.taxes)} ${db.settings.currency}`
+        });
+      }
+      if (salesAdjustments.discounts > 0) {
+        summaryLines.push({
+          label: 'خصومات الفواتير (-)',
+          value: `- ${formatCleanNumber(salesAdjustments.discounts)} ${db.settings.currency}`
+        });
+      }
+    }
+
+    summaryLines.push({
+      label: 'المصروفات التشغيلية',
+      value: `${formatCleanNumber(operatingExpenses)} ${db.settings.currency}`
+    });
+    summaryLines.push({
+      label: 'صافي ربح النشاط التجاري',
+      value: `${formatCleanNumber(adjustedGrandTotalItemProfits - operatingExpenses)} ${db.settings.currency}`,
+      isTotal: true
+    });
 
     const block: MovementPrintBlock = {
       title: 'تقرير أرباح الأصناف التفصيلي',
@@ -401,14 +469,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         ],
         isBold: false
       })),
-      summaryLines: [
-        { label: 'إجمالي المبيعات للأصناف', value: `${formatCleanNumber(totalItemsRevenue)} ${db.settings.currency}` },
-        { label: 'إجمالي تكلفة الشراء', value: `${formatCleanNumber(totalItemsCost)} ${db.settings.currency}` },
-        { label: 'إجمالي أرباح الأصناف', value: `${formatCleanNumber(grandTotalItemProfits)} ${db.settings.currency}`, highlight: true },
-        { label: 'المصروفات التشغيلية', value: `${formatCleanNumber(operatingExpenses)} ${db.settings.currency}` },
-        { label: 'صافي ربح النشاط التجاري', value: `${formatCleanNumber(grandTotalItemProfits - operatingExpenses)} ${db.settings.currency}`, isTotal: true }
-      ],
-      footerNotes: 'تم احتساب سعر الشراء من فواتير الشراء المسجلة وسعر البيع من فواتير البيع الفعلية.',
+      summaryLines,
+      footerNotes: 'تم احتساب سعر الشراء من فواتير الشراء المسجلة وسعر البيع من فواتير البيع الفعلية ومراعاة الخصومات والإضافات.',
       createdBy: db.currentUser?.name
     };
 
@@ -581,7 +643,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
               {profitTab === 'invoices' ? 'ربح البضاعة' : 'ربح الأصناف'}
             </span>
             <span className="text-xs sm:text-base font-black font-mono tracking-tight text-white">
-              {formatMoney(profitTab === 'invoices' ? grandTotalInvoiceProfits : grandTotalItemProfits, db.settings.currency)}
+              {formatMoney(profitTab === 'invoices' ? grandTotalInvoiceProfits : adjustedGrandTotalItemProfits, db.settings.currency)}
             </span>
           </div>
           <div className="text-center bg-black/20 px-2 sm:px-3.5 py-2 rounded-xl border border-white/20">
@@ -597,7 +659,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
               صافي الربح
             </span>
             <span className="text-xs sm:text-lg font-black font-mono tracking-tight text-white">
-              {formatMoney((profitTab === 'invoices' ? netBusinessProfit : (grandTotalItemProfits - operatingExpenses)), db.settings.currency)}
+              {formatMoney((profitTab === 'invoices' ? netBusinessProfit : (adjustedGrandTotalItemProfits - operatingExpenses)), db.settings.currency)}
             </span>
           </div>
         </div>
