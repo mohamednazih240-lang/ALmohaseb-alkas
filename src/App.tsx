@@ -212,7 +212,13 @@ export default function App() {
           const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || [], deletedIdsSet);
           const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
           const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
-          const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || []);
+          const validMergedInvIds = new Set(mergedInvoices.map(i => i.id));
+          const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || [])
+            .filter(sm => {
+              if (sm.sourceId && deletedIdsSet.has(sm.sourceId)) return false;
+              if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
+              return true;
+            });
 
           const merged: AccountingDB = {
             ...ensuredCloud,
@@ -311,7 +317,13 @@ export default function App() {
         const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || [], deletedIdsSet);
         const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
         const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
-        const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || []);
+        const validMergedInvIds = new Set(mergedInvoices.map(i => i.id));
+        const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || [])
+          .filter(sm => {
+            if (sm.sourceId && deletedIdsSet.has(sm.sourceId)) return false;
+            if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
+            return true;
+          });
 
         const safeSettings: AppSettings = {
           ...ensuredCloud.settings,
@@ -397,7 +409,13 @@ export default function App() {
               const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || [], deletedIdsSet);
               const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
               const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
-              const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || []);
+              const validMergedInvIds = new Set(mergedInvoices.map(i => i.id));
+              const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || [])
+                .filter(sm => {
+                  if (sm.sourceId && deletedIdsSet.has(sm.sourceId)) return false;
+                  if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
+                  return true;
+                });
 
               const safeSettings: AppSettings = {
                 ...ensuredCloud.settings,
@@ -652,7 +670,13 @@ export default function App() {
               const mergedInvoices = mergeInvoices(db.invoices || [], cloudDb.invoices || [], deletedIdsSet);
               const mergedVouchers = mergeVouchers(db.vouchers || [], cloudDb.vouchers || []);
               const mergedTreasury = mergeTreasury(db.treasury || [], cloudDb.treasury || []);
-              const mergedStockMovements = mergeStockMovements(db.stockMovements || [], cloudDb.stockMovements || []);
+              const validMergedInvIds = new Set(mergedInvoices.map(i => i.id));
+              const mergedStockMovements = mergeStockMovements(db.stockMovements || [], cloudDb.stockMovements || [])
+                .filter(sm => {
+                  if (sm.sourceId && deletedIdsSet.has(sm.sourceId)) return false;
+                  if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
+                  return true;
+                });
               const unified: AccountingDB = {
                 ...cloudDb,
                 invoices: mergedInvoices,

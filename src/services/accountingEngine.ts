@@ -129,8 +129,22 @@ export function postInvoiceTransaction(
   const branchId = invoice.branchId || 'br_mawan';
   const warehouseId = invoice.warehouseId || updated.warehouses[0]?.id || 'wh_mawan';
 
+  const expectedSmType = isSaleReturn
+    ? 'sale_return'
+    : isPurchaseReturn
+      ? 'purchase_return'
+      : isPurchase
+        ? 'purchase'
+        : 'sale';
+  const expectedTrPrefix = isPurchase
+    ? `فاتورة مشتريات رقم ${invoiceNumber}`
+    : `فاتورة مبيعات رقم ${invoiceNumber}`;
+
   // 1. Remove previous linked items if updating an existing invoice to prevent stale orphaned records
-  const previousInvIdx = updated.invoices.findIndex(i => i.id === invoiceId || i.number === invoiceNumber);
+  const previousInvIdx = (() => {
+    const byId = updated.invoices.findIndex(i => i.id === invoiceId);
+    return byId > -1 ? byId : updated.invoices.findIndex(i => i.number === invoiceNumber && i.type === invoice.type);
+  })();
   if (previousInvIdx > -1) {
     const prev = updated.invoices[previousInvIdx];
     // Revert previous stock movements from catalog balances
@@ -150,14 +164,16 @@ export function postInvoiceTransaction(
       }
     });
 
-    // Clean previous stock movements for this invoice
-    updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== invoiceId && sm.refNumber !== invoiceNumber);
+    // Clean previous stock movements strictly for this invoice
+    updated.stockMovements = updated.stockMovements.filter(
+      sm => sm.sourceId !== invoiceId && !(!sm.sourceId && sm.refNumber === invoiceNumber && sm.type === expectedSmType)
+    );
 
-    // Clean previous treasury entries for this invoice
+    // Clean previous treasury entries strictly for this invoice
     updated.treasury = updated.treasury.filter(tr => {
       if (tr.sourceId === invoiceId || (tr as any).invoiceId === invoiceId) return false;
       if (tr.id.startsWith(`tr_purchase_${invoiceId}`) || tr.id.startsWith(`tr_sale_${invoiceId}`)) return false;
-      if (invoiceNumber && tr.description && tr.description.includes(`رقم ${invoiceNumber}`)) return false;
+      if (invoiceNumber && tr.description && tr.sourceType === expectedSmType && tr.description.includes(expectedTrPrefix)) return false;
       return true;
     });
 
@@ -255,8 +271,8 @@ export function postInvoiceTransaction(
       const pIdx = updated.products.findIndex(p => p.id === prod.id);
       if (pIdx > -1) updated.products[pIdx] = updatedProd;
 
-      // Deterministic Stock Movement
-      const deterministicSmId = getDeterministicStockMovementId(invoiceId, prod.id, warehouseId);
+      // Deterministic Stock Movement (normalized ID without warehouse suffix to prevent duplicates)
+      const deterministicSmId = getDeterministicStockMovementId(invoiceId, prod.id);
       const smPayload: StockMovement = {
         id: deterministicSmId,
         date: invoice.date,
@@ -497,9 +513,12 @@ export function postManualVoucherTransaction(
 
   // 4. If linked to an invoice, safely update invoice paid and remaining
   if (voucher.invoiceId || (voucher as any).referenceNumber) {
-    const linkedInv = updated.invoices.find(
-      i => i.id === voucher.invoiceId || i.number === (voucher as any).referenceNumber
-    );
+    const expectedInvType = voucher.type === 'receipt' ? 'sale' : 'purchase';
+    const linkedInv =
+      (voucher.invoiceId ? updated.invoices.find(i => i.id === voucher.invoiceId) : undefined) ||
+      ((voucher as any).referenceNumber
+        ? updated.invoices.find(i => i.number === (voucher as any).referenceNumber && i.type === expectedInvType)
+        : undefined);
     if (linkedInv) {
       // Sum all active vouchers for this invoice
       const allVouchersForInv = updated.vouchers.filter(v =>
@@ -583,16 +602,28 @@ export function cancelOrDeleteInvoiceTransaction(
     }
   });
 
-  // 2. Remove stock movements
+  const expectedCancelSmType = isSaleReturn
+    ? 'sale_return'
+    : isPurchaseReturn
+      ? 'purchase_return'
+      : isPurchase
+        ? 'purchase'
+        : 'sale';
+  const expectedCancelVoucherType: 'receipt' | 'payment' = (isSale || isPurchaseReturn) ? 'receipt' : 'payment';
+  const expectedCancelTrPrefix = isPurchase
+    ? `فاتورة مشتريات رقم ${targetInv.number}`
+    : `فاتورة مبيعات رقم ${targetInv.number}`;
+
+  // 2. Remove stock movements strictly for this invoice
   updated.stockMovements = (updated.stockMovements || []).filter(
-    sm => sm.sourceId !== targetInv.id && sm.refNumber !== targetInv.number
+    sm => sm.sourceId !== targetInv.id && !(!sm.sourceId && sm.refNumber === targetInv.number && sm.type === expectedCancelSmType)
   );
 
-  // 3. Remove treasury entries
+  // 3. Remove treasury entries strictly for this invoice
   updated.treasury = (updated.treasury || []).filter(tr => {
     if (tr.sourceId === targetInv.id || (tr as any).invoiceId === targetInv.id) return false;
     if (tr.id.startsWith(`tr_purchase_${targetInv.id}`) || tr.id.startsWith(`tr_sale_${targetInv.id}`)) return false;
-    if (targetInv.number && tr.description && tr.description.includes(`رقم ${targetInv.number}`)) return false;
+    if (targetInv.number && tr.description && tr.sourceType === expectedCancelSmType && tr.description.includes(expectedCancelTrPrefix)) return false;
     return true;
   });
 
@@ -601,9 +632,9 @@ export function cancelOrDeleteInvoiceTransaction(
   if (updated.vouchers) {
     updated.vouchers = updated.vouchers.filter(v => {
       const isLinked = (v as any).sourceId === targetInv.id ||
-                       (v as any).referenceNumber === targetInv.number ||
                        (v as any).invoiceId === targetInv.id ||
-                       (v.description && v.description.includes(targetInv.number));
+                       ((v as any).referenceNumber === targetInv.number && v.type === expectedCancelVoucherType) ||
+                       (v.type === expectedCancelVoucherType && v.description && v.description.includes(expectedCancelTrPrefix));
       if (isLinked) {
         linkedVoucherIds.add(v.id);
         return false;
@@ -626,7 +657,7 @@ export function cancelOrDeleteInvoiceTransaction(
   // 6. Remove returns if any
   if (updated.returns) {
     updated.returns = updated.returns.filter(
-      r => r.originalInvoiceId !== targetInv.id && r.number !== targetInv.number
+      r => r.originalInvoiceId !== targetInv.id && !(r.number === targetInv.number && r.type === targetInv.type)
     );
   }
 
@@ -696,9 +727,12 @@ export function cancelOrDeleteVoucherTransaction(
 
   // 4. If linked to an invoice, revert invoice paid and remaining
   if (targetVoucher.invoiceId || (targetVoucher as any).referenceNumber) {
-    const linkedInv = updated.invoices.find(
-      i => i.id === targetVoucher.invoiceId || i.number === (targetVoucher as any).referenceNumber
-    );
+    const expectedInvType = isReceipt ? 'sale' : 'purchase';
+    const linkedInv =
+      (targetVoucher.invoiceId ? updated.invoices.find(i => i.id === targetVoucher.invoiceId) : undefined) ||
+      ((targetVoucher as any).referenceNumber
+        ? updated.invoices.find(i => i.number === (targetVoucher as any).referenceNumber && i.type === expectedInvType)
+        : undefined);
     if (linkedInv) {
       linkedInv.paid = Math.max(0, (linkedInv.paid || 0) - targetVoucher.amount);
       linkedInv.remaining = Math.max(0, (linkedInv.total || 0) - linkedInv.paid);

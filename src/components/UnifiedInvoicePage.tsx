@@ -1653,14 +1653,27 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           if (pIdx > -1) updated.products[pIdx] = updatedProd;
         }
       });
-      updated.stockMovements = updated.stockMovements.filter(sm => sm.sourceId !== editingInvoice.id && sm.refNumber !== editingInvoice.number);
+      const editInvKind = editingInvoice.invoiceKind || editingInvoice.type;
+      const editSmType = editInvKind === 'sale_return'
+        ? 'sale_return'
+        : editInvKind === 'purchase_return'
+          ? 'purchase_return'
+          : editingInvoice.type === 'purchase'
+            ? 'purchase'
+            : 'sale';
+      const editTrSourceType = editSmType;
+      const editTrPrefix = editingInvoice.type === 'purchase'
+        ? `فاتورة مشتريات رقم ${editingInvoice.number}`
+        : `فاتورة مبيعات رقم ${editingInvoice.number}`;
+
+      updated.stockMovements = updated.stockMovements.filter(
+        sm => sm.sourceId !== editingInvoice.id && !(!sm.sourceId && sm.refNumber === editingInvoice.number && sm.type === editSmType)
+      );
       updated.treasury = updated.treasury.filter(tr => {
         if (tr.sourceId === editingInvoice.id || (tr as any).invoiceId === editingInvoice.id) return false;
-        if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(editingInvoice.number).trim()) return false;
-        if (editingInvoice.number && tr.description && (
-          tr.description.includes(`رقم ${editingInvoice.number}`) ||
-          tr.description.includes(`فاتورة مشتريات رقم ${editingInvoice.number}`) ||
-          tr.description.includes(`فاتورة مبيعات رقم ${editingInvoice.number}`) ||
+        if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(editingInvoice.number).trim() && tr.sourceType === editTrSourceType) return false;
+        if (editingInvoice.number && tr.description && tr.sourceType === editTrSourceType && (
+          tr.description.includes(editTrPrefix) ||
           tr.description.includes(`مرتجع رقم ${editingInvoice.number}`)
         )) {
           return false;
@@ -1668,7 +1681,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         return true;
       });
       updated.journals = updated.journals.filter(j => j.sourceId !== editingInvoice.id && j.id !== editingInvoice.journalEntryId);
-      updated.invoices = updated.invoices.filter(i => i.id !== editingInvoice.id && i.number !== editingInvoice.number);
+      updated.invoices = updated.invoices.filter(i => i.id !== editingInvoice.id && !(i.number === editingInvoice.number && i.type === editingInvoice.type));
       // Linked vouchers will be updated in-place by syncInvoiceVouchers below without duplicating or changing voucher numbers
     }
 

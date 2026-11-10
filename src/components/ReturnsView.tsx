@@ -230,10 +230,11 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
     }
 
     updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.sourceId !== ret.id);
-    updated.treasury = (updated.treasury || []).filter(tr => tr.sourceId !== ret.id && (!ret.number || !tr.description?.includes(ret.number)));
+    const retKind = ret.type === 'sale' ? 'sale_return' : 'purchase_return';
+    updated.treasury = (updated.treasury || []).filter(tr => tr.sourceId !== ret.id && !(tr.sourceType === retKind && ret.number && tr.description?.includes(`رقم ${ret.number}`)));
     updated.journals = (updated.journals || []).filter(j => j.sourceId !== ret.id);
     updated.returns = (updated.returns || []).filter(r => r.id !== ret.id);
-    updated.invoices = (updated.invoices || []).filter(i => i.id !== ret.id && i.number !== ret.number);
+    updated.invoices = (updated.invoices || []).filter(i => i.id !== ret.id && !(i.number === ret.number && i.invoiceKind === retKind));
 
     if (ret.partyId) {
       const cust = updated.customers.find(c => c.id === ret.partyId);

@@ -1008,6 +1008,9 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     const key = sm.sourceId ? `${sm.sourceId}::${sm.productId}` : sm.id;
     if (!seenSmKeys.has(key)) {
       seenSmKeys.add(key);
+      if (sm.sourceId && sm.productId) {
+        sm.id = getDeterministicStockMovementId(sm.sourceId, sm.productId);
+      }
       deduplicatedMovements.push(sm);
     }
   }
@@ -2556,20 +2559,28 @@ export function mergeStockMovements(existingList: StockMovement[] = [], incoming
   const map = new Map<string, StockMovement>();
   const getKey = (sm: StockMovement) => {
     if (sm.sourceId && sm.productId) {
-      return `sm_${sm.sourceId}_${sm.productId}_${sm.warehouseId || 'wh'}`;
+      return `sm_${sm.sourceId}_${sm.productId}`;
     }
     return sm.id;
   };
   (existingList || []).forEach(sm => {
     if (sm && (sm.id || (sm.sourceId && sm.productId))) {
-      map.set(getKey(sm), sm);
+      const key = getKey(sm);
+      const normalizedSm = (sm.sourceId && sm.productId)
+        ? { ...sm, id: `sm_${sm.sourceId}_${sm.productId}` }
+        : sm;
+      map.set(key, normalizedSm);
     }
   });
   (incomingList || []).forEach(sm => {
     if (sm && (sm.id || (sm.sourceId && sm.productId))) {
       const key = getKey(sm);
       const existing = map.get(key);
-      map.set(key, existing ? { ...existing, ...sm } : sm);
+      const merged = existing ? { ...existing, ...sm } : sm;
+      if (merged.sourceId && merged.productId) {
+        merged.id = `sm_${merged.sourceId}_${merged.productId}`;
+      }
+      map.set(key, merged);
     }
   });
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -2694,19 +2705,32 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     }
   });
 
-  // 2. Remove related stock movements
+  const invKindStr = invoice.invoiceKind || invoice.type;
+  const expectedSmType = invKindStr === 'sale_return'
+    ? 'sale_return'
+    : invKindStr === 'purchase_return'
+      ? 'purchase_return'
+      : invoice.type === 'purchase'
+        ? 'purchase'
+        : 'sale';
+  const expectedTrSourceType = expectedSmType;
+  const expectedVoucherType: 'receipt' | 'payment' =
+    (invoice.type === 'sale' || invKindStr === 'purchase_return') ? 'receipt' : 'payment';
+  const expectedTrPrefix = invoice.type === 'purchase'
+    ? `فاتورة مشتريات رقم ${invoice.number}`
+    : `فاتورة مبيعات رقم ${invoice.number}`;
+
+  // 2. Remove related stock movements (strictly scoped by sourceId OR matching movement type + refNumber)
   updated.stockMovements = updated.stockMovements.filter(
-    sm => sm.sourceId !== invoice.id && sm.refNumber !== invoice.number
+    sm => sm.sourceId !== invoice.id && !(!sm.sourceId && sm.refNumber === invoice.number && sm.type === expectedSmType)
   );
 
-  // 3. Remove all treasury entries related to this invoice (by sourceId, invoiceId, deterministic ID, or invoice number in description)
+  // 3. Remove all treasury entries related to this invoice (strictly by id OR matching sourceType + invoice number)
   updated.treasury = updated.treasury.filter(tr => {
     if (tr.sourceId === invoice.id || (tr as any).invoiceId === invoice.id || (tr.id && invoice.id && tr.id.includes(invoice.id))) return false;
-    if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim()) return false;
-    if (invoice.number && tr.description && (
-      tr.description.includes(`رقم ${invoice.number}`) ||
-      tr.description.includes(`فاتورة مشتريات رقم ${invoice.number}`) ||
-      tr.description.includes(`فاتورة مبيعات رقم ${invoice.number}`) ||
+    if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim() && tr.sourceType === expectedTrSourceType) return false;
+    if (invoice.number && tr.description && tr.sourceType === expectedTrSourceType && (
+      tr.description.includes(expectedTrPrefix) ||
       tr.description.includes(`مرتجع رقم ${invoice.number}`)
     )) {
       return false;
@@ -2722,7 +2746,7 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
   // 5. Remove any return entries
   if (updated.returns) {
     updated.returns = updated.returns.filter(
-      r => r.originalInvoiceId !== invoice.id && r.number !== invoice.number
+      r => r.originalInvoiceId !== invoice.id && !(r.number === invoice.number && r.type === invoice.type)
     );
   }
 
@@ -2732,9 +2756,9 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     updated.vouchers = updated.vouchers.filter(v => {
       const isLinked = (v.id && invoice.id && v.id.includes(invoice.id)) ||
                        (v as any).sourceId === invoice.id ||
-                       (v as any).referenceNumber === invoice.number ||
                        (v as any).invoiceId === invoice.id ||
-                       (v.description && v.description.includes(invoice.number));
+                       ((v as any).referenceNumber === invoice.number && v.type === expectedVoucherType) ||
+                       (v.type === expectedVoucherType && v.description && v.description.includes(expectedTrPrefix));
       if (isLinked) {
         linkedVoucherIds.add(v.id);
         return false;
@@ -2802,9 +2826,12 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
 
   // 3.5. If voucher was linked to an invoice, revert invoice paid and remaining amount
   if (voucher.invoiceId || (voucher as any).referenceNumber) {
-    const linkedInv = updated.invoices.find(
-      i => i.id === voucher.invoiceId || i.number === (voucher as any).referenceNumber
-    );
+    const expectedInvType = voucher.type === 'receipt' ? 'sale' : 'purchase';
+    const linkedInv =
+      (voucher.invoiceId ? updated.invoices.find(i => i.id === voucher.invoiceId) : undefined) ||
+      ((voucher as any).referenceNumber
+        ? updated.invoices.find(i => i.number === (voucher as any).referenceNumber && i.type === expectedInvType)
+        : undefined);
     if (linkedInv) {
       linkedInv.paid = Math.max(0, (linkedInv.paid || 0) - voucher.amount);
       linkedInv.remaining = Math.max(0, (linkedInv.total || 0) - linkedInv.paid);
@@ -2906,11 +2933,19 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
   // 3. If this was linked to an invoice (purchase, sale, return), revert invoice paid/remaining and party balance
   const invoiceNumMatch = tr.description ? tr.description.match(/رقم\s*([A-Za-z0-9_-]+)/) : null;
   const invNumberExtracted = invoiceNumMatch ? invoiceNumMatch[1] : null;
-  const linkedInvoice = (updated.invoices || []).find(i => 
-    i.id === targetSourceId || 
-    (invNumberExtracted && String(i.number).trim() === invNumberExtracted.trim()) ||
-    ((tr as any).refNumber && String(i.number).trim() === String((tr as any).refNumber).trim())
-  );
+  const expectedInvType = (tr.sourceType === 'purchase' || tr.sourceType === 'purchase_return')
+    ? 'purchase'
+    : (tr.sourceType === 'sale' || tr.sourceType === 'sale_return')
+      ? 'sale'
+      : undefined;
+  const linkedInvoice =
+    (updated.invoices || []).find(i => i.id === targetSourceId) ||
+    (updated.invoices || []).find(i =>
+      (!expectedInvType || i.type === expectedInvType) && (
+        (invNumberExtracted && String(i.number).trim() === invNumberExtracted.trim()) ||
+        ((tr as any).refNumber && String(i.number).trim() === String((tr as any).refNumber).trim())
+      )
+    );
 
   if (linkedInvoice) {
     linkedInvoice.paid = Math.max(0, (linkedInvoice.paid || 0) - tr.amount);
@@ -3289,17 +3324,21 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
     const expectedType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
 
     if (paid <= 0) {
-      // Remove any lingering linked voucher
-      db.vouchers = db.vouchers.filter(v => (v as any).invoiceId !== inv.id && (v as any).referenceNumber !== inv.number);
+      // Remove any lingering linked voucher strictly matching THIS invoice's ID or type+number
+      db.vouchers = db.vouchers.filter(v =>
+        (v as any).invoiceId !== inv.id &&
+        (v as any).sourceId !== inv.id &&
+        !((v as any).referenceNumber === inv.number && v.type === expectedType)
+      );
       return;
     }
 
-    // Find linked voucher
+    // Find linked voucher (match invoiceId / sourceId first, then exact type + number)
     const linkedVouchers = db.vouchers.filter(v => {
       return (v as any).invoiceId === inv.id ||
              (v as any).sourceId === inv.id ||
              ((v as any).referenceNumber === inv.number && v.type === expectedType) ||
-             (v.description && v.description.includes(inv.number) && v.type === expectedType);
+             (v.description && v.description.includes(`رقم ${inv.number}`) && v.type === expectedType);
     });
 
     if (linkedVouchers.length === 0) {

@@ -38,6 +38,7 @@ import {
   Warehouse as WarehouseType,
   StockAdjustment,
   StockTransfer,
+  StockMovement,
   Invoice
 } from '../types/accounting';
 import {
@@ -585,20 +586,59 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     const curr = db.settings.currency;
     const moves: { date: string; desc: string; type: string; inQty: number; outQty: number; balance: number; unitPrice: number }[] = [];
 
-    // 1. Stock Movements log with complete invoice and party details
+    // 1. Stock Movements log with deduplication and type-safe invoice/party matching
     const normPName = normalizeArabicText(product.name);
-    const smList = db.stockMovements.filter(sm =>
+    const validInvIds = new Set((db.invoices || []).map(i => i.id));
+    const rawSmList = (db.stockMovements || []).filter(sm =>
       sm.productId === product.id ||
       normalizeArabicText(sm.productName) === normPName
     );
+    const hasPurchaseMovement = rawSmList.some(sm => sm.type === 'purchase');
+
+    const dedupSmMap = new Map<string, StockMovement>();
+    rawSmList.forEach(sm => {
+      // Skip phantom/orphaned movements whose invoice no longer exists
+      if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validInvIds.has(sm.sourceId)) {
+        return;
+      }
+      // Skip redundant opening movement when purchase invoices track the product
+      if (sm.type === 'opening' && (hasPurchaseMovement || (sm.sourceId && sm.sourceId.startsWith('prod_')))) {
+        return;
+      }
+      const dedupKey = sm.sourceId
+        ? `${sm.sourceId}::${product.id}`
+        : sm.refNumber
+          ? `${sm.type}::${String(sm.refNumber).trim()}::${sm.date}::${sm.qtyChange}`
+          : sm.id;
+      const existing = dedupSmMap.get(dedupKey);
+      if (!existing || (sm.productId === product.id && existing.productId !== product.id)) {
+        dedupSmMap.set(dedupKey, sm);
+      }
+    });
+    const smList = Array.from(dedupSmMap.values());
+
     if (smList.length > 0) {
       smList.forEach(sm => {
         const typeArabic = (sm.type as string) === 'purchase' ? 'شراء' :
                            (sm.type as string) === 'sale' ? 'بيع' :
                            ((sm.type as string) === 'purchase_return' || (sm.type as string) === 'sale_return') ? 'مرتجع' :
                            (sm.type as string) === 'opening' ? 'رصيد افتتاحي' : 'تسوية جردية';
-        const linkedInv = db.invoices.find(i => i.id === sm.sourceId || (sm.refNumber && String(i.number).trim() === String(sm.refNumber).trim()));
-        const partyInfo = linkedInv?.partyName ? ` (${linkedInv.partyName})` : '';
+
+        // Strict invoice resolution: always match by exact sourceId first; fallback checks BOTH number AND invoice type
+        const expectedInvType = (sm.type === 'purchase' || sm.type === 'purchase_return')
+          ? 'purchase'
+          : (sm.type === 'sale' || sm.type === 'sale_return')
+            ? 'sale'
+            : null;
+        const linkedInv =
+          (sm.sourceId ? db.invoices.find(i => i.id === sm.sourceId) : undefined) ||
+          (sm.refNumber && expectedInvType
+            ? db.invoices.find(i => String(i.number).trim() === String(sm.refNumber).trim() && i.type === expectedInvType)
+            : undefined);
+
+        const partyLabelFallback = sm.type === 'purchase' ? 'مورد' : sm.type === 'sale' ? 'عميل' : '';
+        const resolvedParty = linkedInv?.partyName || partyLabelFallback;
+        const partyInfo = resolvedParty ? ` (${resolvedParty})` : '';
         const docDesc = sm.refNumber ? `فاتورة ${typeArabic} رقم ${sm.refNumber}${partyInfo}` : `حركة ${typeArabic}${partyInfo}`;
         moves.push({
           date: sm.date,
@@ -606,14 +646,14 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           type: sm.type,
           inQty: sm.qtyChange > 0 ? sm.qtyChange : 0,
           outQty: sm.qtyChange < 0 ? Math.abs(sm.qtyChange) : 0,
-          balance: sm.balanceAfter,
+          balance: 0,
           unitPrice: sm.unitCost
         });
       });
     } else {
       // Fallback: Invoices, Returns, Adjustments
       db.invoices.filter(inv => inv.type === 'purchase').forEach(inv => {
-        inv.items.filter(item => item.productId === product.id).forEach(item => {
+        inv.items.filter(item => item.productId === product.id || normalizeArabicText(item.productName) === normPName).forEach(item => {
           moves.push({
             date: inv.date,
             desc: `فاتورة شراء رقم ${inv.number} (${inv.partyName || 'مورد'})`,
@@ -627,7 +667,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       });
 
       db.invoices.filter(inv => inv.type === 'sale').forEach(inv => {
-        inv.items.filter(item => item.productId === product.id).forEach(item => {
+        inv.items.filter(item => item.productId === product.id || normalizeArabicText(item.productName) === normPName).forEach(item => {
           moves.push({
             date: inv.date,
             desc: `فاتورة بيع رقم ${inv.number} (${inv.partyName || 'عميل'})`,
@@ -671,24 +711,27 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           type: 'adj',
           inQty: adj.diffQty > 0 ? adj.diffQty : 0,
           outQty: adj.diffQty < 0 ? Math.abs(adj.diffQty) : 0,
-          balance: adj.actualQty,
+          balance: 0,
           unitPrice: adj.unitCost
         });
       });
     }
 
-    moves.sort((a, b) => (a.date > b.date ? 1 : -1));
+    moves.sort((a, b) => {
+      const dateCmp = (a.date || '').localeCompare(b.date || '');
+      if (dateCmp !== 0) return dateCmp;
+      // On the same day, order incoming movements (opening/purchase/return) before outgoing (sale)
+      return (a.inQty > 0 ? 0 : 1) - (b.inQty > 0 ? 0 : 1);
+    });
 
     let run = 0;
     moves.forEach(m => {
-      run = run + m.inQty - m.outQty;
-      if (!m.balance) {
-        m.balance = run;
-      }
+      run = Number((run + m.inQty - m.outQty).toFixed(4));
+      m.balance = run;
     });
 
-    const totalIn = moves.reduce((s, m) => s + m.inQty, 0);
-    const totalOut = moves.reduce((s, m) => s + m.outQty, 0);
+    const totalIn = Number(moves.reduce((s, m) => s + m.inQty, 0).toFixed(4));
+    const totalOut = Number(moves.reduce((s, m) => s + m.outQty, 0).toFixed(4));
 
     const doc: MovementPrintBlock = {
       title: 'كارت حركة صنف',
@@ -1416,14 +1459,14 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               }[] = [];
 
               // Invoices
+              const normTargetProdName = normalizeArabicText(product.name);
               db.invoices.forEach(inv => {
                 if (!isBranchMatch(inv.branchId, selectedBranchId)) return;
                 const matchItems = inv.items.filter(
                   it => (it.productId && it.productId === product.id) ||
-                        (it.productCode && it.productCode === product.code) ||
-                        (it.productName && it.productName.trim().toLowerCase() === product.name.trim().toLowerCase())
+                        (it.productName && normalizeArabicText(it.productName) === normTargetProdName)
                 );
-                matchItems.forEach(it => {
+                matchItems.forEach((it, idx) => {
                   const isSale = inv.type === 'sale';
                   let moveType: 'sale' | 'purchase' | 'sale_return' | 'purchase_return' = isSale ? 'sale' : 'purchase';
                   if (inv.invoiceKind === 'sale_return') moveType = 'sale_return';
@@ -1432,7 +1475,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   const qtySigned = (moveType === 'sale' || moveType === 'purchase_return') ? -it.qty : it.qty;
 
                   itemMoves.push({
-                    id: `${inv.id}_${it.productId}`,
+                    id: `${inv.id}_${it.productId || 'item'}_${idx}`,
                     date: inv.date,
                     time: inv.time || '12:00',
                     type: moveType,
