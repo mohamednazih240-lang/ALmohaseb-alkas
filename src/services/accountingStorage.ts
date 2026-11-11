@@ -318,10 +318,17 @@ function resolveCanonicalProductKey(
   prodById: Map<string, Product>,
   prodByNormName: Map<string, Product>,
   productId?: string,
-  productName?: string
+  productName?: string,
+  prodByCode?: Map<string, Product>,
+  productCode?: string
 ): { key: string; prod?: Product } {
   if (productId) {
     const p = prodById.get(productId);
+    if (p) return { key: `id:${p.id}`, prod: p };
+  }
+  const cleanCode = (productCode || '').trim().toLowerCase();
+  if (cleanCode && prodByCode) {
+    const p = prodByCode.get(cleanCode);
     if (p) return { key: `id:${p.id}`, prod: p };
   }
   const norm = normalizeArabicText(productName);
@@ -330,6 +337,9 @@ function resolveCanonicalProductKey(
     if (p) return { key: `id:${p.id}`, prod: p };
     return { key: `name:${norm}`, prod: undefined };
   }
+  if (cleanCode) {
+    return { key: `code:${cleanCode}`, prod: undefined };
+  }
   return { key: productId ? `id:${productId}` : 'unknown', prod: undefined };
 }
 
@@ -337,8 +347,8 @@ function resolveCanonicalProductKey(
  * محرك التكلفة الفعلي المعتمد حصرياً على الدفعات والتسلسل الزمني (Strict FIFO Batch Costing Engine):
  * - يحفظ تكلفة كل دفعة شراء بسعرها الفعلي دون أي خلط أو متوسط مرجح نهائياً.
  * - لا يستبدل تكاليف الدفعات السابقة عند وصول مشتريات جديدة بسعر مختلف.
- * - يعالج الأرصدة السالبة زمنياً: عند ورود شراء لاحق، يسوي العجز السابق ويحتفظ بالكمية المتبقية بتكلفة الشراء الدقيقة دون تشويه.
- * - إذا بيع صنف دون أي دفعة شراء موثقة مسبقاً، يظل صافي التكلفة والربح غير محدد (hasVerifiedCost = false).
+ * - يعالج الأرصدة السالبة زمنياً: عند ورود شراء لاحق، يسوي العجز السابق ويربط تكلفته بفواتير البيع السالبة ويحتفظ بالكمية المتبقية بتكلفة الشراء الدقيقة دون تشويه.
+ * - إذا بيع صنف دون أي دفعة شراء تغطيه، يظل صافي التكلفة والربح غير محدد (hasVerifiedCost = false).
  */
 export function buildProductFifoLedger(
   db: AccountingDB,
@@ -346,9 +356,12 @@ export function buildProductFifoLedger(
   excludeInvoiceId?: string
 ): ProductFifoLedger {
   const prodById = new Map<string, Product>();
+  const prodByCode = new Map<string, Product>();
   const prodByNormName = new Map<string, Product>();
   for (const p of db?.products || []) {
     if (p.id) prodById.set(p.id, p);
+    const cleanCode = (p.code || '').trim().toLowerCase();
+    if (cleanCode && !prodByCode.has(cleanCode)) prodByCode.set(cleanCode, p);
     const norm = normalizeArabicText(p.name);
     if (norm && !prodByNormName.has(norm)) prodByNormName.set(norm, p);
   }
@@ -370,6 +383,7 @@ export function buildProductFifoLedger(
     items: Array<{
       lineIndex: number;
       productId?: string;
+      productCode?: string;
       productName: string;
       qty: number;
       unitCost: number;
@@ -428,6 +442,7 @@ export function buildProductFifoLedger(
         return {
           lineIndex: idx,
           productId: it.productId,
+          productCode: it.productCode,
           productName: it.productName || '',
           qty: q,
           unitCost: kind === 'purchase' ? unitPrice : (Number(it.costPrice) || 0),
@@ -501,10 +516,17 @@ export function buildProductFifoLedger(
     return a.seq - b.seq;
   });
 
+  type PendingDeficitEntry = {
+    alloc: FifoSaleAllocation;
+    keyAlloc: FifoSaleAllocation;
+    remainingDeficit: number;
+  };
+
   type MutableProductState = {
     productId?: string;
     productName: string;
     batches: StockBatchLayer[];
+    pendingDeficits: PendingDeficitEntry[];
     uncoveredDeficitQty: number;
     onHandQty: number;
     latestBuyPrice: number;
@@ -520,6 +542,23 @@ export function buildProductFifoLedger(
   const allocByInvAndKey = new Map<string, FifoSaleAllocation>();
   const allocByInvAndLine = new Map<string, FifoSaleAllocation>();
 
+  const applySettlementToAllocation = (
+    target: FifoSaleAllocation,
+    takeQty: number,
+    unitCost: number,
+    batchRef: { batchId: string; invoiceNumber: string; date: string; qty: number; unitCost: number }
+  ) => {
+    target.coveredQty = Number((target.coveredQty + takeQty).toFixed(4));
+    target.uncoveredQty = Number(Math.max(0, target.qty - target.coveredQty).toFixed(4));
+    target.verifiedCostTotal = Number((target.verifiedCostTotal + takeQty * unitCost).toFixed(4));
+    target.hasVerifiedCost = target.coveredQty > 0.00001;
+    target.hasFullVerifiedCost = target.uncoveredQty <= 0.00001;
+    target.effectiveUnitCost = target.hasVerifiedCost
+      ? Number((target.verifiedCostTotal / target.coveredQty).toFixed(4))
+      : undefined;
+    target.batchesUsed.push(batchRef);
+  };
+
   const getOrCreateState = (key: string, prod?: Product, fallbackName: string = ''): MutableProductState => {
     let st = stateMap.get(key);
     if (!st) {
@@ -527,6 +566,7 @@ export function buildProductFifoLedger(
         productId: prod?.id,
         productName: prod?.name || fallbackName,
         batches: [],
+        pendingDeficits: [],
         uncoveredDeficitQty: 0,
         onHandQty: 0,
         latestBuyPrice: 0,
@@ -541,7 +581,14 @@ export function buildProductFifoLedger(
 
   for (const ev of events) {
     for (const it of ev.items) {
-      const { key, prod } = resolveCanonicalProductKey(prodById, prodByNormName, it.productId, it.productName);
+      const { key, prod } = resolveCanonicalProductKey(
+        prodById,
+        prodByNormName,
+        it.productId,
+        it.productName,
+        prodByCode,
+        it.productCode
+      );
       const st = getOrCreateState(key, prod, it.productName);
 
       if (ev.kind === 'purchase') {
@@ -558,10 +605,41 @@ export function buildProductFifoLedger(
           st.lastInvoiceNumber = ev.invoiceNumber;
           st.lastSupplierName = ev.partyName;
 
-          // Chronological negative stock settlement before creating remaining FIFO layer
-          const settled = Math.min(qty, st.uncoveredDeficitQty);
-          st.uncoveredDeficitQty = Number((st.uncoveredDeficitQty - settled).toFixed(4));
-          const remainingAfterSettlement = Number((qty - settled).toFixed(4));
+          // Chronological negative stock settlement: settle open deficit sales FIFO at this settling batch's cost
+          let remainingAfterSettlement = qty;
+          while (st.pendingDeficits.length > 0 && remainingAfterSettlement > 0.00001) {
+            const pd = st.pendingDeficits[0];
+            const take = Number(Math.min(remainingAfterSettlement, pd.remainingDeficit).toFixed(4));
+            if (take <= 0.00001) {
+              st.pendingDeficits.shift();
+              continue;
+            }
+            remainingAfterSettlement = Number((remainingAfterSettlement - take).toFixed(4));
+            pd.remainingDeficit = Number((pd.remainingDeficit - take).toFixed(4));
+            st.uncoveredDeficitQty = Number(Math.max(0, st.uncoveredDeficitQty - take).toFixed(4));
+
+            const batchRef = {
+              batchId: `${ev.invoiceId}::${key}::settle_${pd.alloc.invoiceId}`,
+              invoiceNumber: ev.invoiceNumber,
+              date: ev.sortDate,
+              qty: take,
+              unitCost
+            };
+            applySettlementToAllocation(pd.alloc, take, unitCost, batchRef);
+            if (pd.keyAlloc && pd.keyAlloc !== pd.alloc) {
+              applySettlementToAllocation(pd.keyAlloc, take, unitCost, { ...batchRef });
+            }
+            if (pd.remainingDeficit <= 0.00001) {
+              st.pendingDeficits.shift();
+            }
+          }
+
+          // Settle any residual uncovered deficit (e.g., negative manual adjustments before purchase)
+          if (st.uncoveredDeficitQty > 0.00001 && remainingAfterSettlement > 0.00001) {
+            const extraSettled = Number(Math.min(remainingAfterSettlement, st.uncoveredDeficitQty).toFixed(4));
+            st.uncoveredDeficitQty = Number((st.uncoveredDeficitQty - extraSettled).toFixed(4));
+            remainingAfterSettlement = Number((remainingAfterSettlement - extraSettled).toFixed(4));
+          }
 
           if (remainingAfterSettlement > 0.00001) {
             st.batches.push({
@@ -632,14 +710,16 @@ export function buildProductFifoLedger(
         allocByInvAndLine.set(`${ev.invoiceId}::line::${it.lineIndex}`, alloc);
         const keyMapKey = `${ev.invoiceId}::${key}`;
         const prevAlloc = allocByInvAndKey.get(keyMapKey);
+        let keyAllocRef: FifoSaleAllocation;
         if (!prevAlloc) {
-          allocByInvAndKey.set(keyMapKey, { ...alloc, batchesUsed: [...alloc.batchesUsed] });
+          keyAllocRef = { ...alloc, batchesUsed: [...alloc.batchesUsed] };
+          allocByInvAndKey.set(keyMapKey, keyAllocRef);
         } else {
           const totalQ = Number((prevAlloc.qty + alloc.qty).toFixed(4));
           const totalCovered = Number((prevAlloc.coveredQty + alloc.coveredQty).toFixed(4));
           const totalUncovered = Number((prevAlloc.uncoveredQty + alloc.uncoveredQty).toFixed(4));
           const totalCost = Number((prevAlloc.verifiedCostTotal + alloc.verifiedCostTotal).toFixed(4));
-          allocByInvAndKey.set(keyMapKey, {
+          keyAllocRef = {
             ...prevAlloc,
             qty: totalQ,
             coveredQty: totalCovered,
@@ -649,6 +729,15 @@ export function buildProductFifoLedger(
             hasFullVerifiedCost: totalUncovered <= 0.00001,
             effectiveUnitCost: totalCovered > 0.00001 ? Number((totalCost / totalCovered).toFixed(4)) : undefined,
             batchesUsed: [...prevAlloc.batchesUsed, ...alloc.batchesUsed]
+          };
+          allocByInvAndKey.set(keyMapKey, keyAllocRef);
+        }
+
+        if (uncoveredQty > 0.00001) {
+          st.pendingDeficits.push({
+            alloc,
+            keyAlloc: keyAllocRef,
+            remainingDeficit: uncoveredQty
           });
         }
       } else if (ev.kind === 'sale_return') {
@@ -657,6 +746,16 @@ export function buildProductFifoLedger(
         st.onHandQty = Number((st.onHandQty + qty).toFixed(4));
         const settled = Math.min(qty, st.uncoveredDeficitQty);
         st.uncoveredDeficitQty = Number((st.uncoveredDeficitQty - settled).toFixed(4));
+        let trimPending = settled;
+        while (trimPending > 0.00001 && st.pendingDeficits.length > 0) {
+          const lastPd = st.pendingDeficits[st.pendingDeficits.length - 1];
+          const takeTrim = Math.min(trimPending, lastPd.remainingDeficit);
+          lastPd.remainingDeficit = Number((lastPd.remainingDeficit - takeTrim).toFixed(4));
+          trimPending = Number((trimPending - takeTrim).toFixed(4));
+          if (lastPd.remainingDeficit <= 0.00001) {
+            st.pendingDeficits.pop();
+          }
+        }
         const rem = Number((qty - settled).toFixed(4));
         if (rem > 0.00001 && it.unitCost > 0 && it.hasVerifiedCostFlag !== false) {
           st.batches.push({

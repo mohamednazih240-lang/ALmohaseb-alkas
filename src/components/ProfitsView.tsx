@@ -25,7 +25,8 @@ import {
   formatMoney,
   getTodayDate,
   deleteInvoiceAndRevert,
-  buildProductFifoLedger
+  buildProductFifoLedger,
+  normalizeArabicText
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -230,12 +231,13 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
     sales.forEach(inv => {
       inv.items.forEach((it, idx) => {
-        const normName = it.productName ? it.productName.trim().toLowerCase() : '';
+        const normName = normalizeArabicText(it.productName);
+        const cleanCode = (it.productCode || '').trim().toLowerCase();
         const prod = db.products.find(
           p =>
             p.id === it.productId ||
-            (it.productCode && p.code === it.productCode) ||
-            (normName && p.name.trim().toLowerCase() === normName)
+            (cleanCode && (p.code || '').trim().toLowerCase() === cleanCode) ||
+            (normName && normalizeArabicText(p.name) === normName)
         );
         const groupKey = prod?.id || it.productId || normName || it.productName;
         const alloc = fifoLedger.getSaleAllocation(inv.id, prod?.id || it.productId, it.productName, idx);
