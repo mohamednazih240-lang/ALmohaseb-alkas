@@ -37,13 +37,57 @@ export interface JournalEntry {
   createdAt: string;
 }
 
+export interface SellingPriceHistoryEntry {
+  id: string;
+  date: string;
+  oldSellPrice?: number;
+  newSellPrice: number;
+  oldWholesalePrice?: number;
+  newWholesalePrice?: number;
+  updatedBy: string;
+  branchId?: string;
+  note?: string;
+}
+
+export interface StockBatchLayer {
+  id: string;
+  productId: string;
+  productName: string;
+  purchaseInvoiceId: string;
+  purchaseInvoiceNumber: string;
+  date: string;
+  originalQty: number;
+  remainingQty: number;
+  unitCost: number;
+  branchId: string;
+  sourceType: 'purchase';
+}
+
+export interface FifoSaleAllocation {
+  invoiceId: string;
+  invoiceNumber: string;
+  date: string;
+  productId: string;
+  productName: string;
+  qty: number;
+  coveredQty: number;
+  uncoveredQty: number;
+  verifiedCostTotal: number;
+  hasVerifiedCost: boolean;
+  hasFullVerifiedCost: boolean;
+  effectiveUnitCost?: number;
+  batchesUsed: { batchId: string; invoiceNumber: string; date: string; qty: number; unitCost: number }[];
+}
+
 export interface BranchProductData {
   currentQty: number; // رصيد الصنف في هذا الفرع
-  buyPrice: number;   // سعر الشراء في هذا الفرع
+  buyPrice: number;   // آخر سعر شراء موثق في هذا الفرع
   sellPrice: number;  // سعر البيع النقدي في هذا الفرع
   wholesalePrice: number; // سعر الجملة في هذا الفرع
   minStock?: number;  // حد الطلب الأدنى في هذا الفرع
-  avgCost?: number;   // متوسط التكلفة في هذا الفرع
+  avgCost?: number;   // مرجع تاريخي للتوافق فقط (لا يُستخدم في التقييم المعتمد FIFO)
+  sellingPriceUpdatedAt?: string;
+  sellingPriceUpdatedBy?: string;
 }
 
 export interface Product {
@@ -58,8 +102,11 @@ export interface Product {
   wholesalePrice: number;
   minStock: number;
   currentQty: number;
-  avgCost: number;
+  avgCost?: number; // مرجع تاريخي للتوافق فقط (لا يُستخدم في التقييم المعتمد FIFO)
   notes?: string;
+  sellingPriceUpdatedAt?: string;
+  sellingPriceUpdatedBy?: string;
+  sellingPriceHistory?: SellingPriceHistoryEntry[];
   priceHistory?: { date: string; price: number; qty: number; invoiceId?: string; branchId?: string }[];
   // بيانات المخزون والتسعير المستقلة لكل فرع
   // الأصناف موحدة في كل الفروع لكن الكميات والأسعار تدخل حسب الفرع ولا تؤثر على أي فرع آخر
@@ -114,6 +161,8 @@ export interface InvoiceItem {
   qty: number;
   unitPrice: number;
   costPrice: number;
+  hasVerifiedCost?: boolean;
+  uncoveredQty?: number;
   discount: number;
   taxRate: number;
   total: number;
@@ -257,6 +306,8 @@ export interface Voucher {
   branchName?: string;
   referenceNumber?: string;
   invoiceId?: string;
+  isManualInstallment?: boolean;
+  isAutoFromInvoice?: boolean;
   createdAt?: string;
   createdBy?: string;
   updatedAt?: string;
@@ -551,7 +602,7 @@ export interface AppSettings {
   invoiceTitle: string;
   taxNumber?: string;
   low: number;
-  cost: 'average' | 'last';
+  cost: 'fifo' | 'average' | 'last';
   tax: 'disabled' | 'enabled';
   taxRate: number;
   notes: string;

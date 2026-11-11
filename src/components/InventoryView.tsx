@@ -50,7 +50,7 @@ import {
   updateProductBranchData,
   isBranchMatch,
   normalizeArabicText,
-  calculateProductAverageCost
+  buildProductFifoLedger
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import {
@@ -146,7 +146,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     [db.products, selectedBranchId]
   );
 
-  // Statistics for this branch (computed in a single fast pass)
+  const fifoLedger = useMemo(
+    () => buildProductFifoLedger(db, selectedBranchId),
+    [db, selectedBranchId]
+  );
+
+  // Statistics for this branch (computed in a single fast pass using FIFO batch valuation)
   const { inStockCount, zeroStockCount, lowStockCount, negativeStockCount, totalStockValue } = useMemo(() => {
     let inStock = 0;
     let zeroStock = 0;
@@ -158,10 +163,17 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       if (p.currentQty === 0) zeroStock++;
       if (p.currentQty < 0) negativeStock++;
       if (p.currentQty <= p.minStock && p.currentQty > 0) lowStock++;
-      totalVal += p.currentQty * (p.avgCost || p.buyPrice);
+      const fifo = fifoLedger.getProductSummary(p.id, p.name);
+      totalVal += fifo.batchValuation;
     }
-    return { inStockCount: inStock, zeroStockCount: zeroStock, lowStockCount: lowStock, negativeStockCount: negativeStock, totalStockValue: totalVal };
-  }, [branchProducts]);
+    return {
+      inStockCount: inStock,
+      zeroStockCount: zeroStock,
+      lowStockCount: lowStock,
+      negativeStockCount: negativeStock,
+      totalStockValue: Number(totalVal.toFixed(2))
+    };
+  }, [branchProducts, fifoLedger]);
 
   // Filtered and sorted products (memoized to eliminate sorting lag on page changes)
   const filteredProducts = useMemo(() => {
@@ -299,7 +311,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       warehouseName: fromWh ? fromWh.name : 'مخزن المصدر',
       qtyChange: -transferQty,
       balanceAfter: prod.currentQty,
-      unitCost: prod.avgCost || prod.buyPrice,
+      unitCost: fifoLedger.getProductSummary(prod.id, prod.name).latestBuyPrice || 0,
       type: 'transfer_out',
       refNumber: `TRF-${tId.slice(-4)}`,
       sourceId: tId
@@ -314,7 +326,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       warehouseName: toWh ? toWh.name : 'مخزن الوجهة',
       qtyChange: transferQty,
       balanceAfter: prod.currentQty,
-      unitCost: prod.avgCost || prod.buyPrice,
+      unitCost: fifoLedger.getProductSummary(prod.id, prod.name).latestBuyPrice || 0,
       type: 'transfer_in',
       refNumber: `TRF-${tId.slice(-4)}`,
       sourceId: tId
@@ -338,7 +350,8 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     if (diff === 0) return alert(`الرصيد الفعلي مطابق للرصيد الدفتري بفرع (${currentBranch.name})، لا يوجد فرق تسوية`);
 
     const adjId = generateId('adj');
-    const unitCost = bp.avgCost || bp.buyPrice;
+    const fifoProd = fifoLedger.getProductSummary(prod.id, prod.name);
+    const unitCost = fifoProd.hasVerifiedPurchase ? fifoProd.latestBuyPrice : 0;
     const diffValue = Math.abs(diff) * unitCost;
 
     const adjustmentRecord: StockAdjustment = {
@@ -469,19 +482,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       alert('لا توجد أصناف للتصدير');
       return;
     }
-    const headers = ['كود الصنف', 'اسم الصنف', 'الباركود', 'الوحدة', 'الرصيد الحالي', 'سعر التكلفة', 'سعر البيع', 'سعر الجملة', 'الحد الأدنى', 'القيمة الإجمالية'];
-    const rows = filteredProducts.map(p => [
-      p.code,
-      p.name,
-      p.barcode || '',
-      p.unit,
-      p.currentQty.toString(),
-      (p.avgCost || p.buyPrice).toString(),
-      p.sellPrice.toString(),
-      (p.wholesalePrice || p.sellPrice).toString(),
-      p.minStock.toString(),
-      (p.currentQty * (p.avgCost || p.buyPrice)).toString()
-    ]);
+    const headers = ['كود الصنف', 'اسم الصنف', 'الباركود', 'الوحدة', 'الرصيد الحالي', 'آخر تكلفة موثقة', 'سعر البيع', 'سعر الجملة', 'الحد الأدنى', 'تقييم FIFO'];
+    const rows = filteredProducts.map(p => {
+      const fifo = fifoLedger.getProductSummary(p.id, p.name);
+      return [
+        p.code,
+        p.name,
+        p.barcode || '',
+        p.unit,
+        p.currentQty.toString(),
+        fifo.hasVerifiedPurchase ? fifo.latestBuyPrice.toString() : 'غير محدد',
+        p.sellPrice.toString(),
+        (p.wholesalePrice || p.sellPrice).toString(),
+        p.minStock.toString(),
+        fifo.batchValuation.toString()
+      ];
+    });
     exportTableToCsv(`inventory_products_${getTodayDate()}.csv`, headers, rows);
   };
 
@@ -497,7 +513,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       title: 'كتالوج وقائمة أسعار الأصناف المعتمدة',
       serialNo: `#CAT-${today}`,
       date: today,
-      partyLabel: 'عدد الأصناف:',
+      partyLabel: 'عدد الأصناف',
       partyName: `${filteredProducts.length} صنف مسجل`,
       badge: 'كتالوج أسعار',
       tableHeaders: [
@@ -514,13 +530,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           p.name,
           p.unit,
           `${p.currentQty}`,
-          formatMoney(p.sellPrice, curr),
-          formatMoney(p.wholesalePrice || p.sellPrice, curr)
+          p.sellPrice > 0 ? formatMoney(p.sellPrice, curr) : 'غير محدد',
+          p.wholesalePrice > 0 ? formatMoney(p.wholesalePrice, curr) : '—'
         ]
       })),
       summaryLines: [
         { label: 'إجمالي عدد الأصناف المعروضة', value: `${filteredProducts.length} صنف` },
-        { label: 'إجمالي قيمة المخزون التقديرية', value: formatMoney(totalStockValue, curr), isTotal: true, highlight: true }
+        { label: 'إجمالي قيمة المخزون (FIFO)', value: formatMoney(totalStockValue, curr), isTotal: true, highlight: true }
       ],
       footerNotes: 'الأسعار شاملة الضريبة إن وجدت وقابلة للتعديل بحسب تحديثات الإدارة.'
     };
@@ -537,44 +553,44 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     }
     const today = getTodayDate();
     const curr = db.settings.currency;
-    const totalSell = filteredProducts.reduce((s, p) => s + (p.currentQty * p.sellPrice), 0);
-    const totalCost = filteredProducts.reduce((s, p) => s + (p.currentQty * (p.avgCost || p.buyPrice)), 0);
+    const totalSell = filteredProducts.reduce((s, p) => s + p.currentQty * p.sellPrice, 0);
+    const totalCost = filteredProducts.reduce((s, p) => s + fifoLedger.getProductSummary(p.id, p.name).batchValuation, 0);
 
     const doc: MovementPrintBlock = {
       title: 'تقرير جرد وتقييم المخزون المالي',
       serialNo: `#VAL-${today}`,
       date: today,
-      partyLabel: 'عدد الأصناف:',
+      partyLabel: 'عدد الأصناف',
       partyName: `${filteredProducts.length} صنف`,
       badge: 'تقييم مخزون',
       tableHeaders: [
         { label: 'الكود', width: '12%', align: 'center' },
         { label: 'اسم الصنف', width: '30%', align: 'right' },
         { label: 'الرصيد', width: '12%', align: 'center' },
-        { label: 'التكلفة', width: '14%', align: 'center' },
-        { label: 'إجمالي التكلفة', width: '16%', align: 'center' },
+        { label: 'آخر تكلفة موثقة', width: '14%', align: 'center' },
+        { label: 'قيمة الدفعات (FIFO)', width: '16%', align: 'center' },
         { label: 'قيمة البيع', width: '16%', align: 'center' }
       ],
       tableRows: filteredProducts.map(p => {
-        const cost = p.avgCost || p.buyPrice;
+        const fifo = fifoLedger.getProductSummary(p.id, p.name);
         return {
           cols: [
             p.code,
             p.name,
             `${p.currentQty} ${p.unit}`,
-            formatMoney(cost, curr),
-            formatMoney(p.currentQty * cost, curr),
+            fifo.hasVerifiedPurchase ? formatMoney(fifo.latestBuyPrice, curr) : 'غير محدد',
+            formatMoney(fifo.batchValuation, curr),
             formatMoney(p.currentQty * p.sellPrice, curr)
           ],
           highlight: p.currentQty <= p.minStock
         };
       }),
       summaryLines: [
-        { label: 'إجمالي قيمة المخزون بالتكلفة', value: formatMoney(totalCost, curr) },
+        { label: 'إجمالي قيمة المخزون بدفعات FIFO', value: formatMoney(totalCost, curr) },
         { label: 'إجمالي قيمة المخزون بالبيع', value: formatMoney(totalSell, curr) },
         { label: 'الأرباح المتوقعة للمخزون', value: formatMoney(totalSell - totalCost, curr), isTotal: true, highlight: true }
       ],
-      footerNotes: 'تم احتساب التكلفة وفقاً لمتوسط التكلفة المرجح للواردات.'
+      footerNotes: 'تم تقييم المخزون الفعلي على أساس دفعات الشراء الفعلية (FIFO) بدون أي متوسط مرجح.'
     };
     setPrintDocTitle('تقرير تقييم المخزون والجرد');
     setPrintDocuments([doc]);
@@ -733,10 +749,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
     const totalIn = Number(moves.reduce((s, m) => s + m.inQty, 0).toFixed(4));
     const totalOut = Number(moves.reduce((s, m) => s + m.outQty, 0).toFixed(4));
-    const verifiedCardCost = calculateProductAverageCost(db, product.id, product.name);
-    const displayCardCost = verifiedCardCost.hasPurchases
-      ? (db.settings?.cost === 'average' ? (verifiedCardCost.avgCost || verifiedCardCost.latestBuyPrice) : (verifiedCardCost.latestBuyPrice || verifiedCardCost.avgCost))
-      : (product.avgCost || product.buyPrice);
+    const fifoCardSummary = fifoLedger.getProductSummary(product.id, product.name);
     const effectiveClosingBalance = moves.length > 0 ? run : product.currentQty;
 
     const doc: MovementPrintBlock = {
@@ -750,12 +763,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       partySubId: product.barcode ? `باركود: ${product.barcode}` : undefined,
       badge: 'سجل حركة صنف',
       tableHeaders: [
-        { label: 'التاريخ', width: '16%', align: 'center' },
-        { label: 'البيان والمستند', width: '32%', align: 'right' },
-        { label: 'الوارد', width: '13%', align: 'center' },
-        { label: 'المنصرف', width: '13%', align: 'center' },
-        { label: 'السعر', width: '13%', align: 'center' },
-        { label: 'الرصيد', width: '13%', align: 'center' }
+        { label: 'التاريخ', width: '18%', align: 'center' },
+        { label: 'البيان والمستند', width: '30%', align: 'right' },
+        { label: 'الوارد', width: '12%', align: 'center' },
+        { label: 'المنصرف', width: '12%', align: 'center' },
+        { label: 'السعر', width: '14%', align: 'center' },
+        { label: 'الرصيد', width: '14%', align: 'center' }
       ],
       tableRows: moves.map(m => ({
         cols: [
@@ -774,7 +787,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         { label: 'إجمالي الكميات المنصرفة', value: `${totalOut} ${product.unit}` },
         { label: 'الرصيد الحالي بالمخزن', value: `${effectiveClosingBalance} ${product.unit}`, isTotal: true, highlight: true }
       ],
-      footerNotes: `باركود: ${product.barcode || '—'} | الحد الأدنى: ${product.minStock} | متوسط التكلفة: ${formatMoney(displayCardCost, curr)}`
+      footerNotes: `باركود: ${product.barcode || '—'} | الحد الأدنى: ${product.minStock} | آخر تكلفة شراء موثقة: ${
+        fifoCardSummary.hasVerifiedPurchase ? formatMoney(fifoCardSummary.latestBuyPrice, curr) : 'غير محدد'
+      }`
     };
 
     setPrintDocTitle(`كارت صنف - ${product.name}`);
@@ -1148,7 +1163,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               {paginatedProducts.map(p => {
                 const isZero = p.currentQty === 0;
                 const isLow = !isZero && p.currentQty <= p.minStock;
-                const val = p.currentQty * (p.avgCost || p.buyPrice);
+                const val = fifoLedger.getProductSummary(p.id, p.name).batchValuation;
                 const isSelected = selectedProductIds.has(p.id);
 
                 return (
@@ -2101,7 +2116,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 <span>مقارنة وتقلبات أسعار الشراء</span>
               </h1>
               <p className="text-xs text-slate-500 font-medium mt-0.5">
-                تتبع التغيرات في أسعار توريد المنتجات عبر الزمن ومتوسط التكلفة
+                تتبع التغيرات في أسعار توريد المنتجات عبر الزمن وفق دفعات الشراء (FIFO)
               </p>
             </div>
           </div>
@@ -2109,38 +2124,48 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
             {db.products.map(p => {
               const hist = p.priceHistory || [];
-              const lastPrice = hist.length > 0 ? hist[hist.length - 1].price : p.buyPrice;
+              const fifo = fifoLedger.getProductSummary(p.id, p.name);
+              const lastPrice = fifo.hasVerifiedPurchase ? fifo.latestBuyPrice : (hist.length > 0 ? hist[hist.length - 1].price : 0);
               const prevPrice = hist.length > 1 ? hist[hist.length - 2].price : lastPrice;
-              const margin = p.sellPrice > 0 ? (((p.sellPrice - (p.avgCost || p.buyPrice)) / p.sellPrice) * 100).toFixed(1) : '0';
+              const margin =
+                p.sellPrice > 0 && fifo.hasVerifiedPurchase
+                  ? (((p.sellPrice - fifo.latestBuyPrice) / p.sellPrice) * 100).toFixed(1)
+                  : null;
 
               return (
                 <div key={p.id} className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs space-y-2">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                     <span className="font-bold text-xs text-slate-900">{p.name}</span>
                     <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                      هامش: {margin}%
+                      {margin !== null ? `هامش: ${margin}%` : 'غير محدد'}
                     </span>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div className="bg-slate-50 p-2 rounded border border-slate-100">
                       <span className="text-[10px] text-slate-500 block">آخر سعر توريد</span>
-                      <span className="font-mono font-bold text-slate-900">{formatMoney(lastPrice, db.settings.currency)}</span>
+                      <span className="font-mono font-bold text-slate-900">
+                        {lastPrice > 0 ? formatMoney(lastPrice, db.settings.currency) : 'غير محدد'}
+                      </span>
                     </div>
                     <div className="bg-slate-50 p-2 rounded border border-slate-100">
                       <span className="text-[10px] text-slate-500 block">السعر السابق</span>
-                      <span className="font-mono text-slate-600">{formatMoney(prevPrice, db.settings.currency)}</span>
+                      <span className="font-mono text-slate-600">
+                        {prevPrice > 0 ? formatMoney(prevPrice, db.settings.currency) : 'غير محدد'}
+                      </span>
                     </div>
                   </div>
 
                   <div className="flex items-center justify-between text-xs pt-1">
-                    <span className="text-slate-500">متوسط التكلفة:</span>
-                    <span className="font-mono font-bold text-slate-800">{formatMoney(p.avgCost || p.buyPrice, db.settings.currency)}</span>
+                    <span className="text-slate-500">تقييم الرصيد (FIFO):</span>
+                    <span className="font-mono font-bold text-slate-800">{formatMoney(fifo.batchValuation, db.settings.currency)}</span>
                   </div>
 
                   <div className="flex items-center justify-between text-xs border-t border-slate-100 pt-1.5">
                     <span className="text-slate-500">سعر البيع الحالي:</span>
-                    <span className="font-mono font-black text-slate-950">{formatMoney(p.sellPrice, db.settings.currency)}</span>
+                    <span className="font-mono font-black text-slate-950">
+                      {p.sellPrice > 0 ? formatMoney(p.sellPrice, db.settings.currency) : 'غير محدد'}
+                    </span>
                   </div>
                 </div>
               );

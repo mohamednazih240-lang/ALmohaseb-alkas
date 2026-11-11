@@ -27,7 +27,9 @@ import {
   PaymentMethod,
   User,
   Branch,
-  BranchProductData
+  BranchProductData,
+  StockBatchLayer,
+  FifoSaleAllocation
 } from '../types/accounting';
 import {
   getTenantStorageKey,
@@ -217,7 +219,7 @@ export function defaultSettings(): AppSettings {
     currency: 'ج.م',
     invoiceTitle: 'بيان',
     low: 5,
-    cost: 'average',
+    cost: 'fifo',
     tax: 'disabled',
     taxRate: 0,
     notes: 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية',
@@ -273,286 +275,602 @@ export function isCompanyMawan(identifier?: string | null): boolean {
 export interface VerifiedPurchaseInfo {
   hasVerifiedPurchase: boolean;
   price?: number;
-  avgCost?: number;
   latestBuyPrice?: number;
   date?: string;
   invoiceNumber?: string;
   supplierName?: string;
 }
 
-export interface ProductCostFromPurchases {
-  hasPurchases: boolean;
-  /** متوسط التكلفة الفعلي المحسوب حصرياً من فواتير الشراء المسجلة (المتوسط المرجح = إجمالي القيمة / إجمالي الكمية) */
-  avgCost: number;
-  /** آخر سعر شراء فعلي موثق في أحدث فاتورة شراء */
-  latestBuyPrice: number;
-  /** إجمالي الكميات المشتراة فعلياً في فواتير الشراء */
-  totalPurchasedQty: number;
-  /** إجمالي قيمة المشتريات المسجلة لهذا الصنف */
-  totalPurchasedAmount: number;
-  /** عدد فواتير الشراء التي ورد فيها الصنف */
+export interface ProductFifoSummary {
+  productId?: string;
+  productName: string;
+  hasVerifiedPurchase: boolean;
   purchasesCount: number;
-  /** تاريخ آخر فاتورة شراء */
+  latestBuyPrice: number;
   lastPurchaseDate?: string;
-  /** رقم آخر فاتورة شراء */
   lastInvoiceNumber?: string;
-  /** اسم مورد آخر فاتورة شراء */
   lastSupplierName?: string;
+  onHandQty: number;
+  openBatches: StockBatchLayer[];
+  batchValuation: number;
+  uncoveredDeficitQty: number;
+  totalPurchasedQty: number;
+  totalPurchasedAmount: number;
+}
+
+export interface ProductFifoLedger {
+  totalValuation: number;
+  getProductSummary: (productId?: string, productName?: string) => ProductFifoSummary;
+  getSaleAllocation: (invoiceId: string, productId?: string, productName?: string, lineIndex?: number) => FifoSaleAllocation | undefined;
+  simulateSaleFifoCost: (productId: string | undefined, productName: string | undefined, qty: number) => {
+    qty: number;
+    coveredQty: number;
+    uncoveredQty: number;
+    verifiedCostTotal: number;
+    hasVerifiedCost: boolean;
+    hasFullVerifiedCost: boolean;
+    effectiveUnitCost?: number;
+    batchesUsed: { batchId: string; invoiceNumber: string; date: string; qty: number; unitCost: number }[];
+  };
+}
+
+function resolveCanonicalProductKey(
+  prodById: Map<string, Product>,
+  prodByNormName: Map<string, Product>,
+  productId?: string,
+  productName?: string
+): { key: string; prod?: Product } {
+  if (productId) {
+    const p = prodById.get(productId);
+    if (p) return { key: `id:${p.id}`, prod: p };
+  }
+  const norm = normalizeArabicText(productName);
+  if (norm) {
+    const p = prodByNormName.get(norm);
+    if (p) return { key: `id:${p.id}`, prod: p };
+    return { key: `name:${norm}`, prod: undefined };
+  }
+  return { key: productId ? `id:${productId}` : 'unknown', prod: undefined };
 }
 
 /**
- * دالة حساب متوسط سعر التكلفة المرجح وآخر سعر شراء حصرياً من فواتير الشراء المسجلة فعلياً
- * تطبق المعايير المحاسبية الدقيقة:
- * متوسط التكلفة = (مجموع الكمية × سعر الشراء لكل فاتورة) / إجمالي الكميات المشتراة
- * لا تعتمد على أي معادلات تقديرية أو نسب افتراضية نهائياً.
+ * محرك التكلفة الفعلي المعتمد حصرياً على الدفعات والتسلسل الزمني (Strict FIFO Batch Costing Engine):
+ * - يحفظ تكلفة كل دفعة شراء بسعرها الفعلي دون أي خلط أو متوسط مرجح نهائياً.
+ * - لا يستبدل تكاليف الدفعات السابقة عند وصول مشتريات جديدة بسعر مختلف.
+ * - يعالج الأرصدة السالبة زمنياً: عند ورود شراء لاحق، يسوي العجز السابق ويحتفظ بالكمية المتبقية بتكلفة الشراء الدقيقة دون تشويه.
+ * - إذا بيع صنف دون أي دفعة شراء موثقة مسبقاً، يظل صافي التكلفة والربح غير محدد (hasVerifiedCost = false).
  */
-export function calculateProductAverageCost(
+export function buildProductFifoLedger(
   db: AccountingDB,
-  productId?: string,
-  productName?: string,
+  branchId?: string,
   excludeInvoiceId?: string
-): ProductCostFromPurchases {
-  if (!db || !db.invoices || (!productId && !productName)) {
-    return {
-      hasPurchases: false,
-      avgCost: 0,
-      latestBuyPrice: 0,
-      totalPurchasedQty: 0,
-      totalPurchasedAmount: 0,
-      purchasesCount: 0
-    };
+): ProductFifoLedger {
+  const prodById = new Map<string, Product>();
+  const prodByNormName = new Map<string, Product>();
+  for (const p of db?.products || []) {
+    if (p.id) prodById.set(p.id, p);
+    const norm = normalizeArabicText(p.name);
+    if (norm && !prodByNormName.has(norm)) prodByNormName.set(norm, p);
   }
 
-  const normTargetName = productName ? normalizeArabicText(productName) : '';
+  const branchFilter = branchId && branchId !== 'all' ? branchId : undefined;
+  const matchesTargetBranch = (bId?: string) => !branchFilter || isBranchMatch(bId, branchFilter);
 
-  // فلترة كافة فواتير المشتريات المعتمدة والمسجلة فعلياً فقط (استبعاد الفواتير الملغاة)
-  const purchaseInvoices = (db.invoices || []).filter(inv =>
-    (inv.type === 'purchase' || inv.invoiceKind === 'purchase') &&
-    (inv.status as string) !== 'ملغي' &&
-    (!excludeInvoiceId || inv.id !== excludeInvoiceId)
-  );
+  type ChronologicalEvent = {
+    sortDate: string;
+    sortMs: number;
+    hasExplicitMs: boolean;
+    priority: number; // 0 = incoming (purchase/opening/sale_return/adj_in), 1 = outgoing (sale/purchase_return/adj_out)
+    seq: number;
+    kind: 'purchase' | 'sale' | 'sale_return' | 'purchase_return' | 'adjustment';
+    invoiceId: string;
+    invoiceNumber: string;
+    partyName?: string;
+    branchId: string;
+    items: Array<{
+      lineIndex: number;
+      productId?: string;
+      productName: string;
+      qty: number;
+      unitCost: number;
+      hasVerifiedCostFlag?: boolean;
+    }>;
+  };
 
-  let totalPurchasedQty = 0;
-  let totalPurchasedAmount = 0;
-  let purchasesCount = 0;
-  let latestBuyPrice = 0;
-  let lastPurchaseDate: string | undefined;
-  let lastInvoiceNumber: string | undefined;
-  let lastSupplierName: string | undefined;
-  let latestSortKey = '';
+  const events: ChronologicalEvent[] = [];
+  let seqCounter = 0;
 
-  for (const inv of purchaseInvoices) {
-    if (!inv.items || !Array.isArray(inv.items)) continue;
-    for (const it of inv.items) {
-      const matchId = Boolean(productId && it.productId && it.productId === productId);
-      const matchName = Boolean(normTargetName && it.productName && normalizeArabicText(it.productName) === normTargetName);
+  const invoiceIdsSet = new Set<string>();
+  const invoiceReturnKeys = new Set<string>();
 
-      if (matchId || matchName) {
-        const qty = Number(it.qty) || 0;
-        const price = Number(it.unitPrice || it.costPrice || (it as any).price || (qty > 0 && it.total > 0 ? it.total / qty : 0)) || 0;
-        if (qty > 0 && price > 0) {
-          totalPurchasedQty += qty;
-          totalPurchasedAmount += (qty * price);
-          purchasesCount++;
+  for (const inv of db?.invoices || []) {
+    if (!inv || (inv.status as string) === 'ملغي') continue;
+    if (inv.invoiceKind === 'quote') continue;
+    if (excludeInvoiceId && inv.id === excludeInvoiceId) continue;
+    if (!matchesTargetBranch(inv.branchId)) continue;
+    if (!Array.isArray(inv.items) || inv.items.length === 0) continue;
 
-          const invSortKey = `${inv.date || ''}_${inv.createdAt || ''}_${inv.number || ''}_${inv.id || ''}`;
-          if (invSortKey > latestSortKey) {
-            latestSortKey = invSortKey;
-            latestBuyPrice = price;
-            lastPurchaseDate = inv.date;
-            lastInvoiceNumber = inv.number;
-            lastSupplierName = inv.partyName;
+    invoiceIdsSet.add(inv.id);
+    if (inv.invoiceKind === 'sale_return' || inv.invoiceKind === 'purchase_return') {
+      invoiceReturnKeys.add(`${inv.invoiceKind}:${inv.number}`);
+    }
+
+    const isPurchaseReturn = inv.invoiceKind === 'purchase_return';
+    const isSaleReturn = inv.invoiceKind === 'sale_return';
+    const isPurchase = !isPurchaseReturn && !isSaleReturn && (inv.type === 'purchase' || inv.invoiceKind === 'purchase');
+    const kind: ChronologicalEvent['kind'] = isPurchase
+      ? 'purchase'
+      : isSaleReturn
+      ? 'sale_return'
+      : isPurchaseReturn
+      ? 'purchase_return'
+      : 'sale';
+
+    const sortDate = (inv.date || '1970-01-01').slice(0, 10);
+    const parsedMs = inv.createdAt ? Date.parse(inv.createdAt) : NaN;
+    const hasExplicitMs = Number.isFinite(parsedMs);
+    const priority = (kind === 'purchase' || kind === 'sale_return') ? 0 : 1;
+
+    events.push({
+      sortDate,
+      sortMs: hasExplicitMs ? parsedMs : 0,
+      hasExplicitMs,
+      priority,
+      seq: seqCounter++,
+      kind,
+      invoiceId: inv.id,
+      invoiceNumber: inv.number,
+      partyName: inv.partyName,
+      branchId: inv.branchId || 'br_mawan',
+      items: inv.items.map((it, idx) => {
+        const q = Math.abs(Number(it.qty) || 0);
+        const unitPrice = Number(it.unitPrice || it.costPrice || (it as any).price || (q > 0 && it.total > 0 ? it.total / q : 0)) || 0;
+        return {
+          lineIndex: idx,
+          productId: it.productId,
+          productName: it.productName || '',
+          qty: q,
+          unitCost: kind === 'purchase' ? unitPrice : (Number(it.costPrice) || 0),
+          hasVerifiedCostFlag: it.hasVerifiedCost
+        };
+      })
+    });
+  }
+
+  // Legacy ReturnInvoice array (avoid double counting returns already in db.invoices)
+  for (const r of db?.returns || []) {
+    if (!r || !matchesTargetBranch(r.branchId)) continue;
+    const rKind = r.type === 'purchase' ? 'purchase_return' : 'sale_return';
+    if (invoiceIdsSet.has(r.id) || invoiceReturnKeys.has(`${rKind}:${r.number}`)) continue;
+    events.push({
+      sortDate: (r.date || '1970-01-01').slice(0, 10),
+      sortMs: 0,
+      hasExplicitMs: false,
+      priority: rKind === 'sale_return' ? 0 : 1,
+      seq: seqCounter++,
+      kind: rKind,
+      invoiceId: r.id,
+      invoiceNumber: r.number,
+      partyName: r.partyName,
+      branchId: r.branchId || 'br_mawan',
+      items: [{
+        lineIndex: 0,
+        productId: r.productId,
+        productName: r.productName || '',
+        qty: Math.abs(Number(r.qty) || 0),
+        unitCost: Number(r.price) || 0
+      }]
+    });
+  }
+
+  // Non-invoice physical stock adjustments / transfers (affect physical quantity & deficits without fabricating purchase batch costs)
+  for (const sm of db?.stockMovements || []) {
+    if (!sm || !matchesTargetBranch(sm.branchId)) continue;
+    if (sm.type !== 'adjustment' && sm.type !== 'opening' && sm.type !== 'transfer_in' && sm.type !== 'transfer_out') {
+      continue;
+    }
+    const chg = Number(sm.qtyChange) || 0;
+    if (Math.abs(chg) <= 0.00001) continue;
+    events.push({
+      sortDate: (sm.date || '1970-01-01').slice(0, 10),
+      sortMs: 0,
+      hasExplicitMs: false,
+      priority: chg > 0 ? 0 : 1,
+      seq: seqCounter++,
+      kind: 'adjustment',
+      invoiceId: sm.sourceId || sm.id,
+      invoiceNumber: sm.refNumber || '',
+      branchId: sm.branchId || 'br_mawan',
+      items: [{
+        lineIndex: 0,
+        productId: sm.productId,
+        productName: sm.productName || '',
+        qty: chg,
+        unitCost: 0
+      }]
+    });
+  }
+
+  events.sort((a, b) => {
+    const dateCmp = a.sortDate.localeCompare(b.sortDate);
+    if (dateCmp !== 0) return dateCmp;
+    if (a.hasExplicitMs && b.hasExplicitMs && Math.abs(a.sortMs - b.sortMs) >= 1) {
+      return a.sortMs - b.sortMs;
+    }
+    if (a.priority !== b.priority) return a.priority - b.priority;
+    return a.seq - b.seq;
+  });
+
+  type MutableProductState = {
+    productId?: string;
+    productName: string;
+    batches: StockBatchLayer[];
+    uncoveredDeficitQty: number;
+    onHandQty: number;
+    latestBuyPrice: number;
+    lastPurchaseDate?: string;
+    lastInvoiceNumber?: string;
+    lastSupplierName?: string;
+    purchasesCount: number;
+    totalPurchasedQty: number;
+    totalPurchasedAmount: number;
+  };
+
+  const stateMap = new Map<string, MutableProductState>();
+  const allocByInvAndKey = new Map<string, FifoSaleAllocation>();
+  const allocByInvAndLine = new Map<string, FifoSaleAllocation>();
+
+  const getOrCreateState = (key: string, prod?: Product, fallbackName: string = ''): MutableProductState => {
+    let st = stateMap.get(key);
+    if (!st) {
+      st = {
+        productId: prod?.id,
+        productName: prod?.name || fallbackName,
+        batches: [],
+        uncoveredDeficitQty: 0,
+        onHandQty: 0,
+        latestBuyPrice: 0,
+        purchasesCount: 0,
+        totalPurchasedQty: 0,
+        totalPurchasedAmount: 0
+      };
+      stateMap.set(key, st);
+    }
+    return st;
+  };
+
+  for (const ev of events) {
+    for (const it of ev.items) {
+      const { key, prod } = resolveCanonicalProductKey(prodById, prodByNormName, it.productId, it.productName);
+      const st = getOrCreateState(key, prod, it.productName);
+
+      if (ev.kind === 'purchase') {
+        const qty = it.qty;
+        if (qty <= 0) continue;
+        st.onHandQty = Number((st.onHandQty + qty).toFixed(4));
+        const unitCost = it.unitCost;
+        if (unitCost > 0) {
+          st.purchasesCount += 1;
+          st.totalPurchasedQty = Number((st.totalPurchasedQty + qty).toFixed(4));
+          st.totalPurchasedAmount = Number((st.totalPurchasedAmount + qty * unitCost).toFixed(4));
+          st.latestBuyPrice = Number(unitCost.toFixed(4));
+          st.lastPurchaseDate = ev.sortDate;
+          st.lastInvoiceNumber = ev.invoiceNumber;
+          st.lastSupplierName = ev.partyName;
+
+          // Chronological negative stock settlement before creating remaining FIFO layer
+          const settled = Math.min(qty, st.uncoveredDeficitQty);
+          st.uncoveredDeficitQty = Number((st.uncoveredDeficitQty - settled).toFixed(4));
+          const remainingAfterSettlement = Number((qty - settled).toFixed(4));
+
+          if (remainingAfterSettlement > 0.00001) {
+            st.batches.push({
+              id: `${ev.invoiceId}::${key}::${st.batches.length}`,
+              productId: it.productId || prod?.id || key,
+              productName: st.productName || it.productName,
+              purchaseInvoiceId: ev.invoiceId,
+              purchaseInvoiceNumber: ev.invoiceNumber,
+              date: ev.sortDate,
+              originalQty: qty,
+              remainingQty: remainingAfterSettlement,
+              unitCost,
+              branchId: ev.branchId,
+              sourceType: 'purchase'
+            });
+          }
+        }
+      } else if (ev.kind === 'sale') {
+        const qty = it.qty;
+        if (qty <= 0) continue;
+        st.onHandQty = Number((st.onHandQty - qty).toFixed(4));
+
+        let needed = qty;
+        let coveredQty = 0;
+        let verifiedCostTotal = 0;
+        const batchesUsed: FifoSaleAllocation['batchesUsed'] = [];
+
+        for (const layer of st.batches) {
+          if (needed <= 0.00001) break;
+          if (layer.remainingQty <= 0.00001) continue;
+          const take = Math.min(needed, layer.remainingQty);
+          layer.remainingQty = Number((layer.remainingQty - take).toFixed(4));
+          needed = Number((needed - take).toFixed(4));
+          coveredQty = Number((coveredQty + take).toFixed(4));
+          verifiedCostTotal += take * layer.unitCost;
+          batchesUsed.push({
+            batchId: layer.id,
+            invoiceNumber: layer.purchaseInvoiceNumber,
+            date: layer.date,
+            qty: take,
+            unitCost: layer.unitCost
+          });
+        }
+
+        const uncoveredQty = Number(Math.max(0, qty - coveredQty).toFixed(4));
+        if (uncoveredQty > 0.00001) {
+          st.uncoveredDeficitQty = Number((st.uncoveredDeficitQty + uncoveredQty).toFixed(4));
+        }
+
+        const hasVerifiedCost = coveredQty > 0.00001;
+        const hasFullVerifiedCost = uncoveredQty <= 0.00001;
+        const alloc: FifoSaleAllocation = {
+          invoiceId: ev.invoiceId,
+          invoiceNumber: ev.invoiceNumber,
+          date: ev.sortDate,
+          productId: it.productId || prod?.id || key,
+          productName: st.productName || it.productName,
+          qty,
+          coveredQty,
+          uncoveredQty,
+          verifiedCostTotal: Number(verifiedCostTotal.toFixed(4)),
+          hasVerifiedCost,
+          hasFullVerifiedCost,
+          effectiveUnitCost: hasVerifiedCost ? Number((verifiedCostTotal / coveredQty).toFixed(4)) : undefined,
+          batchesUsed
+        };
+
+        allocByInvAndLine.set(`${ev.invoiceId}::line::${it.lineIndex}`, alloc);
+        const keyMapKey = `${ev.invoiceId}::${key}`;
+        const prevAlloc = allocByInvAndKey.get(keyMapKey);
+        if (!prevAlloc) {
+          allocByInvAndKey.set(keyMapKey, { ...alloc, batchesUsed: [...alloc.batchesUsed] });
+        } else {
+          const totalQ = Number((prevAlloc.qty + alloc.qty).toFixed(4));
+          const totalCovered = Number((prevAlloc.coveredQty + alloc.coveredQty).toFixed(4));
+          const totalUncovered = Number((prevAlloc.uncoveredQty + alloc.uncoveredQty).toFixed(4));
+          const totalCost = Number((prevAlloc.verifiedCostTotal + alloc.verifiedCostTotal).toFixed(4));
+          allocByInvAndKey.set(keyMapKey, {
+            ...prevAlloc,
+            qty: totalQ,
+            coveredQty: totalCovered,
+            uncoveredQty: totalUncovered,
+            verifiedCostTotal: totalCost,
+            hasVerifiedCost: totalCovered > 0.00001,
+            hasFullVerifiedCost: totalUncovered <= 0.00001,
+            effectiveUnitCost: totalCovered > 0.00001 ? Number((totalCost / totalCovered).toFixed(4)) : undefined,
+            batchesUsed: [...prevAlloc.batchesUsed, ...alloc.batchesUsed]
+          });
+        }
+      } else if (ev.kind === 'sale_return') {
+        const qty = it.qty;
+        if (qty <= 0) continue;
+        st.onHandQty = Number((st.onHandQty + qty).toFixed(4));
+        const settled = Math.min(qty, st.uncoveredDeficitQty);
+        st.uncoveredDeficitQty = Number((st.uncoveredDeficitQty - settled).toFixed(4));
+        const rem = Number((qty - settled).toFixed(4));
+        if (rem > 0.00001 && it.unitCost > 0 && it.hasVerifiedCostFlag !== false) {
+          st.batches.push({
+            id: `${ev.invoiceId}::ret::${st.batches.length}`,
+            productId: it.productId || prod?.id || key,
+            productName: st.productName || it.productName,
+            purchaseInvoiceId: ev.invoiceId,
+            purchaseInvoiceNumber: ev.invoiceNumber,
+            date: ev.sortDate,
+            originalQty: rem,
+            remainingQty: rem,
+            unitCost: it.unitCost,
+            branchId: ev.branchId,
+            sourceType: 'purchase'
+          });
+        }
+      } else if (ev.kind === 'purchase_return') {
+        const qty = it.qty;
+        if (qty <= 0) continue;
+        st.onHandQty = Number((st.onHandQty - qty).toFixed(4));
+        let remToReturn = qty;
+        for (let idx = st.batches.length - 1; idx >= 0 && remToReturn > 0.00001; idx--) {
+          const layer = st.batches[idx];
+          if (layer.remainingQty <= 0.00001) continue;
+          const take = Math.min(remToReturn, layer.remainingQty);
+          layer.remainingQty = Number((layer.remainingQty - take).toFixed(4));
+          remToReturn = Number((remToReturn - take).toFixed(4));
+        }
+      } else if (ev.kind === 'adjustment') {
+        const chg = it.qty;
+        st.onHandQty = Number((st.onHandQty + chg).toFixed(4));
+        if (chg > 0 && st.uncoveredDeficitQty > 0) {
+          const settled = Math.min(chg, st.uncoveredDeficitQty);
+          st.uncoveredDeficitQty = Number((st.uncoveredDeficitQty - settled).toFixed(4));
+        } else if (chg < 0) {
+          let remOut = Math.abs(chg);
+          for (const layer of st.batches) {
+            if (remOut <= 0.00001) break;
+            if (layer.remainingQty <= 0.00001) continue;
+            const take = Math.min(remOut, layer.remainingQty);
+            layer.remainingQty = Number((layer.remainingQty - take).toFixed(4));
+            remOut = Number((remOut - take).toFixed(4));
+          }
+          if (remOut > 0.00001) {
+            st.uncoveredDeficitQty = Number((st.uncoveredDeficitQty + remOut).toFixed(4));
           }
         }
       }
     }
   }
 
-  if (purchasesCount > 0 && totalPurchasedQty > 0) {
-    const rawAvg = totalPurchasedAmount / totalPurchasedQty;
-    return {
-      hasPurchases: true,
-      avgCost: Number(rawAvg.toFixed(2)),
-      latestBuyPrice: Number(latestBuyPrice.toFixed(2)),
-      totalPurchasedQty,
-      totalPurchasedAmount: Number(totalPurchasedAmount.toFixed(2)),
-      purchasesCount,
-      lastPurchaseDate,
-      lastInvoiceNumber,
-      lastSupplierName
-    };
+  let totalValuation = 0;
+  for (const st of stateMap.values()) {
+    for (const b of st.batches) {
+      if (b.remainingQty > 0.00001) {
+        totalValuation += b.remainingQty * b.unitCost;
+      }
+    }
   }
+  totalValuation = Number(totalValuation.toFixed(2));
 
-  // إذا لم يُعثر على فواتير شراء مسجلة:
-  // نتحقق من بطاقة الصنف الأصلية فقط إذا كان بها سعر شراء مسجل ومحدد مسبقاً
-  const prod = db.products?.find(p =>
-    (productId && p.id === productId) ||
-    (normTargetName && normalizeArabicText(p.name) === normTargetName)
-  );
-
-  if (prod && Number(prod.buyPrice) > 0) {
-    const recordedPrice = Number(prod.buyPrice);
-    return {
-      hasPurchases: true,
-      avgCost: recordedPrice,
-      latestBuyPrice: recordedPrice,
-      totalPurchasedQty: prod.currentQty > 0 ? prod.currentQty : 0,
-      totalPurchasedAmount: (prod.currentQty > 0 ? prod.currentQty : 0) * recordedPrice,
-      purchasesCount: 1
-    };
-  }
-
-  // لا توجد فواتير شراء ولا سعر شراء مسجل: صفر دون أي معادلات تقديرية
   return {
-    hasPurchases: false,
-    avgCost: 0,
-    latestBuyPrice: 0,
-    totalPurchasedQty: 0,
-    totalPurchasedAmount: 0,
-    purchasesCount: 0
+    totalValuation,
+    getProductSummary: (productId?: string, productName?: string): ProductFifoSummary => {
+      const { key, prod } = resolveCanonicalProductKey(prodById, prodByNormName, productId, productName);
+      const st = stateMap.get(key);
+      if (!st) {
+        return {
+          productId: productId || prod?.id,
+          productName: productName || prod?.name || '',
+          hasVerifiedPurchase: false,
+          purchasesCount: 0,
+          latestBuyPrice: 0,
+          onHandQty: 0,
+          openBatches: [],
+          batchValuation: 0,
+          uncoveredDeficitQty: 0,
+          totalPurchasedQty: 0,
+          totalPurchasedAmount: 0
+        };
+      }
+      const openBatches = st.batches.filter(b => b.remainingQty > 0.00001);
+      const batchValuation = Number(
+        openBatches.reduce((sum, b) => sum + b.remainingQty * b.unitCost, 0).toFixed(2)
+      );
+      return {
+        productId: st.productId || prod?.id,
+        productName: st.productName || prod?.name || '',
+        hasVerifiedPurchase: st.purchasesCount > 0 && st.latestBuyPrice > 0,
+        purchasesCount: st.purchasesCount,
+        latestBuyPrice: st.latestBuyPrice,
+        lastPurchaseDate: st.lastPurchaseDate,
+        lastInvoiceNumber: st.lastInvoiceNumber,
+        lastSupplierName: st.lastSupplierName,
+        onHandQty: st.onHandQty,
+        openBatches,
+        batchValuation,
+        uncoveredDeficitQty: st.uncoveredDeficitQty,
+        totalPurchasedQty: st.totalPurchasedQty,
+        totalPurchasedAmount: st.totalPurchasedAmount
+      };
+    },
+    getSaleAllocation: (invoiceId: string, productId?: string, productName?: string, lineIndex?: number) => {
+      if (lineIndex !== undefined) {
+        const byLine = allocByInvAndLine.get(`${invoiceId}::line::${lineIndex}`);
+        if (byLine) return byLine;
+      }
+      const { key } = resolveCanonicalProductKey(prodById, prodByNormName, productId, productName);
+      return allocByInvAndKey.get(`${invoiceId}::${key}`);
+    },
+    simulateSaleFifoCost: (productId: string | undefined, productName: string | undefined, qty: number) => {
+      const q = Math.abs(Number(qty) || 0);
+      const { key } = resolveCanonicalProductKey(prodById, prodByNormName, productId, productName);
+      const st = stateMap.get(key);
+      if (!st || q <= 0) {
+        return {
+          qty: q,
+          coveredQty: 0,
+          uncoveredQty: q,
+          verifiedCostTotal: 0,
+          hasVerifiedCost: false,
+          hasFullVerifiedCost: false,
+          effectiveUnitCost: undefined,
+          batchesUsed: []
+        };
+      }
+      let needed = q;
+      let coveredQty = 0;
+      let verifiedCostTotal = 0;
+      const batchesUsed: FifoSaleAllocation['batchesUsed'] = [];
+      for (const layer of st.batches) {
+        if (needed <= 0.00001) break;
+        if (layer.remainingQty <= 0.00001) continue;
+        const take = Math.min(needed, layer.remainingQty);
+        needed = Number((needed - take).toFixed(4));
+        coveredQty = Number((coveredQty + take).toFixed(4));
+        verifiedCostTotal += take * layer.unitCost;
+        batchesUsed.push({
+          batchId: layer.id,
+          invoiceNumber: layer.purchaseInvoiceNumber,
+          date: layer.date,
+          qty: take,
+          unitCost: layer.unitCost
+        });
+      }
+      const uncoveredQty = Number(Math.max(0, q - coveredQty).toFixed(4));
+      const hasVerifiedCost = coveredQty > 0.00001;
+      const hasFullVerifiedCost = uncoveredQty <= 0.00001;
+      return {
+        qty: q,
+        coveredQty,
+        uncoveredQty,
+        verifiedCostTotal: Number(verifiedCostTotal.toFixed(4)),
+        hasVerifiedCost,
+        hasFullVerifiedCost,
+        effectiveUnitCost: hasVerifiedCost ? Number((verifiedCostTotal / coveredQty).toFixed(4)) : undefined,
+        batchesUsed
+      };
+    }
+  };
+}
+
+/**
+ * مرجع تكلفة المشتريات المبني على أحدث دفعة شراء موثقة ودفاتر FIFO (بدون أي متوسط مرجح أو تقديرات وهمية)
+ */
+export function calculateProductAverageCost(
+  db: AccountingDB,
+  productId?: string,
+  productName?: string,
+  excludeInvoiceId?: string
+): {
+  hasPurchases: boolean;
+  latestBuyPrice: number;
+  totalPurchasedQty: number;
+  totalPurchasedAmount: number;
+  purchasesCount: number;
+  lastPurchaseDate?: string;
+  lastInvoiceNumber?: string;
+  lastSupplierName?: string;
+  batchValuation: number;
+  openBatches: StockBatchLayer[];
+} {
+  const ledger = buildProductFifoLedger(db, undefined, excludeInvoiceId);
+  const summary = ledger.getProductSummary(productId, productName);
+  return {
+    hasPurchases: summary.hasVerifiedPurchase,
+    latestBuyPrice: summary.latestBuyPrice,
+    totalPurchasedQty: summary.totalPurchasedQty,
+    totalPurchasedAmount: summary.totalPurchasedAmount,
+    purchasesCount: summary.purchasesCount,
+    lastPurchaseDate: summary.lastPurchaseDate,
+    lastInvoiceNumber: summary.lastInvoiceNumber,
+    lastSupplierName: summary.lastSupplierName,
+    batchValuation: summary.batchValuation,
+    openBatches: summary.openBatches
   };
 }
 
 export interface FastPurchaseCostIndex {
-  getCost: (productId?: string, productName?: string) => ProductCostFromPurchases;
+  getCost: (productId?: string, productName?: string) => ProductFifoSummary;
+  ledger: ProductFifoLedger;
 }
 
-/**
- * تبني فهرس تكلفة المشتريات الفعلي في دورة خطية واحدة O(N) لكافة الأصناف
- * بدل مسح جميع فواتير المشتريات لكل صنف على حدة — مثالية لآلاف وملايين الفواتير
- */
-export function buildPurchaseCostMap(db: AccountingDB): FastPurchaseCostIndex {
-  const byId = new Map<string, {
-    totalQty: number;
-    totalAmt: number;
-    count: number;
-    latestPrice: number;
-    latestKey: string;
-    lastDate?: string;
-    lastNumber?: string;
-    lastSupplier?: string;
-  }>();
-  const byName = new Map<string, {
-    totalQty: number;
-    totalAmt: number;
-    count: number;
-    latestPrice: number;
-    latestKey: string;
-    lastDate?: string;
-    lastNumber?: string;
-    lastSupplier?: string;
-  }>();
-
-  const accum = (
-    map: Map<string, any>,
-    key: string,
-    qty: number,
-    price: number,
-    invSortKey: string,
-    invDate?: string,
-    invNumber?: string,
-    supplierName?: string
-  ) => {
-    let rec = map.get(key);
-    if (!rec) {
-      rec = {
-        totalQty: 0,
-        totalAmt: 0,
-        count: 0,
-        latestPrice: 0,
-        latestKey: '',
-        lastDate: invDate,
-        lastNumber: invNumber,
-        lastSupplier: supplierName
-      };
-      map.set(key, rec);
-    }
-    rec.totalQty += qty;
-    rec.totalAmt += qty * price;
-    rec.count += 1;
-    if (invSortKey > rec.latestKey) {
-      rec.latestKey = invSortKey;
-      rec.latestPrice = price;
-      rec.lastDate = invDate;
-      rec.lastNumber = invNumber;
-      rec.lastSupplier = supplierName;
-    }
-  };
-
-  for (const inv of db?.invoices || []) {
-    if (!((inv.type === 'purchase' || inv.invoiceKind === 'purchase') && (inv.status as string) !== 'ملغي')) {
-      continue;
-    }
-    if (!Array.isArray(inv.items)) continue;
-    const invSortKey = `${inv.date || ''}_${inv.createdAt || ''}_${inv.number || ''}_${inv.id || ''}`;
-    for (const it of inv.items) {
-      const qty = Number(it.qty) || 0;
-      const price = Number(it.unitPrice || it.costPrice || (it as any).price || (qty > 0 && it.total > 0 ? it.total / qty : 0)) || 0;
-      if (qty > 0 && price > 0) {
-        if (it.productId) {
-          accum(byId, it.productId, qty, price, invSortKey, inv.date, inv.number, inv.partyName);
-        }
-        if (it.productName) {
-          const norm = normalizeArabicText(it.productName);
-          if (norm) accum(byName, norm, qty, price, invSortKey, inv.date, inv.number, inv.partyName);
-        }
-      }
-    }
-  }
-
-  const prodById = new Map<string, Product>();
-  const prodByName = new Map<string, Product>();
-  for (const p of db?.products || []) {
-    if (p.id) prodById.set(p.id, p);
-    if (p.name) prodByName.set(normalizeArabicText(p.name), p);
-  }
-
+export function buildPurchaseCostMap(db: AccountingDB, branchId?: string): FastPurchaseCostIndex {
+  const ledger = buildProductFifoLedger(db, branchId);
   return {
-    getCost: (productId?: string, productName?: string): ProductCostFromPurchases => {
-      const rec = (productId ? byId.get(productId) : undefined) ||
-                  (productName ? byName.get(normalizeArabicText(productName)) : undefined);
-      if (rec && rec.count > 0 && rec.totalQty > 0) {
-        return {
-          hasPurchases: true,
-          avgCost: Number((rec.totalAmt / rec.totalQty).toFixed(2)),
-          latestBuyPrice: Number(rec.latestPrice.toFixed(2)),
-          totalPurchasedQty: rec.totalQty,
-          totalPurchasedAmount: Number(rec.totalAmt.toFixed(2)),
-          purchasesCount: rec.count,
-          lastPurchaseDate: rec.lastDate,
-          lastInvoiceNumber: rec.lastNumber,
-          lastSupplierName: rec.lastSupplier
-        };
-      }
-      const prod = (productId ? prodById.get(productId) : undefined) ||
-                   (productName ? prodByName.get(normalizeArabicText(productName)) : undefined);
-      if (prod && Number(prod.buyPrice) > 0) {
-        const recordedPrice = Number(prod.buyPrice);
-        return {
-          hasPurchases: true,
-          avgCost: recordedPrice,
-          latestBuyPrice: recordedPrice,
-          totalPurchasedQty: prod.currentQty > 0 ? prod.currentQty : 0,
-          totalPurchasedAmount: (prod.currentQty > 0 ? prod.currentQty : 0) * recordedPrice,
-          purchasesCount: 1
-        };
-      }
-      return {
-        hasPurchases: false,
-        avgCost: 0,
-        latestBuyPrice: 0,
-        totalPurchasedQty: 0,
-        totalPurchasedAmount: 0,
-        purchasesCount: 0
-      };
-    }
+    ledger,
+    getCost: (productId?: string, productName?: string) => ledger.getProductSummary(productId, productName)
   };
 }
 
 /**
- * Retrieves verified purchase pricing details for a product directly from purchase invoices.
- * Strictly adheres to ERP integrity: never estimates or invents costs.
- * Uses only posted purchase invoices (status !== 'ملغي').
+ * استرجاع آخر سعر شراء موثق فعلياً للصنف من فواتير المشتريات المرحّلة فقط.
+ * لا يبتكر تكاليف تقديرية ولا يستخدم متوسط تكلفة مرجح نهائياً.
  */
 export function getLatestVerifiedPurchaseInfo(
   db: AccountingDB,
@@ -560,24 +878,129 @@ export function getLatestVerifiedPurchaseInfo(
   productName?: string,
   excludeInvoiceId?: string
 ): VerifiedPurchaseInfo {
-  const costInfo = calculateProductAverageCost(db, productId, productName, excludeInvoiceId);
-  if (costInfo.hasPurchases) {
-    const activePrice = (db.settings?.cost === 'average')
-      ? (costInfo.avgCost || costInfo.latestBuyPrice)
-      : (costInfo.latestBuyPrice || costInfo.avgCost);
-
+  const summary = buildProductFifoLedger(db, undefined, excludeInvoiceId).getProductSummary(productId, productName);
+  if (summary.hasVerifiedPurchase && summary.latestBuyPrice > 0) {
     return {
       hasVerifiedPurchase: true,
-      price: activePrice,
-      avgCost: costInfo.avgCost,
-      latestBuyPrice: costInfo.latestBuyPrice,
-      date: costInfo.lastPurchaseDate,
-      invoiceNumber: costInfo.lastInvoiceNumber,
-      supplierName: costInfo.lastSupplierName
+      price: summary.latestBuyPrice,
+      latestBuyPrice: summary.latestBuyPrice,
+      date: summary.lastPurchaseDate,
+      invoiceNumber: summary.lastInvoiceNumber,
+      supplierName: summary.lastSupplierName
     };
   }
-
   return { hasVerifiedPurchase: false };
+}
+
+export interface StrictProductMatchResult {
+  exactMatch?: Product;
+  matchReason?: 'id' | 'barcode' | 'code' | 'name_unit';
+  ambiguousCandidates: Product[];
+}
+
+/**
+ * المطابقة الصارمة للأصناف عند الشراء لمنع التكرار:
+ * ID -> Barcode -> Code -> الاسم المعياري + الوحدة
+ * وفي حال وجود تشابه بدون تطابق كامل، يعيد قائمة بالمرشحين للتأكيد الصريح من المستخدم.
+ */
+export function matchProductStrictly(
+  db: AccountingDB,
+  criteria: { id?: string; barcode?: string; code?: string; name?: string; unit?: string }
+): StrictProductMatchResult {
+  const products = db?.products || [];
+  const cleanId = (criteria.id || '').trim();
+  const cleanBarcode = (criteria.barcode || '').trim();
+  const cleanCode = (criteria.code || '').trim().toLowerCase();
+  const normName = normalizeArabicText(criteria.name);
+  const normUnit = normalizeArabicText(criteria.unit || 'قطعة');
+
+  if (cleanId) {
+    const byId = products.find(p => p.id === cleanId);
+    if (byId) return { exactMatch: byId, matchReason: 'id', ambiguousCandidates: [] };
+  }
+  if (cleanBarcode) {
+    const byBc = products.find(p => (p.barcode || '').trim() === cleanBarcode);
+    if (byBc) return { exactMatch: byBc, matchReason: 'barcode', ambiguousCandidates: [] };
+  }
+  if (cleanCode) {
+    const byCode = products.find(p => (p.code || '').trim().toLowerCase() === cleanCode);
+    if (byCode) return { exactMatch: byCode, matchReason: 'code', ambiguousCandidates: [] };
+  }
+  if (normName) {
+    const exactByNameUnit = products.find(
+      p => normalizeArabicText(p.name) === normName && normalizeArabicText(p.unit || 'قطعة') === normUnit
+    );
+    if (exactByNameUnit) {
+      return { exactMatch: exactByNameUnit, matchReason: 'name_unit', ambiguousCandidates: [] };
+    }
+
+    const nameTokens = normName.split(' ').filter(t => t.length >= 2);
+    const ambiguousCandidates = products.filter(p => {
+      const pNorm = normalizeArabicText(p.name);
+      if (!pNorm) return false;
+      if (pNorm === normName) return true; // نفس الاسم بوحدة مختلفة
+      if (pNorm.includes(normName) || normName.includes(pNorm)) return true;
+      if (nameTokens.length >= 2) {
+        const pTokens = pNorm.split(' ').filter(t => t.length >= 2);
+        const shared = nameTokens.filter(t => pTokens.includes(t));
+        return shared.length >= Math.min(2, nameTokens.length);
+      }
+      return false;
+    }).slice(0, 5);
+
+    return { ambiguousCandidates };
+  }
+
+  return { ambiguousCandidates: [] };
+}
+
+export interface DuplicateProductGroup {
+  reason: string;
+  key: string;
+  products: Product[];
+}
+
+/**
+ * فحص غير تدميري لاكتشاف الأصناف المكررة المحتملة بالنظام للمراجعة
+ */
+export function findDuplicateProductCandidates(db: AccountingDB): DuplicateProductGroup[] {
+  const products = db?.products || [];
+  const byName = new Map<string, Product[]>();
+  const byCode = new Map<string, Product[]>();
+  const byBarcode = new Map<string, Product[]>();
+
+  for (const p of products) {
+    const nName = normalizeArabicText(p.name);
+    if (nName) {
+      const arr = byName.get(nName) || [];
+      arr.push(p);
+      byName.set(nName, arr);
+    }
+    const c = (p.code || '').trim().toLowerCase();
+    if (c) {
+      const arr = byCode.get(c) || [];
+      arr.push(p);
+      byCode.set(c, arr);
+    }
+    const bc = (p.barcode || '').trim();
+    if (bc) {
+      const arr = byBarcode.get(bc) || [];
+      arr.push(p);
+      byBarcode.set(bc, arr);
+    }
+  }
+
+  const results: DuplicateProductGroup[] = [];
+  for (const [k, list] of byBarcode.entries()) {
+    if (list.length > 1) results.push({ reason: `تكرار في الباركود (${k})`, key: `bc:${k}`, products: list });
+  }
+  for (const [k, list] of byCode.entries()) {
+    if (list.length > 1) results.push({ reason: `تكرار في الكود (${k})`, key: `code:${k}`, products: list });
+  }
+  for (const [k, list] of byName.entries()) {
+    if (list.length > 1) results.push({ reason: `تشابه وتطابق في الاسم`, key: `name:${k}`, products: list });
+  }
+  return results;
 }
 
 /**
@@ -841,14 +1264,13 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
         }
       }
 
-      // ثالثاً: إدراج الصنف في الكتالوج فوراً إذا لم يكن موجوداً
+      // ثالثاً: إدراج الصنف في الكتالوج عند الاستعادة من فواتير المشتريات المسجلة (بدون تسعير بيع تلقائي أو نسب وهمية)
       if (!prod && item.productName.trim()) {
         maxCodeNum++;
         const newCode = `P-${maxCodeNum}`;
         const unitBuy = isPurchase
           ? (Number(item.unitPrice || item.costPrice || (item as any).price) || 0)
-          : (Number(item.costPrice) || 0);
-        const unitSell = isSale ? (Number(item.unitPrice) || 0) : 0;
+          : 0;
         const newProdId = generateId('prod');
 
         prod = {
@@ -859,8 +1281,8 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
           category: 'عامة',
           unit: item.unit || 'قطعة',
           buyPrice: unitBuy,
-          sellPrice: unitSell,
-          wholesalePrice: unitSell * 0.9,
+          sellPrice: 0,
+          wholesalePrice: 0,
           minStock: 5,
           currentQty: 0,
           avgCost: unitBuy,
@@ -936,8 +1358,12 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       details.push(`فاتورة #${inv.number} (${inv.partyName || 'طرف'}): تم فحص وإدراج أصنافها في حركات المخزون.`);
     }
 
-    // التأكد من التأثير المالي التام للفاتورة على الخزينة في حال السداد أو الكاش
-    const paidAmount = Number(inv.paid) > 0 ? Number(inv.paid) : (inv.paymentMethod && inv.paymentMethod !== 'آجل' ? Number(inv.total) : 0);
+    // التأكد من التأثير المالي التام للفاتورة على الخزينة في حال السداد أو الكاش (مع عزل أقساط السندات اليدوية المستقلة)
+    const manualInstallmentsPaid = (db.vouchers || [])
+      .filter(v => v.invoiceId === inv.id && (v.isManualInstallment || (!v.isAutoFromInvoice && !v.id.startsWith('vch_'))))
+      .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+    const totalPaidRef = Number(inv.paid) > 0 ? Number(inv.paid) : (inv.paymentMethod && inv.paymentMethod !== 'آجل' ? Number(inv.total) : 0);
+    const paidAmount = Math.max(0, Number((totalPaidRef - manualInstallmentsPaid).toFixed(2)));
     if (paidAmount > 0) {
       const isOutflow = isPurchase || isSaleReturn;
       const direction: 'in' | 'out' = isOutflow ? 'out' : 'in';
@@ -1016,8 +1442,8 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
   }
   db.stockMovements = deduplicatedMovements;
 
-  // 5. إعادة احتساب أرصدة الأصناف بدقة تامة في تمريرة واحدة O(N) من سجل حركات المخزون وفواتير المشتريات الفعلية
-  const costIndex = buildPurchaseCostMap(db);
+  // 5. إعادة احتساب أرصدة الأصناف والتكاليف بدقة تامة وفق نظام الدفعات FIFO دون أي متوسط مرجح
+  const fifoLedger = buildProductFifoLedger(db);
   const qtyByProdId = new Map<string, number>();
   const qtyByNormName = new Map<string, number>();
   const prodIdsSet = new Set(db.products.map(p => p.id));
@@ -1038,20 +1464,12 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     const normPName = normalizeArabicText(p.name);
     const totalQty = Number(((qtyByProdId.get(p.id) || 0) + (qtyByNormName.get(normPName) || 0)).toFixed(4));
 
-    // احتساب متوسط التكلفة وآخر سعر شراء حصرياً من فواتير الشراء المسجلة فعلياً لكل صنف
-    const costInfo = costIndex.getCost(p.id, p.name);
-    let latestBuy = p.buyPrice || 0;
-    let avgCost = p.avgCost || p.buyPrice || 0;
+    const fifoInfo = fifoLedger.getProductSummary(p.id, p.name);
+    const latestBuy = fifoInfo.hasVerifiedPurchase ? fifoInfo.latestBuyPrice : (p.buyPrice || 0);
 
-    if (costInfo.hasPurchases) {
-      latestBuy = costInfo.latestBuyPrice;
-      avgCost = costInfo.avgCost;
-    }
-
-    if (p.currentQty !== totalQty || p.buyPrice !== latestBuy || p.avgCost !== avgCost) {
+    if (p.currentQty !== totalQty || p.buyPrice !== latestBuy) {
       p.currentQty = totalQty;
       p.buyPrice = latestBuy;
-      p.avgCost = avgCost;
       correctedProductsCount++;
     }
 
@@ -1063,7 +1481,9 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       sellPrice: p.sellPrice,
       wholesalePrice: p.wholesalePrice,
       minStock: p.minStock || 5,
-      avgCost
+      avgCost: p.avgCost || 0,
+      sellingPriceUpdatedAt: p.sellingPriceUpdatedAt,
+      sellingPriceUpdatedBy: p.sellingPriceUpdatedBy
     };
     bData['br_mawan'] = { ...branchInfo };
     bData['br_main'] = { ...branchInfo };
@@ -1074,29 +1494,32 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     }
   });
 
-  // 6. مطابقة تكلفة بضاعة المبيعات حصرياً مع فواتير الشراء المسجلة وإزالة أي معادلات تقديرية قديمة
+  // 6. مطابقة تكلفة بضاعة المبيعات وفق تخصيص FIFO الحقيقي؛ وفي حال عدم وجود دفعة شراء موثقة تبقى التكلفة غير محددة
   (db.invoices || []).forEach(inv => {
     if (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') {
-      inv.items?.forEach(it => {
-        const itemCost = costIndex.getCost(it.productId, it.productName);
-        if (itemCost.hasPurchases) {
-          const verifiedCost = (db.settings?.cost === 'average')
-            ? (itemCost.avgCost || itemCost.latestBuyPrice)
-            : (itemCost.latestBuyPrice || itemCost.avgCost);
-          it.costPrice = verifiedCost;
+      inv.items?.forEach((it, lineIdx) => {
+        const alloc = fifoLedger.getSaleAllocation(inv.id, it.productId, it.productName, lineIdx);
+        if (alloc && alloc.hasVerifiedCost && alloc.effectiveUnitCost !== undefined) {
+          it.costPrice = Number(alloc.effectiveUnitCost.toFixed(4));
+          it.hasVerifiedCost = alloc.hasFullVerifiedCost;
+          it.uncoveredQty = alloc.uncoveredQty;
+        } else {
+          it.costPrice = 0;
+          it.hasVerifiedCost = false;
+          it.uncoveredQty = Math.abs(Number(it.qty) || 0);
         }
       });
     }
   });
 
-  // تحديث تكلفة الوحدة في حركات مبيعات المخزون وفقاً للتكلفة الحقيقية
+  // تحديث تكلفة الوحدة في حركات مبيعات المخزون وفقاً لتخصيص FIFO الفعلي فقط
   db.stockMovements.forEach(sm => {
-    if (sm.type === 'sale') {
-      const itemCost = costIndex.getCost(sm.productId, sm.productName);
-      if (itemCost.hasPurchases) {
-        sm.unitCost = (db.settings?.cost === 'average')
-          ? (itemCost.avgCost || itemCost.latestBuyPrice)
-          : (itemCost.latestBuyPrice || itemCost.avgCost);
+    if (sm.type === 'sale' && sm.sourceId) {
+      const alloc = fifoLedger.getSaleAllocation(sm.sourceId, sm.productId, sm.productName);
+      if (alloc && alloc.hasVerifiedCost && alloc.effectiveUnitCost !== undefined) {
+        sm.unitCost = Number(alloc.effectiveUnitCost.toFixed(4));
+      } else {
+        sm.unitCost = 0;
       }
     }
   });
@@ -1876,37 +2299,32 @@ export function calculateTreasuryBalance(db: AccountingDB, method?: PaymentMetho
 }
 
 /**
- * Calculate total inventory valuation, optionally for a specific branch
+ * Calculate total inventory valuation strictly using remaining documented FIFO batches:
+ * sum(batch.remainingQty * batch.unitCost)
  */
 export function calculateInventoryValuation(db: AccountingDB, branchId?: string): number {
-  return db.products.reduce((acc, p) => {
-    const bp = branchId ? getProductForBranch(p, branchId) : p;
-    const cost = db.settings.cost === 'last' ? bp.buyPrice : (bp.avgCost || bp.buyPrice);
-    return acc + (bp.currentQty * cost);
-  }, 0);
+  return buildProductFifoLedger(db, branchId).totalValuation;
 }
 
 /**
  * Calculate Net Profit & Financial summary:
- * Sales Revenue - Cost of Goods Sold + Other Revenues - Expenses
- * Optionally filtered strictly for a branch:
- * "اريد كل فرع يكون مختص بذاته كليان بكل حركه وتقرير واموال ومخزون وكل شي"
+ * Sales Revenue - FIFO Cost of Goods Sold + Other Revenues - Expenses
  */
 export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
   const today = getTodayDate();
-
   const isTargetBranch = (bId?: string) => isBranchMatch(bId, branchId);
+  const fifoLedger = buildProductFifoLedger(db, branchId);
 
   const branchInvoices = db.invoices.filter(i => isTargetBranch(i.branchId));
   const branchExpenses = db.expenses.filter(e => isTargetBranch(e.branchId));
   const branchRevenues = db.revenues.filter(r => isTargetBranch(r.branchId));
 
   const totalSalesAll = branchInvoices
-    .filter(i => i.type === 'sale')
+    .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote')
     .reduce((acc, i) => acc + i.total, 0);
 
   const salesToday = branchInvoices
-    .filter(i => i.type === 'sale' && i.date === today)
+    .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote' && i.date === today)
     .reduce((acc, i) => acc + i.total, 0);
 
   const totalPurchasesAll = branchInvoices
@@ -1918,15 +2336,14 @@ export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
     .reduce((acc, i) => acc + i.total, 0);
 
   const totalCOGS = branchInvoices
-    .filter(i => i.type === 'sale')
+    .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote' && i.invoiceKind !== 'sale_return')
     .reduce((acc, i) => {
-      const invoiceCogs = i.items.reduce((s, it) => {
-        const prod = db.products.find(p => p.id === it.productId || p.code === it.productCode);
-        const bp = prod ? getProductForBranch(prod, i.branchId || 'br_mawan') : null;
-        const unitCost = (it.costPrice && it.costPrice > 0)
-          ? it.costPrice
-          : (bp?.avgCost && bp.avgCost > 0 ? bp.avgCost : (bp?.buyPrice && bp.buyPrice > 0 ? bp.buyPrice : (prod?.buyPrice || 0)));
-        return s + (it.qty * unitCost);
+      const invoiceCogs = i.items.reduce((s, it, idx) => {
+        const alloc = fifoLedger.getSaleAllocation(i.id, it.productId, it.productName, idx);
+        if (alloc && alloc.hasVerifiedCost) {
+          return s + alloc.verifiedCostTotal;
+        }
+        return s;
       }, 0);
       return acc + invoiceCogs;
     }, 0);
@@ -2041,9 +2458,10 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
       }
     }
 
-    // 2. Credit Sales Revenue & Extra Revenue
+    // 2. Credit Sales Revenue, VAT & Extra Revenue
     const extra = Number(invoice.extraIncomeVal) || 0;
-    const baseSalesCredit = Math.max(0, invoice.total - extra);
+    const taxAmt = Number(invoice.tax) || 0;
+    const baseSalesCredit = Math.max(0, Number((invoice.total - extra - taxAmt).toFixed(2)));
     const salesAcc = db.accounts.find(a => a.id === 'acc_sales')!;
     lines.push({
       accountId: salesAcc.id,
@@ -2053,6 +2471,22 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
       credit: baseSalesCredit,
       notes: `إيراد مبيعات فاتورة ${invoice.number}`
     });
+
+    if (taxAmt > 0) {
+      const vatAcc = db.accounts.find(a => a.id === 'acc_vat');
+      if (vatAcc) {
+        lines.push({
+          accountId: vatAcc.id,
+          accountCode: vatAcc.code,
+          accountName: vatAcc.name,
+          debit: 0,
+          credit: taxAmt,
+          notes: `ضريبة مبيعات فاتورة ${invoice.number}`
+        });
+      } else {
+        lines[lines.length - 1].credit = Number((lines[lines.length - 1].credit + taxAmt).toFixed(2));
+      }
+    }
 
     if (extra > 0) {
       const revAcc = db.accounts.find(a => a.id === 'acc_other_rev')!;
@@ -2066,8 +2500,11 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
       });
     }
 
-    // 3. COGS & Inventory entry
-    const cogsAmount = invoice.items.reduce((s, it) => s + (it.qty * (it.costPrice || 0)), 0);
+    // 3. COGS & Inventory entry (only for items with verified FIFO purchase batch cost)
+    const cogsAmount = invoice.items.reduce(
+      (s, it) => s + (it.hasVerifiedCost === false ? 0 : it.qty * (it.costPrice || 0)),
+      0
+    );
     if (cogsAmount > 0) {
       const cogsAcc = db.accounts.find(a => a.id === 'acc_cogs')!;
       const invAcc = db.accounts.find(a => a.id === 'acc_inv')!;
@@ -2090,15 +2527,32 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
     }
   } else if (!isSale && !isReturn) {
     // PURCHASE INVOICE
+    const taxAmt = Number(invoice.tax) || 0;
+    const invDebit = Math.max(0, Number((invoice.total - taxAmt).toFixed(2)));
     const invAcc = db.accounts.find(a => a.id === 'acc_inv')!;
     lines.push({
       accountId: invAcc.id,
       accountCode: invAcc.code,
       accountName: invAcc.name,
-      debit: invoice.total,
+      debit: invDebit,
       credit: 0,
       notes: `شراء بضاعة وإضافتها للمخزون - فاتورة ${invoice.number}`
     });
+    if (taxAmt > 0) {
+      const vatAcc = db.accounts.find(a => a.id === 'acc_vat');
+      if (vatAcc) {
+        lines.push({
+          accountId: vatAcc.id,
+          accountCode: vatAcc.code,
+          accountName: vatAcc.name,
+          debit: taxAmt,
+          credit: 0,
+          notes: `ضريبة مشتريات فاتورة ${invoice.number}`
+        });
+      } else {
+        lines[lines.length - 1].debit = Number((lines[lines.length - 1].debit + taxAmt).toFixed(2));
+      }
+    }
 
     if (invoice.payments && invoice.payments.length > 0) {
       invoice.payments.forEach(p => {
@@ -2617,6 +3071,17 @@ export function mergeProducts(existingList: Product[] = [], incomingList: Produc
             wholesalePrice: (Number(p.wholesalePrice) > 0) ? p.wholesalePrice : existing.wholesalePrice,
             buyPrice: (Number(p.buyPrice) > 0) ? p.buyPrice : existing.buyPrice,
             avgCost: (Number(p.avgCost) > 0) ? p.avgCost : existing.avgCost,
+            sellingPriceUpdatedAt: ((p.sellingPriceUpdatedAt || '') >= (existing.sellingPriceUpdatedAt || ''))
+              ? (p.sellingPriceUpdatedAt || existing.sellingPriceUpdatedAt)
+              : existing.sellingPriceUpdatedAt,
+            sellingPriceUpdatedBy: ((p.sellingPriceUpdatedAt || '') >= (existing.sellingPriceUpdatedAt || ''))
+              ? (p.sellingPriceUpdatedBy || existing.sellingPriceUpdatedBy)
+              : existing.sellingPriceUpdatedBy,
+            sellingPriceHistory: Array.from(
+              new Map(
+                [...(existing.sellingPriceHistory || []), ...(p.sellingPriceHistory || [])].map(h => [h.id, h])
+              ).values()
+            )
           }
         : existing;
       byKey.set(key, merged);
@@ -2670,18 +3135,17 @@ export function getBranchFinancialSummary(db: AccountingDB, branchId: string) {
 
   const cashBalance = (cashSalesPaid + cashReceipts + cashRevenues) - (cashPurchasesPaid + cashPayments + cashExpenses);
 
-  // 6. Branch Inventory
+  // 6. Branch Inventory (Strict FIFO Batch Valuation)
   let inStockCount = 0;
   let zeroStockCount = 0;
   let lowStockCount = 0;
-  let totalStockValue = 0;
+  const totalStockValue = calculateInventoryValuation(db, targetBranch);
 
   db.products.forEach(p => {
     const bp = getProductForBranch(p, targetBranch);
     if (bp.currentQty > 0) {
       inStockCount++;
       if (bp.currentQty <= bp.minStock) lowStockCount++;
-      totalStockValue += bp.currentQty * (bp.avgCost || bp.buyPrice || 0);
     } else {
       zeroStockCount++;
     }
@@ -3264,9 +3728,21 @@ export function syncInvoiceVouchers(
   // Money outgoing -> 'payment': Purchase, Sale Return
   const voucherType: 'receipt' | 'payment' = (isSale || isPurchaseReturn) ? 'receipt' : 'payment';
 
-  // If paid is 0 or less, remove any previously linked voucher
-  if (finalPaid <= 0) {
+  const isAutoVoucherForInvoice = (v: Voucher): boolean => {
+    if (v.isManualInstallment) return false;
+    if (v.isAutoFromInvoice) return true;
+    return v.id.startsWith('vch_');
+  };
+
+  const manualInstallmentSum = updated.vouchers
+    .filter(v => v.invoiceId === invoiceId && !isAutoVoucherForInvoice(v))
+    .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+  const autoPaidPortion = Math.max(0, Number((finalPaid - manualInstallmentSum).toFixed(2)));
+
+  // If no auto-payment portion remains at invoice posting, remove ONLY auto invoice vouchers (preserve manual installments!)
+  if (autoPaidPortion <= 0) {
     updated.vouchers = updated.vouchers.filter(v => {
+      if (!isAutoVoucherForInvoice(v)) return true;
       const isLinked = (v as any).invoiceId === invoiceId ||
                        (v as any).sourceId === invoiceId ||
                        ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
@@ -3281,8 +3757,9 @@ export function syncInvoiceVouchers(
     ? `سند قبض مقابل فاتورة ${isSale ? 'مبيعات' : 'مرتجع'} رقم ${invoice.number} (${invoice.partyName}) عبر ${paymentMethod}`
     : `سند صرف مقابل فاتورة ${!isSale ? 'مشتريات' : 'مرتجع'} رقم ${invoice.number} (${invoice.partyName}) عبر ${paymentMethod}`;
 
-  // Find existing linked voucher to UPDATE IN PLACE (preventing number changes or duplicates)
+  // Find existing auto linked voucher to UPDATE IN PLACE (preserving manual installment vouchers)
   const existingVoucher = updated.vouchers.find(v => {
+    if (!isAutoVoucherForInvoice(v)) return false;
     return (v as any).invoiceId === invoiceId ||
            (v as any).sourceId === invoiceId ||
            ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
@@ -3290,9 +3767,8 @@ export function syncInvoiceVouchers(
   });
 
   if (existingVoucher) {
-    // 1. Update in place down to the exact millimeter
     existingVoucher.type = voucherType;
-    existingVoucher.amount = finalPaid;
+    existingVoucher.amount = autoPaidPortion;
     existingVoucher.date = invoice.date;
     existingVoucher.partyId = invoice.partyId;
     existingVoucher.partyName = invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
@@ -3302,12 +3778,13 @@ export function syncInvoiceVouchers(
     existingVoucher.branchName = invoice.branchName || 'الفرع الرئيسي - شركة الموان';
     existingVoucher.invoiceId = invoice.id;
     existingVoucher.referenceNumber = invoice.number;
+    existingVoucher.isAutoFromInvoice = true;
     existingVoucher.updatedAt = new Date().toISOString();
     existingVoucher.updatedBy = currentUserName;
 
-    // 2. Filter out any secondary duplicate vouchers for this same invoice
+    // Remove duplicate AUTO vouchers only (NEVER remove manual installments)
     updated.vouchers = updated.vouchers.filter(v => {
-      if (v.id === existingVoucher.id) return true;
+      if (v.id === existingVoucher.id || !isAutoVoucherForInvoice(v)) return true;
       const isDuplicate = (v as any).invoiceId === invoiceId ||
                           (v as any).sourceId === invoiceId ||
                           ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
@@ -3315,7 +3792,6 @@ export function syncInvoiceVouchers(
       return !isDuplicate;
     });
   } else {
-    // Create new linked voucher with guaranteed unique sequential number
     const { number: vNum, nextSeq } = getNextUniqueVoucherNumber(updated, voucherType);
     const settingKey = voucherType === 'receipt' ? 'nextReceipt' : 'nextPayment';
     updated.settings[settingKey] = Math.max(updated.settings[settingKey] || 1, nextSeq + 1);
@@ -3327,11 +3803,12 @@ export function syncInvoiceVouchers(
       date: invoice.date,
       partyId: invoice.partyId,
       partyName: invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام'),
-      amount: finalPaid,
+      amount: autoPaidPortion,
       paymentMethod,
       description: desc,
       referenceNumber: invoice.number,
       invoiceId: invoice.id,
+      isAutoFromInvoice: true,
       branchId: invoice.branchId || 'br_mawan',
       branchName: invoice.branchName || 'الفرع الرئيسي - شركة الموان',
       journalEntryId: invoice.journalEntryId,
@@ -3347,10 +3824,7 @@ export function syncInvoiceVouchers(
 
 /**
  * Retroactively synchronizes linked financial vouchers (سندات قبض وسندات صرف)
- * for all previously entered invoices. Ensures:
- * 1. Every paid invoice (paid > 0) has an exact voucher matching down to the millimeter
- * 2. If voucher already existed, its amount matches paid exactly
- * 3. Any duplicate vouchers for the same invoice are deduplicated
+ * Preserves multiple partial installment vouchers (`isManualInstallment`) intact.
  */
 export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: AccountingDB; createdCount: number } {
   if (!db.vouchers) db.vouchers = [];
@@ -3358,8 +3832,6 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
 
   let createdCount = 0;
   const currentUserName = db.currentUser?.name || 'مدير النظام';
-
-  // Sort invoices chronologically
   const sortedInvoices = [...db.invoices].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
   sortedInvoices.forEach(inv => {
@@ -3367,43 +3839,45 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
     const isSale = inv.type === 'sale';
     const expectedType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
 
-    if (paid <= 0) {
-      // Remove any lingering linked voucher strictly matching THIS invoice's ID or type+number
-      db.vouchers = db.vouchers.filter(v =>
-        (v as any).invoiceId !== inv.id &&
-        (v as any).sourceId !== inv.id &&
-        !((v as any).referenceNumber === inv.number && v.type === expectedType)
-      );
-      return;
-    }
-
-    // Find linked voucher (match invoiceId / sourceId first, then exact type + number)
-    const linkedVouchers = db.vouchers.filter(v => {
+    const autoVouchers = db.vouchers.filter(v => {
+      if (v.isManualInstallment || (!v.isAutoFromInvoice && !v.id.startsWith('vch_'))) return false;
       return (v as any).invoiceId === inv.id ||
              (v as any).sourceId === inv.id ||
              ((v as any).referenceNumber === inv.number && v.type === expectedType) ||
              (v.description && v.description.includes(`رقم ${inv.number}`) && v.type === expectedType);
     });
 
-    if (linkedVouchers.length === 0) {
-      // Create missing voucher
+    const manualInstallments = db.vouchers.filter(v =>
+      (v.invoiceId === inv.id) && (v.isManualInstallment || !v.id.startsWith('vch_'))
+    );
+    const manualPaid = manualInstallments.reduce((s, v) => s + (Number(v.amount) || 0), 0);
+    const autoExpected = Math.max(0, Number((paid - manualPaid).toFixed(2)));
+
+    if (autoExpected <= 0) {
+      if (autoVouchers.length > 0) {
+        const rmIds = new Set(autoVouchers.map(v => v.id));
+        db.vouchers = db.vouchers.filter(v => !rmIds.has(v.id));
+      }
+      return;
+    }
+
+    if (autoVouchers.length === 0) {
       syncInvoiceVouchers(db, inv, inv.createdBy || currentUserName);
       createdCount++;
     } else {
-      // Pick first, update amount to match invoice paid exactly
-      const primaryVoucher = linkedVouchers[0];
-      if (primaryVoucher.amount !== paid || !primaryVoucher.invoiceId) {
-        primaryVoucher.amount = paid;
+      const primaryVoucher = autoVouchers[0];
+      if (primaryVoucher.amount !== autoExpected || !primaryVoucher.invoiceId) {
+        primaryVoucher.amount = autoExpected;
         primaryVoucher.invoiceId = inv.id;
         primaryVoucher.referenceNumber = inv.number;
+        primaryVoucher.isAutoFromInvoice = true;
         primaryVoucher.date = inv.date;
         primaryVoucher.partyName = inv.partyName || (isSale ? 'عميل نقدي' : 'مورد عام');
         primaryVoucher.paymentMethod = inv.paymentMethod || 'نقدي';
       }
 
-      // If duplicate vouchers existed for this invoice, delete duplicates
-      if (linkedVouchers.length > 1) {
-        const extraIds = new Set(linkedVouchers.slice(1).map(v => v.id));
+      if (autoVouchers.length > 1) {
+        const extraIds = new Set(autoVouchers.slice(1).map(v => v.id));
         db.vouchers = db.vouchers.filter(v => !extraIds.has(v.id));
       }
     }

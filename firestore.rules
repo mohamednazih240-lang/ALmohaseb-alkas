@@ -1,8 +1,110 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // 1. Default-deny safety net
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
+    }
+
+    // 2. Hardened ID & Type Validators
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isManifestDocId(docId) {
+      return docId == 'main_company_database' ||
+             docId.matches('^company_[a-zA-Z0-9_-]{3,40}$') ||
+             docId.matches('^backup_[a-zA-Z0-9_-]{3,40}_latest$');
+    }
+
+    function isShardDocId(docId) {
+      return docId.matches('^shard_[a-zA-Z0-9_-]{3,40}_(invoices|stockMovements|vouchers|treasury|journals|products|audit)_[0-9]{1,6}$');
+    }
+
+    function isLogoDocId(docId) {
+      return docId.matches('^asset_[a-zA-Z0-9_-]{3,40}_logo$');
+    }
+
+    function isDirectoryDocId(docId) {
+      return docId == 'directory_registry';
+    }
+
+    function isAllowedHesabatyDocId(docId) {
+      return isManifestDocId(docId) || isShardDocId(docId) || isLogoDocId(docId) || isDirectoryDocId(docId);
+    }
+
+    function isValidManifestDoc(data) {
+      return data.keys().hasAll(['companyCode', 'updatedAt', 'data']) &&
+             data.keys().hasOnly([
+               'companyCode', 'companyName', 'updatedAt', 'updatedBy', 'updatedRole',
+               'deviceId', 'actionDesc', 'sharded', 'shardPrefix', 'shardCounts',
+               'hasSeparateLogo', 'invoicesCount', 'productsCount', 'data'
+             ]) &&
+             data.companyCode is string && data.companyCode.size() >= 3 && data.companyCode.size() <= 40 &&
+             data.updatedAt is number && data.updatedAt >= 0 &&
+             data.data is string && data.data.size() > 0 && data.data.size() <= 950000 &&
+             (!('companyName' in data) || (data.companyName is string && data.companyName.size() <= 200)) &&
+             (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() <= 120)) &&
+             (!('updatedRole' in data) || (data.updatedRole is string && data.updatedRole.size() <= 60)) &&
+             (!('deviceId' in data) || (data.deviceId is string && data.deviceId.size() <= 120)) &&
+             (!('actionDesc' in data) || (data.actionDesc is string && data.actionDesc.size() <= 500)) &&
+             (!('sharded' in data) || data.sharded is bool) &&
+             (!('shardPrefix' in data) || (data.shardPrefix is string && data.shardPrefix.size() <= 40)) &&
+             (!('shardCounts' in data) || data.shardCounts is map) &&
+             (!('hasSeparateLogo' in data) || data.hasSeparateLogo is bool) &&
+             (!('invoicesCount' in data) || (data.invoicesCount is number && data.invoicesCount >= 0)) &&
+             (!('productsCount' in data) || (data.productsCount is number && data.productsCount >= 0));
+    }
+
+    function isValidShardDoc(data) {
+      return data.keys().hasAll(['companyCode', 'collection', 'shardIndex', 'count', 'updatedAt', 'itemsJson']) &&
+             data.keys().hasOnly(['companyCode', 'collection', 'shardIndex', 'count', 'updatedAt', 'itemsJson']) &&
+             data.companyCode is string && data.companyCode.size() >= 3 && data.companyCode.size() <= 40 &&
+             data.collection is string &&
+             data.collection in ['invoices', 'stockMovements', 'vouchers', 'treasury', 'journals', 'products', 'audit'] &&
+             data.shardIndex is number && data.shardIndex >= 0 &&
+             data.count is number && data.count >= 0 && data.count <= 500 &&
+             data.updatedAt is number && data.updatedAt >= 0 &&
+             data.itemsJson is string && data.itemsJson.size() >= 2 && data.itemsJson.size() <= 950000;
+    }
+
+    function isValidLogoDoc(data) {
+      return data.keys().hasAll(['companyCode', 'logo', 'updatedAt']) &&
+             data.keys().hasOnly(['companyCode', 'logo', 'updatedAt']) &&
+             data.companyCode is string && data.companyCode.size() >= 3 && data.companyCode.size() <= 40 &&
+             data.logo is string && data.logo.size() <= 950000 &&
+             data.updatedAt is number && data.updatedAt >= 0;
+    }
+
+    function isValidDirectoryDoc(data) {
+      return data.keys().size() <= 100;
+    }
+
+    function isValidHesabatyDoc(docId, data) {
+      return (isManifestDocId(docId) && isValidManifestDoc(data)) ||
+             (isShardDocId(docId) && isValidShardDoc(data)) ||
+             (isLogoDocId(docId) && isValidLogoDoc(data)) ||
+             (isDirectoryDocId(docId) && isValidDirectoryDoc(data));
+    }
+
+    // 3. Tenant Database Collection (PIN-authenticated multi-device sharded sync, zero wildcard listing or delete)
+    match /hesabaty_app_data/{docId} {
+      allow get: if isValidId(docId) && isAllowedHesabatyDocId(docId);
+      allow list: if false;
+      allow create, update: if isValidId(docId) &&
+                               isAllowedHesabatyDocId(docId) &&
+                               isValidHesabatyDoc(docId, incoming());
+      allow delete: if false;
+    }
+
+    // 4. Startup server connectivity check document
+    match /test/{testDoc} {
+      allow get: if isValidId(testDoc) && testDoc == 'connection';
+      allow list, write: if false;
     }
   }
 }

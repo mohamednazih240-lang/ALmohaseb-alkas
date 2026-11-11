@@ -227,7 +227,7 @@ export const QuickMenuPage: React.FC<QuickMenuPageProps> = ({
                 فاتورة شراء جديدة
               </h3>
               <p className="text-xs text-slate-600 leading-relaxed">
-                إثبات توريد بضائع من الموردين، زيادة أرصدة المخازن، حساب متوسط التكلفة، وإثبات المدفوعات النقدية والآجلة.
+                إثبات توريد بضائع من الموردين، زيادة أرصدة المخازن، تسجيل تكلفة الدفعات (FIFO)، وإثبات المدفوعات النقدية والآجلة.
               </p>
             </div>
             <button
@@ -357,13 +357,22 @@ export const QuickMenuPage: React.FC<QuickMenuPageProps> = ({
               <h4 className="font-black text-xs text-slate-900 mb-1">دليل الأصناف</h4>
               <p className="text-[11px] text-slate-500">إضافة صنف جديد وضبط الأسعار والباركود بالمخزن.</p>
             </div>
-            <button
-              type="button"
-              onClick={onOpenProductModal}
-              className="mt-3 w-full py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold cursor-pointer"
-            >
-              + إضافة صنف
-            </button>
+            <div className="mt-3 flex flex-col gap-1.5">
+              <button
+                type="button"
+                onClick={onOpenProductModal}
+                className="w-full py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold cursor-pointer"
+              >
+                + إضافة صنف
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigate('selling_prices')}
+                className="w-full py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold cursor-pointer"
+              >
+                أسعار البيع
+              </button>
+            </div>
           </div>
 
           {/* Item 2: Customer */}

@@ -24,12 +24,12 @@ import {
   PAYMENT_METHODS,
   generateId,
   getTodayDate,
-  createVoucherJournal,
-  logAudit,
-  isDuplicateVoucherNumber,
-  getNextUniqueVoucherNumber,
-  deleteVoucherAndRevert
+  getNextUniqueVoucherNumber
 } from '../services/accountingStorage';
+import {
+  postManualVoucherTransaction,
+  cancelOrDeleteVoucherTransaction
+} from '../services/accountingEngine';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { VoucherPrintModal } from './VoucherPrintModal';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
@@ -73,6 +73,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   // Form states
   const [voucherDate, setVoucherDate] = useState(getTodayDate());
   const [partyId, setPartyId] = useState(preselectedPartyId || '');
+  const [linkedInvoiceId, setLinkedInvoiceId] = useState<string>('');
   const [amount, setAmount] = useState<number>(0);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('نقدي');
   const [description, setDescription] = useState('');
@@ -81,6 +82,18 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     if (branchFilter === 'all') return true;
     return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
   };
+
+  // Eligible unpaid / partially paid invoices for linking installments
+  const expectedInvoiceType = isReceipt ? 'sale' : 'purchase';
+  const linkableInvoices = (db.invoices || []).filter(inv => {
+    if (inv.type !== expectedInvoiceType) return false;
+    if (inv.invoiceKind === 'quote') return false;
+    if (partyId && inv.partyId !== partyId) return false;
+    const isCurrentlyLinked = editingVoucher?.invoiceId === inv.id;
+    return isCurrentlyLinked || (Number(inv.remaining) || 0) > 0.009;
+  });
+
+  const selectedLinkedInvoice = linkableInvoices.find(inv => inv.id === linkedInvoiceId);
 
   const vouchersList = db.vouchers
     .filter(v => v.type === type && isTargetBranch(v.branchId))
@@ -93,6 +106,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     setVoucherDate(getTodayDate());
     const defaultParty = isReceipt ? db.customers[0]?.id : db.suppliers[0]?.id;
     setPartyId(preselectedPartyId || defaultParty || '');
+    setLinkedInvoiceId('');
     setAmount(0);
     setPaymentMethod('نقدي');
     setDescription(isReceipt ? 'دفعة نقدية سداد حساب' : 'سداد دفعة للمورد');
@@ -103,6 +117,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     setEditingVoucher(v);
     setVoucherDate(v.date);
     setPartyId(v.partyId || '');
+    setLinkedInvoiceId(v.invoiceId || '');
     setAmount(v.amount);
     setPaymentMethod(v.paymentMethod);
     setDescription(v.description);
@@ -113,123 +128,68 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     e.preventDefault();
     if (amount <= 0) return alert('المبلغ يجب أن يكون أكبر من صفر');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const list = isReceipt ? updated.customers : updated.suppliers;
+    const list = isReceipt ? db.customers : db.suppliers;
     const party = list.find(p => p.id === partyId);
     const partyName = party ? party.name : (isReceipt ? 'عميل نقدي' : 'مورد عام');
+    const operatorName = db.currentUser?.name || 'مدير النظام';
+
+    let voucherPayload: Voucher;
+    let workingDb = db;
 
     if (editingVoucher) {
-      // Update existing voucher
-      const vIdx = updated.vouchers.findIndex(v => v.id === editingVoucher.id);
-      if (vIdx !== -1) {
-        updated.vouchers[vIdx] = {
-          ...editingVoucher,
-          date: voucherDate,
-          partyId: partyId || undefined,
-          partyName,
-          amount,
-          paymentMethod,
-          description
-        };
-
-        // Update corresponding treasury entry
-        const trIdx = updated.treasury.findIndex(t => t.sourceId === editingVoucher.id);
-        if (trIdx !== -1) {
-          updated.treasury[trIdx].amount = amount;
-          updated.treasury[trIdx].date = voucherDate;
-          updated.treasury[trIdx].method = paymentMethod;
-          updated.treasury[trIdx].description = `${isReceipt ? 'سند قبض' : 'سند صرف'} ${editingVoucher.number} - ${partyName}: ${description}`;
-        }
-
-        // Update journal entry
-        const jIdx = updated.journals.findIndex(j => j.sourceId === editingVoucher.id);
-        if (jIdx !== -1) {
-          const freshJournal = createVoucherJournal(updated, updated.vouchers[vIdx]);
-          freshJournal.id = updated.journals[jIdx].id;
-          freshJournal.number = updated.journals[jIdx].number;
-          updated.journals[jIdx] = freshJournal;
-        }
-
-        logAudit(
-          updated,
-          isReceipt ? 'تعديل سند قبض' : 'تعديل سند صرف',
-          `تعديل سند رقم ${editingVoucher.number} بقيمة ${formatMoney(amount, updated.settings.currency)}`
-        );
-
-        onUpdateDb(updated);
-        setShowModal(false);
-        setEditingVoucher(null);
-        return;
-      }
-    }
-
-    const nextSettingKey = isReceipt ? 'nextReceipt' : 'nextPayment';
-    const { number: vNumber, nextSeq } = getNextUniqueVoucherNumber(updated, type);
-    updated.settings[nextSettingKey] = nextSeq + 1;
-
-    const vId = generateId(isReceipt ? 'rec' : 'pay');
-
-    const newVoucher: Voucher = {
-      id: vId,
-      number: vNumber,
-      type,
-      date: voucherDate,
-      partyId: partyId || undefined,
-      partyName,
-      amount,
-      paymentMethod,
-      description,
-      branchId: targetBranchId,
-      branchName: currentBranch.name
-    };
-
-    // 1. Treasury Entry (Deterministic Idempotency Key)
-    const deterministicTrId = `tr_${type}_${vId}_p0_${isReceipt ? 'in' : 'out'}`;
-    const trEntry: TreasuryEntry = {
-      id: deterministicTrId,
-      date: voucherDate,
-      direction: isReceipt ? 'in' : 'out',
-      amount,
-      method: paymentMethod,
-      description: `${isReceipt ? 'سند قبض' : 'سند صرف'} ${vNumber} - ${partyName}: ${description}`,
-      sourceType: type,
-      sourceId: vId,
-      branchId: targetBranchId,
-      branchName: currentBranch.name
-    };
-
-    const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId || t.sourceId === vId);
-    if (existingTrIdx > -1) {
-      updated.treasury[existingTrIdx] = trEntry;
+      voucherPayload = {
+        ...editingVoucher,
+        date: voucherDate,
+        partyId: partyId || undefined,
+        partyName,
+        amount,
+        paymentMethod,
+        description,
+        invoiceId: linkedInvoiceId || undefined,
+        referenceNumber: selectedLinkedInvoice ? selectedLinkedInvoice.number : undefined,
+        updatedAt: new Date().toISOString(),
+        updatedBy: operatorName
+      };
     } else {
-      updated.treasury.unshift(trEntry);
+      const nextSettingKey = isReceipt ? 'nextReceipt' : 'nextPayment';
+      const { number: vNumber, nextSeq } = getNextUniqueVoucherNumber(db, type);
+      workingDb = {
+        ...db,
+        settings: {
+          ...db.settings,
+          [nextSettingKey]: nextSeq + 1
+        }
+      };
+
+      const vId = generateId(isReceipt ? 'rec' : 'pay');
+      voucherPayload = {
+        id: vId,
+        number: vNumber,
+        type,
+        date: voucherDate,
+        partyId: partyId || undefined,
+        partyName,
+        amount,
+        paymentMethod,
+        description,
+        invoiceId: linkedInvoiceId || undefined,
+        referenceNumber: selectedLinkedInvoice ? selectedLinkedInvoice.number : undefined,
+        isManualInstallment: true,
+        isAutoFromInvoice: false,
+        branchId: targetBranchId,
+        branchName: currentBranch.name,
+        createdAt: new Date().toISOString(),
+        createdBy: operatorName
+      };
     }
 
-    // 2. Automated Balanced Double-Entry Journal Entry
-    const deterministicJournalId = `jrn_${type}_${vId}`;
-    const journal = createVoucherJournal(updated, newVoucher);
-    journal.id = deterministicJournalId;
-    journal.sourceId = vId;
-    newVoucher.journalEntryId = deterministicJournalId;
-
-    const existingJIdx = updated.journals.findIndex(j => j.id === deterministicJournalId || j.sourceId === vId);
-    if (existingJIdx > -1) {
-      updated.journals[existingJIdx] = journal;
-    } else {
-      updated.journals.unshift(journal);
+    const result = postManualVoucherTransaction(workingDb, voucherPayload, operatorName);
+    if (!result.success) {
+      alert(result.message);
+      return;
     }
 
-    // 3. Save voucher
-    updated.vouchers.unshift(newVoucher);
-
-    // 4. Audit
-    logAudit(
-      updated,
-      isReceipt ? 'تسجيل سند قبض' : 'تسجيل سند صرف',
-      `سند رقم ${vNumber} بقيمة ${formatMoney(amount, updated.settings.currency)} للطرف ${partyName}`
-    );
-
-    onUpdateDb(updated);
+    onUpdateDb(result.db);
     setShowModal(false);
     setEditingVoucher(null);
   };
@@ -245,8 +205,12 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
       return;
     }
 
-    const updated = deleteVoucherAndRevert(db, v);
-    onUpdateDb(updated);
+    const res = cancelOrDeleteVoucherTransaction(db, v.id, db.currentUser?.name || 'المدير العام', 'حذف السند من إدارة السندات');
+    if (!res.success) {
+      alert(res.message);
+      return;
+    }
+    onUpdateDb(res.db);
   };
 
   const handleBatchExportExcel = () => {
@@ -359,9 +323,9 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
       {/* Branch Isolation Filter Bar */}
       <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-bold text-slate-700">عرض سندات فرع:</span>
-          <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 shadow-2xs">
+          <div className="inline-flex flex-wrap rounded-lg border border-slate-300 bg-white p-0.5 shadow-2xs">
             <button
               type="button"
               onClick={() => setBranchFilter('current')}
@@ -488,7 +452,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
               </div>
 
               {/* Card Footer */}
-              <div className="pt-2.5 border-t border-slate-100 flex items-center justify-end gap-1.5 no-print">
+              <div className="pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-end gap-1.5 no-print">
                 <button
                   onClick={() => {
                     setPrintingVoucher(v);
@@ -600,8 +564,11 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                 </label>
                 <select
                   value={partyId}
-                  onChange={e => setPartyId(e.target.value)}
-                  className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-medium"
+                  onChange={e => {
+                    setPartyId(e.target.value);
+                    setLinkedInvoiceId('');
+                  }}
+                  className="w-full min-w-0 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-medium"
                 >
                   <option value="">{isReceipt ? 'عميل نقدي عام' : 'مورد عام'}</option>
                   {(isReceipt ? db.customers : db.suppliers).map(p => (
@@ -610,7 +577,40 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                  ربط بفاتورة مستحقة / جزئية (اختياري لسداد الأقساط)
+                </label>
+                <select
+                  value={linkedInvoiceId}
+                  onChange={e => {
+                    const invId = e.target.value;
+                    setLinkedInvoiceId(invId);
+                    const target = linkableInvoices.find(i => i.id === invId);
+                    if (target && !editingVoucher && (amount <= 0 || amount > target.remaining)) {
+                      setAmount(Number(target.remaining) || 0);
+                    }
+                  }}
+                  className="w-full min-w-0 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-medium"
+                >
+                  <option value="">— سند عام على حساب الطرف (غير مربوط بفاتورة محددة) —</option>
+                  {linkableInvoices.map(inv => (
+                    <option key={inv.id} value={inv.id}>
+                      فاتورة #{inv.number} ({inv.date}) — متبقي: {formatMoney(inv.remaining, db.settings.currency)} من {formatMoney(inv.total, db.settings.currency)}
+                    </option>
+                  ))}
+                </select>
+                {selectedLinkedInvoice && (
+                  <div className="mt-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">
+                    إجمالي الفاتورة #{selectedLinkedInvoice.number}: {formatMoney(selectedLinkedInvoice.total, db.settings.currency)} • المتبقي قبل هذا السند: {formatMoney(
+                      Math.max(0, selectedLinkedInvoice.total - db.vouchers.filter(v => v.id !== editingVoucher?.id && (v.invoiceId === selectedLinkedInvoice.id || v.referenceNumber === selectedLinkedInvoice.number)).reduce((s, v) => s + (Number(v.amount) || 0), 0)),
+                      db.settings.currency
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 mb-1">المبلغ المطلوب *</label>
                   <input
@@ -630,7 +630,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                   <select
                     value={paymentMethod}
                     onChange={e => setPaymentMethod(e.target.value as PaymentMethod)}
-                    className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
+                    className="w-full min-w-0 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
                   >
                     {PAYMENT_METHODS.filter(m => m !== 'آجل').map(m => (
                       <option key={m} value={m}>{m}</option>

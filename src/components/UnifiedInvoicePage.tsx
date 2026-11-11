@@ -69,7 +69,8 @@ import {
   getDeterministicVoucherId,
   normalizeArabicText,
   getLatestVerifiedPurchaseInfo,
-  calculateProductAverageCost
+  buildProductFifoLedger,
+  matchProductStrictly
 } from '../services/accountingStorage';
 import {
   InvoicePriceValidationModal,
@@ -827,59 +828,80 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       return;
     }
 
-    let matched: Product | undefined = db.products.find(
-      p => p.name.trim().toLowerCase() === name.toLowerCase() ||
-           p.code.toLowerCase() === name.toLowerCase()
-    );
+    const isStrictCatalogMode = mode === 'sale' || mode === 'wholesale' || mode === 'sale_return' || mode === 'quote';
+    const matchRes = matchProductStrictly(db, { name });
+    let matched: Product | undefined = matchRes.exactMatch;
 
     if (!matched) {
-      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-      const newProdCode = `P-${String(1000 + updated.products.length + 1)}`;
-      const newProdId = generateId('prod');
-      const newProduct: Product = {
-        id: newProdId,
-        code: newProdCode,
-        barcode: '',
-        name: name,
-        category: 'عامة',
-        unit: 'قطعة',
-        buyPrice: mode === 'purchase' ? price : 0,
-        sellPrice: (mode === 'sale' || mode === 'wholesale') ? price : (mode === 'purchase' ? price : 0),
-        wholesalePrice: mode === 'wholesale' ? price : 0,
-        minStock: 5,
-        currentQty: 0,
-        avgCost: mode === 'purchase' ? price : 0,
-        branchesData: {
-          [invoiceBranchId]: {
-            currentQty: 0,
-            buyPrice: mode === 'purchase' ? price : 0,
-            sellPrice: (mode === 'sale' || mode === 'wholesale') ? price : (mode === 'purchase' ? price : 0),
-            wholesalePrice: mode === 'wholesale' ? price : 0,
-            minStock: 5,
-            avgCost: mode === 'purchase' ? price : 0
-          }
+      if (isStrictCatalogMode) {
+        alert(`⛔ غير مسموح ببيع أو إرجاع صنف غير مسجل في دليل الأصناف ("${name}").\nيرجى اختيار الصنف من الكتالوج المعتمد أو تسجيله أولاً من المخزون/المشتريات.`);
+        rapidNameRef.current?.focus();
+        return;
+      }
+
+      if (matchRes.ambiguousCandidates.length > 0) {
+        const candidatesList = matchRes.ambiguousCandidates
+          .slice(0, 5)
+          .map(p => `• ${p.name} (كود: ${p.code})`)
+          .join('\n');
+        const linkFirst = confirm(
+          `⚠️ تم العثور على أصناف مشابهة في الدليل للاسم "${name}":\n${candidatesList}\n\n• اضغط «موافق» لربط البند بأول صنف مطابق (${matchRes.ambiguousCandidates[0].name}) ومنع التكرار.\n• اضغط «إلغاء» لتسجيله كصنف جديد مستقل.`
+        );
+        if (linkFirst) {
+          matched = matchRes.ambiguousCandidates[0];
         }
-      };
-      updated.products.push(newProduct);
-      matched = newProduct;
-      onUpdateDb(updated);
+      }
+
+      if (!matched) {
+        const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+        const newProdCode = `P-${String(1000 + updated.products.length + 1)}`;
+        const newProdId = generateId('prod');
+        const newProduct: Product = {
+          id: newProdId,
+          code: newProdCode,
+          barcode: '',
+          name: name,
+          category: 'عامة',
+          unit: 'قطعة',
+          buyPrice: 0,
+          sellPrice: 0,
+          wholesalePrice: 0,
+          minStock: 5,
+          currentQty: 0,
+          branchesData: {
+            [invoiceBranchId]: {
+              currentQty: 0,
+              buyPrice: 0,
+              sellPrice: 0,
+              wholesalePrice: 0,
+              minStock: 5
+            }
+          }
+        };
+        updated.products.push(newProduct);
+        matched = newProduct;
+        onUpdateDb(updated);
+      }
     }
 
     const calculatedTotal = total > 0 ? total : Math.max(0, (qty * price) - discount + tax);
-    const itemCostInfo = calculateProductAverageCost(db, matched.id, name);
-    const activeCost = itemCostInfo.hasPurchases
-      ? ((db.settings.cost === 'average') ? itemCostInfo.avgCost : itemCostInfo.latestBuyPrice)
-      : (matched.buyPrice || 0);
+    const fifoLedger = buildProductFifoLedger(db, invoiceBranchId, editingInvoice?.id);
+    const fifoSim = fifoLedger.simulateSaleFifoCost(matched.id, name, qty);
+    const resolvedSaleCost = (fifoSim.hasVerifiedCost && fifoSim.effectiveUnitCost !== undefined)
+      ? Number(fifoSim.effectiveUnitCost.toFixed(4))
+      : 0;
 
     const itemObj: InvoiceItem = {
       productId: matched.id,
       productCode: matched.code,
-      productName: name,
+      productName: matched.name,
       unit: matched.unit || 'قطعة',
       spec: rapidItemDesc.trim() || undefined,
       qty,
       unitPrice: price,
-      costPrice: mode === 'purchase' ? price : activeCost,
+      costPrice: mode === 'purchase' ? price : resolvedSaleCost,
+      hasVerifiedCost: mode === 'purchase' ? price > 0 : fifoSim.hasFullVerifiedCost,
+      uncoveredQty: mode === 'purchase' ? 0 : fifoSim.uncoveredQty,
       discount,
       taxRate: tax,
       total: calculatedTotal
@@ -897,7 +919,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setInvoiceItems(prev => {
         const existingIdx = prev.findIndex(
           it => (matched && it.productId === matched.id) ||
-                it.productName.trim().toLowerCase() === name.toLowerCase()
+                it.productName.trim().toLowerCase() === matched!.name.trim().toLowerCase()
         );
         if (existingIdx > -1) {
           const copy = [...prev];
@@ -1029,10 +1051,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         };
         return copy;
       } else {
-        const costInfo = calculateProductAverageCost(db, prod.id, prod.name);
-        const activeCost = costInfo.hasPurchases
-          ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
-          : (branchProd.avgCost || branchProd.buyPrice || 0);
+        const fifoLedger = buildProductFifoLedger(db, invoiceBranchId, editingInvoice?.id);
+        const fifoSim = fifoLedger.simulateSaleFifoCost(prod.id, prod.name, 1);
+        const resolvedSaleCost = (fifoSim.hasVerifiedCost && fifoSim.effectiveUnitCost !== undefined)
+          ? Number(fifoSim.effectiveUnitCost.toFixed(4))
+          : 0;
         const newItem: InvoiceItem = {
           productId: prod.id,
           productCode: prod.code,
@@ -1041,7 +1064,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           spec: '',
           qty: 1,
           unitPrice: activePrice,
-          costPrice: mode === 'purchase' ? activePrice : activeCost,
+          costPrice: mode === 'purchase' ? activePrice : resolvedSaleCost,
+          hasVerifiedCost: mode === 'purchase' ? activePrice > 0 : fifoSim.hasFullVerifiedCost,
+          uncoveredQty: mode === 'purchase' ? 0 : fifoSim.uncoveredQty,
           discount: 0,
           taxRate: 0,
           total: activePrice * 1
@@ -1117,10 +1142,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         showToast(`✓ تم زيادة كمية "${selectedCardProduct.name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
         return copy;
       } else {
-        const costInfo = calculateProductAverageCost(db, selectedCardProduct.id, selectedCardProduct.name);
-        const activeCost = costInfo.hasPurchases
-          ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
-          : (branchProd.avgCost || branchProd.buyPrice || 0);
+        const fifoLedger = buildProductFifoLedger(db, invoiceBranchId, editingInvoice?.id);
+        const fifoSim = fifoLedger.simulateSaleFifoCost(selectedCardProduct.id, selectedCardProduct.name, qty);
+        const resolvedSaleCost = (fifoSim.hasVerifiedCost && fifoSim.effectiveUnitCost !== undefined)
+          ? Number(fifoSim.effectiveUnitCost.toFixed(4))
+          : 0;
         const newItem: InvoiceItem = {
           productId: selectedCardProduct.id,
           productCode: selectedCardProduct.code,
@@ -1129,7 +1155,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           spec: itemCardSpec.trim(),
           qty: qty,
           unitPrice: unitPrice,
-          costPrice: mode === 'purchase' ? unitPrice : activeCost,
+          costPrice: mode === 'purchase' ? unitPrice : resolvedSaleCost,
+          hasVerifiedCost: mode === 'purchase' ? unitPrice > 0 : fifoSim.hasFullVerifiedCost,
+          uncoveredQty: mode === 'purchase' ? 0 : fifoSim.uncoveredQty,
           discount: 0,
           taxRate: 0,
           total: qty * unitPrice
@@ -1172,40 +1200,36 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       return;
     }
 
+    const isSaleOrStrictCatalog = mode === 'sale' || mode === 'wholesale' || mode === 'sale_return' || mode === 'quote';
+    const matchRes = matchProductStrictly(db, { name });
+    let existingProd = matchRes.exactMatch;
+
+    if (!existingProd && isSaleOrStrictCatalog) {
+      alert(`⛔ غير مسموح بإنشاء أصناف جديدة من شاشة المبيعات أو المرتجعات ("${name}").\nيرجى اختيار صنف مسجل في الكتالوج.`);
+      return;
+    }
+
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const isSale = mode === 'sale' || mode === 'wholesale';
-
-    // Deduplicate: check if a product with the same normalized Arabic name already exists in the catalog
-    const normQuickName = normalizeArabicText(name);
-    let existingProd = updated.products.find(
-      p => normQuickName && normalizeArabicText(p.name) === normQuickName
-    );
-
     let newProd: Product;
 
-    if (existingProd) {
-      // Reuse existing product so purchases offset sales (e.g. -5 + 5 = 0, or increases if more)
-      newProd = existingProd;
-      if (mode === 'purchase') {
-        newProd.buyPrice = price;
-        newProd.avgCost = price;
+    if (!existingProd && matchRes.ambiguousCandidates.length > 0) {
+      const candidates = matchRes.ambiguousCandidates.slice(0, 5).map(p => `• ${p.name} (كود: ${p.code})`).join('\n');
+      const useExisting = confirm(
+        `⚠️ تم العثور على أصناف مشابهة في الدليل للاسم "${name}":\n${candidates}\n\n• اضغط «موافق» لربطه بأول صنف مطابق (${matchRes.ambiguousCandidates[0].name}) ومنع التكرار.\n• اضغط «إلغاء» لتسجيله كصنف جديد مستقل.`
+      );
+      if (useExisting) {
+        existingProd = matchRes.ambiguousCandidates[0];
       }
-      const existingBranchData = getProductForBranch(newProd, invoiceBranchId);
-      newProd = updateProductBranchData(newProd, invoiceBranchId, {
-        buyPrice: mode === 'purchase' ? price : existingBranchData.buyPrice,
-        sellPrice: isSale ? price : existingBranchData.sellPrice,
-      });
-      const pIdx = updated.products.findIndex(p => p.id === newProd.id);
-      if (pIdx > -1) updated.products[pIdx] = newProd;
+    }
+
+    if (existingProd) {
+      // Reuse existing product WITHOUT mutating catalog buyPrice or selling prices before posting!
+      newProd = existingProd;
       logAudit(updated, `ربط صنف مسجل مسبقاً بالفاتورة (${invoiceBranch.name})`, `${newProd.name} (كود: ${newProd.code})`);
     } else {
       const newCode = `P-${String(1000 + updated.products.length + 1)}`;
       const newId = generateId('prod');
       const initialQty = 0;
-
-      const costInfo = calculateProductAverageCost(updated, undefined, name);
-      const verifiedBuy = mode === 'purchase' ? price : (costInfo.hasPurchases ? costInfo.latestBuyPrice : 0);
-      const verifiedAvg = mode === 'purchase' ? price : (costInfo.hasPurchases ? costInfo.avgCost : 0);
 
       newProd = {
         id: newId,
@@ -1214,44 +1238,44 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         name,
         category: fastItemCategory || 'عامة',
         unit: fastItemUnit || 'قطعة',
-        buyPrice: verifiedBuy,
-        sellPrice: isSale ? price : (verifiedBuy > 0 ? verifiedBuy : 0),
-        wholesalePrice: mode === 'wholesale' ? price : 0,
+        buyPrice: 0,
+        sellPrice: 0,
+        wholesalePrice: 0,
         minStock: 5,
         currentQty: initialQty,
-        avgCost: verifiedAvg,
         branchesData: {
           [invoiceBranchId]: {
             currentQty: initialQty,
-            buyPrice: verifiedBuy,
-            sellPrice: isSale ? price : (verifiedBuy > 0 ? verifiedBuy : 0),
-            wholesalePrice: mode === 'wholesale' ? price : 0,
-            minStock: 5,
-            avgCost: verifiedAvg
+            buyPrice: 0,
+            sellPrice: 0,
+            wholesalePrice: 0,
+            minStock: 5
           }
         }
       };
 
       updated.products.push(newProd);
-      logAudit(updated, `إثبات صنف جديد أثناء البحث بالفاتورة (${invoiceBranch.name})`, `${newProd.name} (كود: ${newProd.code}) - الرصيد: ${initialQty}`);
+      logAudit(updated, `إثبات صنف جديد أثناء الشراء (${invoiceBranch.name})`, `${newProd.name} (كود: ${newProd.code}) - الرصيد: ${initialQty}`);
+      onUpdateDb(updated);
     }
 
-    onUpdateDb(updated);
-
-    const costInfo = calculateProductAverageCost(updated, newProd.id, newProd.name);
-    const activeCost = costInfo.hasPurchases
-      ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
-      : (newProd.buyPrice || 0);
+    const fifoLedger = buildProductFifoLedger(updated, invoiceBranchId, editingInvoice?.id);
+    const fifoSim = fifoLedger.simulateSaleFifoCost(newProd.id, newProd.name, qty);
+    const resolvedSaleCost = (fifoSim.hasVerifiedCost && fifoSim.effectiveUnitCost !== undefined)
+      ? Number(fifoSim.effectiveUnitCost.toFixed(4))
+      : 0;
 
     const newItem: InvoiceItem = {
       productId: newProd.id,
       productCode: newProd.code,
       productName: newProd.name,
       unit: newProd.unit,
-      spec: isSale ? 'صنف جديد مضاف أثناء البيع (بالسالب)' : 'صنف جديد مضاف أثناء الشراء',
+      spec: mode === 'purchase' ? 'صنف مسجل مع فاتورة الشراء' : '',
       qty,
       unitPrice: price,
-      costPrice: mode === 'purchase' ? price : activeCost,
+      costPrice: mode === 'purchase' ? price : resolvedSaleCost,
+      hasVerifiedCost: mode === 'purchase' ? price > 0 : fifoSim.hasFullVerifiedCost,
+      uncoveredQty: mode === 'purchase' ? 0 : fifoSim.uncoveredQty,
       discount: 0,
       taxRate: 0,
       total: qty * price
@@ -1260,7 +1284,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setInvoiceItems(prev => {
       const existingIdx = prev.findIndex(
         it => it.productId === newProd.id ||
-              it.productName.trim().toLowerCase() === name.toLowerCase()
+              it.productName.trim().toLowerCase() === newProd.name.trim().toLowerCase()
       );
       if (existingIdx > -1) {
         const copy = [...prev];
@@ -1270,7 +1294,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           qty: newQty,
           total: (newQty * copy[existingIdx].unitPrice) - (copy[existingIdx].discount || 0)
         };
-        showToast(`✓ تم زيادة كمية "${name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
+        showToast(`✓ تم زيادة كمية "${newProd.name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
         return copy;
       }
       return [...prev, newItem];
@@ -1280,7 +1304,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setShowInlineDropdown(false);
     setShowLookupModal(false);
 
-    showToast(`✓ تم إثبات الصنف "${name}" بالمخزون بنجاح وتسجيله${isSale ? ` بالسالب (${newProd.currentQty})` : ` (+${newProd.currentQty})`} وإدراجه بالفاتورة`);
+    showToast(`✓ تم إثبات الصنف "${newProd.name}" وإدراجه بالفاتورة بنجاح`);
   };
 
   // Quick Register Party (عميل / مورد / شركة)
@@ -1385,19 +1409,28 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     });
   };
 
-  // Add new item into database
+  // Add new item into database (strict duplicate guard & NO artificial auto-markups)
   const saveNewItemToDB = () => {
-    if (!newItemName.trim()) return alert('أدخل اسم الصنف');
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+    const cleanName = newItemName.trim();
+    if (!cleanName) return alert('أدخل اسم الصنف');
 
+    const dupCheck = matchProductStrictly(db, { name: cleanName, code: newItemCode.trim() });
+    if (dupCheck.exactMatch) {
+      alert(`⚠️ الصنف "${dupCheck.exactMatch.name}" مسجل بالفعل بالكود (${dupCheck.exactMatch.code}) ولا يمكن تكراره.`);
+      setShowEditItemModal(false);
+      quickAddItem(dupCheck.exactMatch);
+      return;
+    }
+
+    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     const buy = parseFloat(newBuyPrice) || 0;
-    const cash = parseFloat(newCashPriceManual) || (buy > 0 ? buy * 1.2 : 100);
-    const wholesale = parseFloat(newWholesalePriceManual) || (buy > 0 ? buy * 1.1 : 90);
+    const cash = parseFloat(newCashPriceManual) || 0;
+    const wholesale = parseFloat(newWholesalePriceManual) || 0;
     const stock = parseFloat(newStockQty) || 0;
 
     const newProd: Product = {
       id: generateId('prod'),
-      name: newItemName.trim(),
+      name: cleanName,
       code: newItemCode.trim() || `PRD-${100 + updated.products.length + 1}`,
       barcode: '',
       category: newCategory || 'عامة',
@@ -1407,15 +1440,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       wholesalePrice: invoiceBranchId === 'br_main' ? wholesale : 0,
       minStock: 5,
       currentQty: invoiceBranchId === 'br_main' ? stock : 0,
-      avgCost: buy > 0 ? buy : 0,
       branchesData: {
         [invoiceBranchId]: {
           currentQty: stock,
           buyPrice: buy,
           sellPrice: cash,
           wholesalePrice: wholesale,
-          minStock: 5,
-          avgCost: buy > 0 ? buy : 0
+          minStock: 5
         }
       }
     };
@@ -1429,16 +1460,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     quickAddItem(newProd);
   };
 
-  // Calculations for margins in new item modal
+  // Explicit purchase price input (never overrides selling prices with arbitrary markups)
   const handleNewBuyPriceChange = (val: string) => {
     setNewBuyPrice(val);
-    const b = parseFloat(val) || 0;
-    const cMargin = parseFloat(newCashMargin) || 0;
-    const wMargin = parseFloat(newWholesaleMargin) || 0;
-    if (b > 0) {
-      setNewCashPriceManual((b * (1 + cMargin / 100)).toFixed(2));
-      setNewWholesalePriceManual((b * (1 + wMargin / 100)).toFixed(2));
-    }
   };
 
   // SAVE INVOICE WITH COMPLETE ACCOUNTING IMPACT
@@ -1448,6 +1472,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (invoiceItems.length === 0) {
       alert('الفاتورة فارغة! أضف أصنافاً أولاً.');
       return;
+    }
+
+    // Strict catalog validation on Sales, Sale Returns, and Quotes (zero phantom sales items)
+    if (mode === 'sale' || mode === 'wholesale' || mode === 'sale_return' || mode === 'quote') {
+      const uncataloged = invoiceItems.find(it => !matchProductStrictly(db, { id: it.productId, code: it.productCode, name: it.productName, unit: it.unit }).exactMatch);
+      if (uncataloged) {
+        alert(`⛔ لا يمكن ترحيل فاتورة البيع: الصنف "${uncataloged.productName || uncataloged.productCode}" غير مسجل في دليل الأصناف. يرجى اختياره من الكتالوج المعتمد.`);
+        return;
+      }
     }
 
     // 1. Below Cost Selling Pre-posting Check (Sales / Wholesale)
@@ -1691,8 +1724,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const isSale = mode === 'sale' || mode === 'wholesale';
     const isReturn = mode === 'sale_return' || mode === 'purchase_return';
 
-    // Operator and Audit Logging: Capture exact who, when, role and details
-    const nowIso = new Date().toISOString();
+    // Operator and Audit Logging: Capture exact who, when, role and details with monotonic timestamp
+    const maxExistingMs = updated.invoices.reduce((mx, i) => {
+      const t = i.createdAt ? Date.parse(i.createdAt) : 0;
+      return Number.isFinite(t) && t > mx ? t : mx;
+    }, 0);
+    const monotonicMs = Math.max(Date.now(), maxExistingMs + 1);
+    const nowIso = new Date(monotonicMs).toISOString();
     const currentUserName = activeOperator?.name || db.currentUser?.name || 'مدير النظام';
     const currentUserId = activeOperator?.id || db.currentUser?.id || 'usr_admin';
     const currentUserRole = activeOperator?.role || db.currentUser?.role || 'مدير';
@@ -1830,20 +1868,22 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       items: JSON.parse(JSON.stringify(invoiceItems))
     };
 
-    // 1. Stock movements, auto-register new items & inventory balance update specifically for this branch
+    // 1. Stock movements & strict FIFO inventory valuation specifically for this branch
     const whId = updated.warehouses[0]?.id || 'wh_main';
     const wh = updated.warehouses.find(w => w.id === whId);
+    const fifoLedgerBeforeInv = isSale ? buildProductFifoLedger(updated, invoiceBranchId, invId) : null;
 
     savedInvoice.items.forEach(item => {
-      const normItemName = normalizeArabicText(item.productName);
-      // Primary match: by exact normalized name so future purchases of the same product increase its stock instead of duplicating
-      let prod = updated.products.find(p => normItemName && normalizeArabicText(p.name) === normItemName);
-      if (!prod && item.productId) {
-        prod = updated.products.find(p => p.id === item.productId);
-      }
+      const matchRes = matchProductStrictly(updated, {
+        id: item.productId,
+        code: item.productCode,
+        name: item.productName,
+        unit: item.unit
+      });
+      let prod = matchRes.exactMatch;
 
-      // Auto-register brand new items entered on the fly into the products catalog
-      if (!prod && item.productName && item.productName.trim()) {
+      // Auto-register brand new items ONLY during purchase posting (never on sales/returns/quotes, and never with invented markups)
+      if (!prod && mode === 'purchase' && item.productName && item.productName.trim()) {
         const rawName = item.productName.trim();
         let maxCode = 1300;
         updated.products.forEach(p => {
@@ -1856,13 +1896,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         const newCode = (item.productCode && item.productCode.trim() && !updated.products.some(p => p.code === item.productCode.trim()))
           ? item.productCode.trim()
           : `P-${maxCode + 1}`;
-        const unitBuy = mode === 'purchase'
-          ? item.unitPrice
-          : (item.costPrice || 0);
-        const unitSell = (mode === 'sale' || mode === 'wholesale')
-          ? item.unitPrice
-          : 0;
-        const unitWholesale = unitSell > 0 ? unitSell : 0;
+        const unitBuy = Number(item.unitPrice) || 0;
         const newProdId = item.productId && item.productId.startsWith('prod_') ? item.productId : generateId('prod');
 
         const newProd: Product = {
@@ -1873,19 +1907,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           category: 'عامة',
           unit: item.unit || 'قطعة',
           buyPrice: unitBuy,
-          sellPrice: unitSell,
-          wholesalePrice: unitWholesale,
+          sellPrice: 0,
+          wholesalePrice: 0,
           minStock: 5,
           currentQty: 0,
-          avgCost: unitBuy,
           branchesData: {
             [invoiceBranchId]: {
               currentQty: 0,
               buyPrice: unitBuy,
-              sellPrice: unitSell,
-              wholesalePrice: unitWholesale,
-              minStock: 5,
-              avgCost: unitBuy
+              sellPrice: 0,
+              wholesalePrice: 0,
+              minStock: 5
             }
           }
         };
@@ -1895,18 +1927,32 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         item.productId = newProd.id;
         item.productCode = newProd.code;
         item.costPrice = unitBuy;
+        item.hasVerifiedCost = unitBuy > 0;
+        item.uncoveredQty = 0;
       }
 
       if (prod) {
+        item.productId = prod.id;
+        item.productCode = prod.code;
+
         let qtyChange = 0;
         if (mode === 'sale' || mode === 'wholesale') {
           qtyChange = -item.qty;
-          const bp = getProductForBranch(prod, invoiceBranchId);
-          const effectiveCost = (bp.avgCost && bp.avgCost > 0) ? bp.avgCost : (bp.buyPrice || prod.buyPrice || 0);
-          item.costPrice = effectiveCost;
+          const sim = fifoLedgerBeforeInv!.simulateSaleFifoCost(prod.id, prod.name, item.qty);
+          if (sim.hasVerifiedCost && sim.effectiveUnitCost !== undefined) {
+            item.costPrice = Number(sim.effectiveUnitCost.toFixed(4));
+            item.hasVerifiedCost = sim.hasFullVerifiedCost;
+            item.uncoveredQty = sim.uncoveredQty;
+          } else {
+            item.costPrice = 0;
+            item.hasVerifiedCost = false;
+            item.uncoveredQty = Math.abs(Number(item.qty) || 0);
+          }
         } else if (mode === 'purchase') {
           qtyChange = item.qty;
           item.costPrice = item.unitPrice;
+          item.hasVerifiedCost = (Number(item.unitPrice) || 0) > 0;
+          item.uncoveredQty = 0;
         } else if (mode === 'sale_return') {
           qtyChange = item.qty;
         } else if (mode === 'purchase_return') {
@@ -1925,7 +1971,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           warehouseName: wh ? wh.name : 'المخزن الرئيسي',
           qtyChange,
           balanceAfter: 0,
-          unitCost: item.costPrice || item.unitPrice,
+          unitCost: (mode === 'sale' || mode === 'wholesale') ? (item.hasVerifiedCost ? (item.costPrice || 0) : 0) : (item.costPrice || item.unitPrice),
           type: (mode === 'sale' || mode === 'wholesale' ? 'sale' :
                  mode === 'purchase' ? 'purchase' :
                  mode === 'sale_return' ? 'sale_return' : 'purchase_return') as any,
@@ -1946,7 +1992,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           updated.stockMovements.unshift(movementPayload);
         }
 
-        // Recalculate true product stock balance directly from deduplicated movements ledger & average cost strictly from purchase invoices
+        // Recalculate product stock balance from deduplicated movements
         const hasAnyPurchaseSm = mode === 'purchase' || updated.stockMovements.some(sm =>
           (sm.productId === prod.id || normalizeArabicText(sm.productName) === normProdName) && sm.type === 'purchase'
         );
@@ -1962,46 +2008,18 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           }
         }
         const accurateQty = Number(prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0).toFixed(4));
-
-        const realCostStats = calculateProductAverageCost(
-          { ...updated, invoices: [savedInvoice, ...(updated.invoices || []).filter(i => i.id !== savedInvoice.id)] },
-          prod.id,
-          prod.name
-        );
-        const accurateAvgCost = realCostStats.hasPurchases ? realCostStats.avgCost : (prod.buyPrice || 0);
-        const accurateBuyPrice = realCostStats.hasPurchases ? realCostStats.latestBuyPrice : (prod.buyPrice || 0);
-
-        if (mode === 'sale' || mode === 'wholesale') {
-          item.costPrice = realCostStats.hasPurchases
-            ? ((updated.settings?.cost === 'average') ? (realCostStats.avgCost || realCostStats.latestBuyPrice) : (realCostStats.latestBuyPrice || realCostStats.avgCost))
-            : (prod.avgCost || prod.buyPrice || 0);
-          movementPayload.unitCost = item.costPrice;
-        }
-
         movementPayload.balanceAfter = accurateQty;
 
+        // Purchase posts update buyPrice (catalog default), NEVER touching selling prices or past batches!
+        // Sale posts update qty ONLY, NEVER overwriting official catalog sellPrice/wholesalePrice!
         const isPurchase = mode === 'purchase';
-        const isSale = mode === 'sale';
-        const isWholesale = mode === 'wholesale';
-
+        const bpCurrent = getProductForBranch(prod, invoiceBranchId);
         const updatedProd = updateProductBranchData(prod, invoiceBranchId, {
           currentQty: accurateQty,
-          avgCost: accurateAvgCost,
-          // تثبيت آخر سعر شراء على الصنف كافتراضي للفواتير اللاحقة دون المساس بالفواتير التاريخية
-          buyPrice: (isPurchase && Number(item.unitPrice) > 0) ? Number(item.unitPrice) : accurateBuyPrice,
-          // تثبيت آخر سعر بيع على الصنف كافتراضي للفواتير اللاحقة
-          ...(isSale && Number(item.unitPrice) > 0 ? { sellPrice: Number(item.unitPrice) } : {}),
-          ...(isWholesale && Number(item.unitPrice) > 0 ? { wholesalePrice: Number(item.unitPrice) } : {})
+          buyPrice: (isPurchase && Number(item.unitPrice) > 0) ? Number(item.unitPrice) : bpCurrent.buyPrice
         });
 
-        // مزامنة الحقول الأساسية لبطاقة الصنف مباشرة لضمان ظهور آخر سعر في كافة الشاشات
-        if (isSale && Number(item.unitPrice) > 0) {
-          updatedProd.sellPrice = Number(item.unitPrice);
-        }
-        if (isWholesale && Number(item.unitPrice) > 0) {
-          updatedProd.wholesalePrice = Number(item.unitPrice);
-        }
-        if (isPurchase && Number(item.unitPrice) > 0) {
+        if (isPurchase && Number(item.unitPrice) > 0 && (invoiceBranchId === 'br_main' || invoiceBranchId === 'br_mawan')) {
           updatedProd.buyPrice = Number(item.unitPrice);
         }
 
@@ -2890,12 +2908,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       openItemCard(match);
                       setInlineProductSearch('');
                       setShowInlineDropdown(false);
-                    } else {
+                    } else if (mode === 'purchase') {
                       setFastItemName(inlineProductSearch.trim());
                       setFastItemQty('');
                       setFastItemPrice('');
                       setShowFastCreateModal(true);
                       setShowInlineDropdown(false);
+                    } else {
+                      alert(`⛔ الصنف "${inlineProductSearch.trim()}" غير موجود في دليل الأصناف.\nلا يمكن بيع أصناف غير مسجلة بالكتالوج.`);
                     }
                   }
                 }}
@@ -2930,8 +2950,34 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     return (
                       <div className="p-3 text-center text-[9.5px] text-slate-600 space-y-2">
                         <div>لا توجد أصناف مطابقة لـ "{inlineProductSearch}"</div>
-                        <button
-                          type="button"
+                        {mode === 'purchase' ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setFastItemName(inlineProductSearch.trim());
+                              setFastItemQty('');
+                              setFastItemPrice('');
+                              setShowFastCreateModal(true);
+                              setShowInlineDropdown(false);
+                            }}
+                            className="w-full py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[9.5px] font-bold flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>+ إثبات وإضافة "{inlineProductSearch}" كصنف جديد للمشتريات</span>
+                          </button>
+                        ) : (
+                          <div className="text-[9px] font-bold text-rose-700 bg-rose-50 p-1.5 rounded border border-rose-200">
+                            ⛔ في المبيعات يجب اختيار صنف مسجل مسبقاً بدليل الأصناف
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <>
+                      {mode === 'purchase' && (
+                        <div
                           onClick={() => {
                             setFastItemName(inlineProductSearch.trim());
                             setFastItemQty('');
@@ -2939,33 +2985,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                             setShowFastCreateModal(true);
                             setShowInlineDropdown(false);
                           }}
-                          className="w-full py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[9.5px] font-bold flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
+                          className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 cursor-pointer flex items-center justify-between text-[8.5px] font-bold border-b border-emerald-200 transition-colors"
                         >
-                          <Plus className="w-3.5 h-3.5" />
-                          <span>+ إثبات وإضافة "{inlineProductSearch}" كصنف جديد فوراً</span>
-                        </button>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <>
-                      <div
-                        onClick={() => {
-                          setFastItemName(inlineProductSearch.trim());
-                          setFastItemQty('');
-                          setFastItemPrice('');
-                          setShowFastCreateModal(true);
-                          setShowInlineDropdown(false);
-                        }}
-                        className="p-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 cursor-pointer flex items-center justify-between text-[8.5px] font-bold border-b border-emerald-200 transition-colors"
-                      >
-                        <span className="flex items-center gap-1">
-                          <Plus className="w-3 h-3 text-emerald-700" />
-                          <span>+ إضافة بند جديد غير موجود باسم "{inlineProductSearch}"</span>
-                        </span>
-                        <span className="text-[7.5px] bg-emerald-600 text-white px-1.5 py-0.2 rounded">صنف جديد</span>
-                      </div>
+                          <span className="flex items-center gap-1">
+                            <Plus className="w-3 h-3 text-emerald-700" />
+                            <span>+ إضافة بند جديد غير موجود باسم "{inlineProductSearch}"</span>
+                          </span>
+                          <span className="text-[7.5px] bg-emerald-600 text-white px-1.5 py-0.2 rounded">صنف جديد</span>
+                        </div>
+                      )}
                       {matches.map(p => {
                     const bp = getProductForBranch(p, invoiceBranchId);
                     return (
@@ -3267,8 +3295,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
               {/* Global Tax */}
               <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label className="font-bold text-slate-700">ضريبة الفاتورة الكلية</label>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="font-bold text-slate-700 flex items-center gap-1.5">
+                    <span>ضريبة الفاتورة الكلية</span>
+                    <span className={`text-[8px] px-1.5 py-0.2 rounded font-bold ${db.settings.tax === 'enabled' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600'}`}>
+                      {db.settings.tax === 'enabled' ? 'الضريبة مفعلة' : 'الافتراضي 0% (معطلة)'}
+                    </span>
+                  </label>
                   <div className="flex border border-blue-600 rounded overflow-hidden h-5">
                     <button
                       type="button"
@@ -3288,7 +3321,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 </div>
                 <input
                   type="number"
-                  placeholder="أدخل قيمة أو نسبة الضريبة..."
+                  placeholder="أدخل قيمة أو نسبة الضريبة (0 عند التعطيل)..."
                   value={globalInvTax}
                   onFocus={e => e.target.select()}
                   onChange={e => setGlobalInvTax(e.target.value)}
@@ -3394,29 +3427,31 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </button>
             </div>
 
-            <div className="flex flex-1 p-1 gap-1 overflow-hidden">
-              {/* Categories Sidebar */}
-              <div className="w-24 bg-slate-50 border border-slate-400 rounded flex flex-col flex-shrink-0 overflow-hidden">
-                <div className="bg-slate-200 p-1 text-[8px] font-bold text-center border-b border-slate-300 flex flex-col gap-1">
+            <div className="flex flex-col sm:flex-row flex-1 p-1 gap-1 overflow-hidden">
+              {/* Categories Sidebar (horizontal compact on 360px mobile, sidebar on desktop) */}
+              <div className="w-full sm:w-24 bg-slate-50 border border-slate-400 rounded flex flex-col flex-shrink-0 overflow-hidden max-h-24 sm:max-h-none">
+                <div className="bg-slate-200 p-1 text-[8px] font-bold text-center border-b border-slate-300 flex sm:flex-col items-center justify-between gap-1">
                   <span>المجموعات</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setNewItemName('');
-                      setNewItemCode(`1${String(db.products.length + 1).padStart(3, '0')}`);
-                      setNewBuyPrice('');
-                      setShowEditItemModal(true);
-                    }}
-                    className="bg-emerald-600 text-white text-[7.5px] py-0.5 px-1 rounded font-bold"
-                  >
-                    + صنف جديد
-                  </button>
+                  {mode === 'purchase' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewItemName('');
+                        setNewItemCode(`1${String(db.products.length + 1).padStart(3, '0')}`);
+                        setNewBuyPrice('');
+                        setShowEditItemModal(true);
+                      }}
+                      className="bg-emerald-600 text-white text-[7.5px] py-0.5 px-1.5 rounded font-bold cursor-pointer"
+                    >
+                      + صنف جديد
+                    </button>
+                  )}
                 </div>
 
-                <div className="flex-1 overflow-y-auto">
+                <div className="flex sm:flex-col overflow-x-auto sm:overflow-y-auto flex-1">
                   <div
                     onClick={() => setSelectedCategory('all')}
-                    className={`py-1.5 px-1 text-[8px] font-bold text-center border-b border-slate-200 cursor-pointer ${
+                    className={`py-1.5 px-2 sm:px-1 text-[8px] font-bold text-center border-l sm:border-l-0 sm:border-b border-slate-200 cursor-pointer shrink-0 ${
                       selectedCategory === 'all' ? 'bg-sky-600 text-white' : 'text-slate-800 hover:bg-slate-100'
                     }`}
                   >
@@ -3473,19 +3508,25 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       return (
                         <div className="p-6 text-center text-slate-500 text-[10px] space-y-2.5">
                           <div className="font-bold">لا توجد أصناف مطابقة لـ "{lookupSearch}" في الدليل</div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setFastItemName(lookupSearch.trim());
-                              setFastItemQty('');
-                              setFastItemPrice('');
-                              setShowFastCreateModal(true);
-                            }}
-                            className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold inline-flex items-center gap-1.5 shadow-sm cursor-pointer"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            <span>+ إثبات وإضافة "{lookupSearch}" كصنف جديد فوراً بالعدد والسعر</span>
-                          </button>
+                          {mode === 'purchase' ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setFastItemName(lookupSearch.trim());
+                                setFastItemQty('');
+                                setFastItemPrice('');
+                                setShowFastCreateModal(true);
+                              }}
+                              className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold inline-flex items-center gap-1.5 shadow-sm cursor-pointer"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>+ إثبات وإضافة "{lookupSearch}" كصنف جديد للمشتريات</span>
+                            </button>
+                          ) : (
+                            <div className="text-[9.5px] font-bold text-rose-700 bg-rose-50 p-2 rounded border border-rose-200 inline-block">
+                              ⛔ لا يمكن إضافة أو بيع صنف غير مسجل بدليل الأصناف
+                            </div>
+                          )}
                         </div>
                       );
                     }
@@ -3527,7 +3568,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                                 <span className="text-sky-600 font-mono text-[8.5px] shrink-0 mr-1">{item.code}</span>
                               </div>
 
-                              <div className="grid grid-cols-4 gap-1 text-[8px] text-center pt-0.5">
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 text-[8px] text-center pt-0.5">
                                 <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
                                   <span className="block text-[6.5px] text-slate-500">متاح بالفرع</span>
                                   <strong className={`font-mono text-[9px] ${item.currentQty <= 0 ? 'text-rose-600' : 'text-blue-600'}`}>
@@ -4102,11 +4143,19 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       )}
                     </div>
 
-                    {/* Live Warning for Below Cost in Sales */}
+                    {/* Live Warning for Below Cost or Unverified Cost in Sales */}
                     {(mode === 'sale' || mode === 'wholesale') && (() => {
                       const pInfo = getLatestVerifiedPurchaseInfo(db, selectedCardProduct.id, selectedCardProduct.name);
                       const currentPrice = parseFloat(itemCardPrice) || itemCardDefaultPrice;
-                      if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined && currentPrice < pInfo.price) {
+                      if (!pInfo.hasVerifiedPurchase) {
+                        return (
+                          <div className="bg-slate-100 border border-slate-300 rounded p-1.5 text-[9.5px] text-slate-700 font-bold flex items-center justify-between">
+                            <span>ℹ️ تكلفة الشراء غير محددة</span>
+                            <span className="text-[8.5px] text-slate-500">لم تُسجّل فواتير شراء سابقة</span>
+                          </div>
+                        );
+                      }
+                      if (pInfo.price !== undefined && currentPrice < pInfo.price) {
                         const loss = pInfo.price - currentPrice;
                         return (
                           <div className="bg-rose-50 border border-rose-300 rounded p-1.5 text-[9.5px] text-rose-800 font-bold flex items-center justify-between">

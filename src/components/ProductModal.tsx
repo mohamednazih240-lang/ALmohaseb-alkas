@@ -23,7 +23,8 @@ import {
   logAudit,
   getProductForBranch,
   updateProductBranchData,
-  isDuplicateProduct
+  isDuplicateProduct,
+  matchProductStrictly
 } from '../services/accountingStorage';
 
 interface ProductModalProps {
@@ -148,30 +149,79 @@ export const ProductModal: React.FC<ProductModalProps> = ({
 
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
-    // Strict duplicate check for code & barcode
+    // Strict duplicate check for code, barcode, and normalized name + unit
     const dupCheck = isDuplicateProduct(updated, code.trim(), barcode.trim(), product?.id);
     if (dupCheck.isDuplicate) {
       alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
       return;
     }
 
+    const strictMatch = matchProductStrictly(updated, {
+      name: name.trim(),
+      unit,
+      code: code.trim(),
+      barcode: barcode.trim()
+    });
+    if (!product && (strictMatch.exactMatch || strictMatch.ambiguousCandidates.length > 0)) {
+      const candidate = strictMatch.exactMatch || strictMatch.ambiguousCandidates[0];
+      const msg = strictMatch.exactMatch
+        ? `الصنف "${candidate.name}" موجود بالفعل بنفس الاسم والوحدة (${candidate.code}). لا يُسمح بتكرار الأصناف.`
+        : `يوجد صنف مشابه في الدليل: "${candidate.name}" (${candidate.code}). هل أنت متأكد أنك تريد إضافة صنف جديد مختلف؟`;
+      if (strictMatch.exactMatch) {
+        alert(`⚠️ منع التكرار: ${msg}`);
+        return;
+      } else if (!window.confirm(msg)) {
+        return;
+      }
+    }
+
     const branchName = currentBranch?.name || 'الفرع الرئيسي';
+    const actorName = updated.currentUser?.name || updated.users?.[0]?.name || 'المدير';
+    const nowIso = new Date().toISOString();
 
     if (product) {
       // Editing existing product
       const idx = updated.products.findIndex(p => p.id === product.id);
       if (idx !== -1) {
+        const prevProd = updated.products[idx];
+        const prevBp = getProductForBranch(prevProd, selectedBranchId);
+        const qtyDiff = Number((initialQty - (prevBp.currentQty ?? prevProd.currentQty ?? 0)).toFixed(4));
+        const sellingChanged =
+          Math.abs((prevBp.sellPrice || 0) - sellPrice) > 0.001 ||
+          Math.abs((prevBp.wholesalePrice || 0) - wholesalePrice) > 0.001;
+
+        const nextHistory = sellingChanged
+          ? [
+              {
+                id: generateId('sph'),
+                date: nowIso,
+                oldSellPrice: prevBp.sellPrice || 0,
+                newSellPrice: sellPrice,
+                oldWholesalePrice: prevBp.wholesalePrice || 0,
+                newWholesalePrice: wholesalePrice,
+                updatedBy: actorName,
+                branchId: selectedBranchId,
+                note: 'تحديث من بطاقة الصنف'
+              },
+              ...(Array.isArray(prevProd.sellingPriceHistory) ? prevProd.sellingPriceHistory : [])
+            ].slice(0, 100)
+          : prevProd.sellingPriceHistory;
+
         // 1. Update master metadata (name, code, barcode, unit)
-        let targetProd = {
-          ...updated.products[idx],
+        let targetProd: Product = {
+          ...prevProd,
           name: name.trim(),
           code: code.trim(),
           barcode: barcode.trim(),
           unit,
+          ...(sellingChanged
+            ? {
+                sellingPriceUpdatedAt: nowIso,
+                sellingPriceUpdatedBy: actorName,
+                sellingPriceHistory: nextHistory
+              }
+            : {})
         };
-
-        const prevBp = getProductForBranch(updated.products[idx], selectedBranchId);
-        const qtyDiff = Number((initialQty - (prevBp.currentQty ?? updated.products[idx].currentQty ?? 0)).toFixed(4));
 
         // 2. Update branch-specific pricing and stock for the selected branch only!
         targetProd = updateProductBranchData(targetProd, selectedBranchId, {
@@ -180,7 +230,12 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           wholesalePrice,
           minStock,
           currentQty: initialQty,
-          avgCost: buyPrice > 0 ? buyPrice : targetProd.avgCost
+          ...(sellingChanged
+            ? {
+                sellingPriceUpdatedAt: nowIso,
+                sellingPriceUpdatedBy: actorName
+              }
+            : {})
         });
 
         updated.products[idx] = targetProd;
@@ -198,7 +253,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             warehouseName: wh ? wh.name : 'المخزن الرئيسي',
             qtyChange: qtyDiff,
             balanceAfter: initialQty,
-            unitCost: buyPrice > 0 ? buyPrice : (targetProd.avgCost || targetProd.buyPrice || 0),
+            unitCost: buyPrice > 0 ? buyPrice : (targetProd.buyPrice || 0),
             type: 'adjustment',
             refNumber: `تعديل يدوي`,
             sourceId: adjId,
@@ -214,18 +269,37 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     } else {
       // Adding NEW product
       const newProdId = generateId('prod');
+      const isPrimaryBranch = selectedBranchId === 'br_main' || selectedBranchId === 'br_mawan';
+      const hasInitialSellPrice = sellPrice > 0 || wholesalePrice > 0;
       const newProduct: Product = {
         id: newProdId,
         name: name.trim(),
         code: code.trim(),
         barcode: barcode.trim(),
         unit,
-        buyPrice: selectedBranchId === 'br_main' ? buyPrice : 0,
-        sellPrice: selectedBranchId === 'br_main' ? sellPrice : 0,
-        wholesalePrice: selectedBranchId === 'br_main' ? wholesalePrice : 0,
+        buyPrice: isPrimaryBranch ? buyPrice : 0,
+        sellPrice: isPrimaryBranch ? sellPrice : 0,
+        wholesalePrice: isPrimaryBranch ? wholesalePrice : 0,
         minStock: minStock || 5,
-        currentQty: selectedBranchId === 'br_main' ? initialQty : 0,
+        currentQty: isPrimaryBranch ? initialQty : 0,
         avgCost: buyPrice,
+        sellingPriceUpdatedAt: hasInitialSellPrice ? nowIso : undefined,
+        sellingPriceUpdatedBy: hasInitialSellPrice ? actorName : undefined,
+        sellingPriceHistory: hasInitialSellPrice
+          ? [
+              {
+                id: generateId('sph'),
+                date: nowIso,
+                oldSellPrice: 0,
+                newSellPrice: sellPrice,
+                oldWholesalePrice: 0,
+                newWholesalePrice: wholesalePrice,
+                updatedBy: actorName,
+                branchId: selectedBranchId,
+                note: 'التسعير التأسيسي عند إضافة الصنف'
+              }
+            ]
+          : [],
         priceHistory: buyPrice > 0 ? [{ date: getTodayDate(), price: buyPrice, qty: initialQty, branchId: selectedBranchId }] : [],
         branchesData: {
           [selectedBranchId]: {
@@ -234,7 +308,8 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             sellPrice,
             wholesalePrice,
             minStock: minStock || 5,
-            avgCost: buyPrice
+            sellingPriceUpdatedAt: hasInitialSellPrice ? nowIso : undefined,
+            sellingPriceUpdatedBy: hasInitialSellPrice ? actorName : undefined
           }
         }
       };
@@ -321,44 +396,44 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-3 overflow-y-auto">
-      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-2 sm:p-3 overflow-y-auto overflow-x-hidden">
+      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl">
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 bg-blue-600 text-white rounded-lg shadow-2xs">
+        <div className="flex items-center justify-between p-3.5 sm:p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="p-1.5 bg-blue-600 text-white rounded-lg shadow-2xs shrink-0">
               <Package className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-base font-black text-slate-900">
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-black text-slate-900 truncate">
                 {product ? 'تعديل بيانات الصنف والتسعير' : 'إضافة صنف جديد للنظام'}
               </h2>
-              <span className="text-[11px] text-slate-500 font-medium">
+              <span className="text-[11px] text-slate-500 font-medium block truncate">
                 {!product ? 'إدخال مستمر وسريع بدون مغادرة النافذة' : 'تحديث أسعار وتكاليف الصنف'}
               </span>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1 hover:bg-slate-200 text-slate-500 hover:text-slate-900 rounded-lg transition-colors cursor-pointer"
+            className="p-1.5 hover:bg-slate-200 text-slate-500 hover:text-slate-900 rounded-lg transition-colors cursor-pointer shrink-0"
             title="إغلاق"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <form onSubmit={e => handleSave(e, false)} className="p-4 space-y-3.5 overflow-y-auto flex-1">
+        <form onSubmit={e => handleSave(e, false)} className="p-3.5 sm:p-4 space-y-3.5 overflow-y-auto overflow-x-hidden flex-1 min-w-0">
           {/* Continuous addition success banner */}
           {continuousNotification && (
-            <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between text-xs text-emerald-900 animate-in fade-in duration-200">
-              <div className="flex items-center gap-2 font-bold">
+            <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between gap-2 text-xs text-emerald-900 animate-in fade-in duration-200">
+              <div className="flex items-center gap-2 font-bold min-w-0">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>{continuousNotification}</span>
+                <span className="break-words">{continuousNotification}</span>
               </div>
               <button
                 type="button"
                 onClick={() => setContinuousNotification(null)}
-                className="text-emerald-700 hover:text-emerald-950 p-1 cursor-pointer"
+                className="text-emerald-700 hover:text-emerald-950 p-1 cursor-pointer shrink-0"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -366,16 +441,16 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           )}
 
           {/* Branch Specificity Selector & Notice */}
-          <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-black text-blue-900 flex items-center gap-1.5">
-                <Building2 className="w-4 h-4 text-blue-600" />
+          <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2 w-full min-w-0">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 w-full min-w-0">
+              <label className="text-xs font-black text-blue-900 flex items-center gap-1.5 shrink-0">
+                <Building2 className="w-4 h-4 text-blue-600 shrink-0" />
                 <span>الفرع المستهدف للتسعير والمخزون:</span>
               </label>
               <select
                 value={selectedBranchId}
                 onChange={e => setSelectedBranchId(e.target.value)}
-                className="bg-white border border-blue-300 text-blue-900 font-bold text-xs rounded-lg px-2.5 py-1 outline-none shadow-2xs"
+                className="w-full sm:w-auto sm:max-w-[230px] min-w-0 bg-white border border-blue-300 text-blue-900 font-bold text-xs rounded-lg px-2.5 py-1.5 outline-none shadow-2xs truncate"
               >
                 {branches.map(b => (
                   <option key={b.id} value={b.id}>
@@ -386,7 +461,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             </div>
             <div className="flex items-start gap-1.5 text-[10.5px] text-blue-800">
               <Info className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
-              <span>
+              <span className="break-words">
                 الأصناف موحدة في كل الفروع، لكن <strong>الأعداد والأسعار مستقلة تماماً</strong> وتدخل حسب هذا الفرع ولا تؤثر على أي فرع آخر.
               </span>
             </div>
@@ -402,12 +477,12 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               value={name}
               onChange={e => setName(e.target.value)}
               placeholder="مثال: شاشة سامسونج 27 بوصة"
-              className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold focus:bg-white focus:border-blue-500 outline-none transition-colors"
+              className="w-full min-w-0 px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold focus:bg-white focus:border-blue-500 outline-none transition-colors"
             />
           </div>
 
           {/* Code, Barcode, Unit */}
-          <div className="grid grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">كود الصنف</label>
               <input
@@ -440,37 +515,37 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           </div>
 
           {/* Pricing Section with Reverse Cost Calculation */}
-          <div className="pt-2 border-t border-slate-100 space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="block text-[11px] font-black text-slate-900">
+          <div className="pt-2 border-t border-slate-100 space-y-2 min-w-0">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <span className="block text-[11px] font-black text-slate-900 break-words">
                 تسعير الصنف الخاص بـ ({currentBranch.name}):
               </span>
               {/* Backward / Reverse calculation button */}
               <button
                 type="button"
                 onClick={() => setShowReverseCalc(prev => !prev)}
-                className={`text-[11px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1.5 transition-all cursor-pointer ${
+                className={`text-[11px] font-bold px-2.5 py-1 rounded-md flex items-center justify-center gap-1.5 transition-all cursor-pointer shrink-0 ${
                   showReverseCalc
                     ? 'bg-blue-600 text-white shadow-2xs'
                     : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200'
                 }`}
                 title="حساب سعر الشراء والتكلفة عكسياً من إجمالي الفاتورة أو الكرتونة أو نسبة الربح"
               >
-                <Calculator className="w-3.5 h-3.5" />
-                <span>الحساب العكسي لسعر الشراء 🧮</span>
+                <Calculator className="w-3.5 h-3.5 shrink-0" />
+                <span>الحساب العكسي لسعر الشراء</span>
               </button>
             </div>
 
             {/* REVERSE CALCULATION PANEL */}
             {showReverseCalc && (
               <div className="p-3 bg-gradient-to-br from-blue-50/90 to-indigo-50/70 border border-blue-300/80 rounded-xl space-y-2.5 shadow-xs animate-in fade-in duration-150">
-                <div className="flex items-center justify-between border-b border-blue-200 pb-1.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-blue-200 pb-1.5">
                   <div className="flex items-center gap-1.5 text-xs font-black text-blue-950">
-                    <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                    <Sparkles className="w-3.5 h-3.5 text-blue-600 shrink-0" />
                     <span>أداة الحساب العكسي لتكلفة شراء الصنف:</span>
                   </div>
                   {/* Segmented Mode Selector */}
-                  <div className="inline-flex rounded-lg border border-blue-200 bg-white p-0.5 text-[10px]">
+                  <div className="inline-flex flex-wrap rounded-lg border border-blue-200 bg-white p-0.5 text-[10px]">
                     <button
                       type="button"
                       onClick={() => setReverseMode('carton')}
@@ -494,7 +569,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
 
                 {reverseMode === 'carton' ? (
                   <div className="space-y-2 text-xs">
-                    <div className="grid grid-cols-3 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <div>
                         <label className="block text-[10px] font-bold text-slate-700 mb-0.5">
                           إجمالي سعر الكرتونة / الدفعة
@@ -542,7 +617,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between pt-1 border-t border-blue-200/50">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-blue-200/50">
                       <div className="flex items-center gap-1.5">
                         <span className="text-slate-600 font-bold text-xs">سعر شراء القطعة المحسوب:</span>
                         <span className="font-mono font-black text-blue-900 text-sm bg-white px-2 py-0.5 rounded border border-blue-200">
@@ -600,7 +675,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between pt-1 border-t border-blue-200/50">
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-blue-200/50">
                       <div className="flex items-center gap-1.5">
                         <span className="text-slate-600 font-bold text-xs">سعر الشراء المستنتج:</span>
                         <span className="font-mono font-black text-blue-900 text-sm bg-white px-2 py-0.5 rounded border border-blue-200">
@@ -631,7 +706,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             )}
 
             {/* Price Inputs Grid */}
-            <div className="grid grid-cols-3 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
               <div>
                 <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر الشراء / التكلفة</label>
                 <input
@@ -675,7 +750,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           </div>
 
           {/* Stock Quantities */}
-          <div className="grid grid-cols-2 gap-3 pt-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
                 رصيد المخزون بـ ({currentBranch.name})
@@ -711,7 +786,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           {/* Quick Reconciliation Helper if Stock is Negative */}
           {initialQty < 0 && (
             <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-lg text-xs text-amber-900 space-y-1.5">
-              <div className="flex items-center justify-between font-bold">
+              <div className="flex items-center justify-between flex-wrap gap-1 font-bold">
                 <span>⚠️ الصنف مباع/منصرف بالسالب: ({initialQty})</span>
                 <span className="text-[10px] text-amber-700">كمية منصرفة قبل الشراء</span>
               </div>
@@ -738,7 +813,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           )}
 
           {/* Modal Actions */}
-          <div className="pt-3 border-t border-slate-200 flex items-center justify-between gap-2">
+          <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
             <button
               type="button"
               onClick={onClose}
@@ -747,7 +822,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               إلغاء
             </button>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {!product ? (
                 <>
                   <button
@@ -762,7 +837,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                     type="submit"
                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
                   >
-                    <Check className="w-4 h-4" />
+                    <Check className="w-4 h-4 shrink-0" />
                     <span>حفظ وتفريغ لإدخال صنف جديد</span>
                   </button>
                 </>

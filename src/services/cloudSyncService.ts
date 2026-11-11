@@ -5,6 +5,7 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocFromServer,
   onSnapshot
 } from 'firebase/firestore';
 import { auth } from './firebaseAuth';
@@ -58,6 +59,78 @@ function withTimeout<T>(promise: Promise<T>, ms: number = 4000): Promise<T | nul
     }),
     timeoutPromise
   ]);
+}
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid ?? null,
+      email: auth.currentUser?.email ?? null,
+      emailVerified: auth.currentUser?.emailVerified ?? null,
+      isAnonymous: auth.currentUser?.isAnonymous ?? null,
+      tenantId: auth.currentUser?.tenantId ?? null,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+function isPermissionDeniedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const code = (err as any)?.code;
+  return code === 'permission-denied' || /insufficient permissions|permission[- ]denied/i.test(msg);
+}
+
+/**
+ * Validates initial Firestore server connectivity on startup
+ */
+export async function testFirestoreConnection(): Promise<boolean> {
+  try {
+    await getDocFromServer(doc(firestore, 'test', 'connection'));
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration (client is offline).');
+      return false;
+    }
+    if (isPermissionDeniedError(error)) {
+      handleFirestoreError(error, OperationType.GET, 'test/connection');
+    }
+    return false;
+  }
 }
 
 const SYNC_DOC_PATH = 'hesabaty_app_data';
@@ -440,14 +513,14 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 
       const manifestPayload = {
         updatedAt: now,
-        updatedBy: cleanDb.currentUser?.name || 'مستخدم حساباتي',
-        updatedRole: cleanDb.currentUser?.role || 'مدير',
-        companyCode: cleanCode,
-        companyName: cleanDb.settings.company,
-        deviceId: currentDevId,
-        actionDesc: actionLabel,
+        updatedBy: (cleanDb.currentUser?.name || 'مستخدم حساباتي').slice(0, 110),
+        updatedRole: (cleanDb.currentUser?.role || 'مدير').slice(0, 50),
+        companyCode: cleanCode.slice(0, 40),
+        companyName: (cleanDb.settings.company || '').slice(0, 190),
+        deviceId: currentDevId.slice(0, 110),
+        actionDesc: actionLabel.slice(0, 480),
         sharded: true,
-        shardPrefix: cleanCode,
+        shardPrefix: cleanCode.slice(0, 40),
         shardCounts,
         hasSeparateLogo,
         invoicesCount: (cleanDb.invoices || []).length,
@@ -492,6 +565,10 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
       });
       return true;
     } catch (err) {
+      if (isPermissionDeniedError(err)) {
+        updateSyncState({ status: 'error' });
+        handleFirestoreError(err, OperationType.WRITE, `${SYNC_DOC_PATH}/company_${cleanCode}`);
+      }
       console.warn('Firestore cloud sync push warning (safe fallback to IndexedDB):', err);
       updateSyncState({ status: 'offline' });
       return false;
@@ -740,12 +817,28 @@ export function subscribeToCloudDatabase(
     // 3. Listen to company-specific document (the main shared doc triggers immediately for all devices)
     const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
     unsubscribeCompListener = onSnapshot(compDocRef, (snap) => { void handleSnapshot(snap); }, (error) => {
+      if (isPermissionDeniedError(error)) {
+        try {
+          handleFirestoreError(error, OperationType.GET, `${SYNC_DOC_PATH}/company_${cleanCode}`);
+        } catch {
+          updateSyncState({ status: 'error' });
+        }
+        return;
+      }
       console.warn('Firestore company listener notice:', error.message);
     });
 
     if (isMawan) {
       const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
       unsubscribeListener = onSnapshot(docRef, (snap) => { void handleSnapshot(snap); }, (error) => {
+        if (isPermissionDeniedError(error)) {
+          try {
+            handleFirestoreError(error, OperationType.GET, `${SYNC_DOC_PATH}/${SYNC_DOC_ID}`);
+          } catch {
+            updateSyncState({ status: 'error' });
+          }
+          return;
+        }
         console.warn('Firestore realtime listener notice:', error.message);
       });
     }

@@ -411,10 +411,19 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   </div>
                 </div>
 
-                {/* 2. مربع بيانات المستند المعتمد بدون أي تداخل نصوص */}
+                {/* 2. مربع بيانات المستند المعتمد بدون أي تداخل أو انضغاط نصوص */}
                 <div className="invoice-info-box">
                   <div className="info-grid">
-                    <div className="info-col-right" style={{ flex: '1.4', overflow: 'hidden' }}>
+                    <div
+                      className="info-col-right"
+                      style={{
+                        flex: '1.25 1 38%',
+                        minWidth: '100px',
+                        overflow: 'visible',
+                        wordBreak: 'keep-all',
+                        overflowWrap: 'break-word'
+                      }}
+                    >
                       <div className="text-[10px] mb-0.5">
                         <strong>كود {isSale ? 'العميل' : 'المورد'}: </strong>
                         <bdi dir="ltr" className="font-mono font-bold mr-1">{invoice.partyCode || invoice.partyId || '—'}</bdi>
@@ -431,9 +440,19 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                       ) : null}
                     </div>
 
-                    <div className="info-col-center" style={{ flex: '1', overflow: 'hidden' }}>
-                      <div className="font-extrabold text-[12px] text-slate-900">{invoiceTypeTitle}</div>
-                      <div className="text-[10.5px] font-bold mt-0.5">
+                    <div
+                      className="info-col-center"
+                      style={{
+                        flex: '1 1 34%',
+                        minWidth: '90px',
+                        overflow: 'visible',
+                        whiteSpace: 'normal',
+                        wordBreak: 'keep-all',
+                        overflowWrap: 'break-word'
+                      }}
+                    >
+                      <div className="font-extrabold text-[11.5px] text-slate-900 leading-snug">{invoiceTypeTitle}</div>
+                      <div className="text-[10px] font-bold mt-0.5">
                         <span>رقم: </span>
                         <bdi dir="ltr" className="font-mono font-extrabold">{serialNo}</bdi>
                       </div>

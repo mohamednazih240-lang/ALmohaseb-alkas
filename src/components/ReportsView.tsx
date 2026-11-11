@@ -24,7 +24,8 @@ import {
   calculateCustomerBalance,
   calculateSupplierBalance,
   calculateTreasuryBalance,
-  getProductForBranch
+  getProductForBranch,
+  buildProductFifoLedger
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -69,6 +70,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
   const branchParam = selectedBranchId === 'all' ? undefined : selectedBranchId;
   const summary = useMemo(() => calculateFinancialSummary(db, branchParam), [db, branchParam]);
+  const fifoLedger = useMemo(() => buildProductFifoLedger(db, branchParam), [db, branchParam]);
 
   // Filtered sales and purchases (memoized)
   const filteredSales = useMemo(
@@ -96,7 +98,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
         title: `قائمة الدخل الشاملة - ${branchLabel}`,
         serialNo: `#INC-${today}`,
         date: today,
-        partyLabel: 'المنشأة والفرع:',
+        partyLabel: 'المنشأة والفرع',
         partyName: `${db.settings.company} - ${branchLabel}`,
         badge: summary.netProfit >= 0 ? 'صافي ربح' : 'صافي خسارة',
         tableHeaders: [
@@ -129,13 +131,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
         title: `تقرير المبيعات والتحصيلات - ${branchLabel}`,
         serialNo: `#SAL-${today}`,
         date: today,
-        partyLabel: 'إجمالي الفواتير:',
+        partyLabel: 'إجمالي الفواتير',
         partyName: `${filteredSales.length} فاتورة مسجلة (${branchLabel})`,
         badge: 'مبيعات',
         tableHeaders: [
-          { label: 'رقم الفاتورة', width: '18%', align: 'center' },
-          { label: 'التاريخ', width: '14%', align: 'center' },
-          { label: 'العميل', width: '26%', align: 'right' },
+          { label: 'رقم الفاتورة', width: '16%', align: 'center' },
+          { label: 'التاريخ', width: '17%', align: 'center' },
+          { label: 'العميل', width: '25%', align: 'right' },
           { label: 'الإجمالي', width: '14%', align: 'center' },
           { label: 'المحصل', width: '14%', align: 'center' },
           { label: 'المتبقي', width: '14%', align: 'center' }
@@ -169,13 +171,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
         title: `تقرير المشتريات والتوريدات - ${branchLabel}`,
         serialNo: `#PUR-${today}`,
         date: today,
-        partyLabel: 'إجمالي الفواتير:',
+        partyLabel: 'إجمالي الفواتير',
         partyName: `${filteredPurchases.length} فاتورة شراء (${branchLabel})`,
         badge: 'مشتريات',
         tableHeaders: [
-          { label: 'رقم الفاتورة', width: '18%', align: 'center' },
-          { label: 'التاريخ', width: '14%', align: 'center' },
-          { label: 'المورد', width: '26%', align: 'right' },
+          { label: 'رقم الفاتورة', width: '16%', align: 'center' },
+          { label: 'التاريخ', width: '17%', align: 'center' },
+          { label: 'المورد', width: '25%', align: 'right' },
           { label: 'الإجمالي', width: '14%', align: 'center' },
           { label: 'المدفوع', width: '14%', align: 'center' },
           { label: 'المستحق', width: '14%', align: 'center' }
@@ -203,41 +205,42 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
     if (activeReportTab === 'inventory') {
       const totalSell = branchProducts.reduce((s, p) => s + (p.currentQty * p.sellPrice), 0);
+      const fifoLedger = buildProductFifoLedger(db, branchParam);
 
       const doc: MovementPrintBlock = {
         title: `تقرير جرد وتقييم المخزون - ${branchLabel}`,
         serialNo: `#INV-VAL-${today}`,
         date: today,
-        partyLabel: 'عدد الأصناف:',
+        partyLabel: 'عدد الأصناف',
         partyName: `${branchProducts.length} صنف مسجل (${branchLabel})`,
         badge: 'تقييم مخزون',
         tableHeaders: [
           { label: 'الكود', width: '14%', align: 'center' },
           { label: 'اسم الصنف', width: '32%', align: 'right' },
           { label: 'الرصيد بالفرع', width: '14%', align: 'center' },
-          { label: 'التكلفة', width: '14%', align: 'center' },
-          { label: 'إجمالي التكلفة', width: '14%', align: 'center' },
+          { label: 'آخر تكلفة موثقة', width: '14%', align: 'center' },
+          { label: 'قيمة FIFO', width: '14%', align: 'center' },
           { label: 'قيمة البيع', width: '12%', align: 'center' }
         ],
         tableRows: branchProducts.map(p => {
-          const cost = p.avgCost || p.buyPrice;
+          const fifo = fifoLedger.getProductSummary(p.id, p.name);
           return {
             cols: [
               p.code,
               p.name,
               `${p.currentQty} ${p.unit}`,
-              formatMoney(cost, curr),
-              formatMoney(p.currentQty * cost, curr),
+              fifo.hasVerifiedPurchase ? formatMoney(fifo.latestBuyPrice, curr) : 'غير محدد',
+              formatMoney(fifo.batchValuation, curr),
               formatMoney(p.currentQty * p.sellPrice, curr)
             ]
           };
         }),
         summaryLines: [
-          { label: 'إجمالي قيمة المخزون بسعر التكلفة', value: formatMoney(summary.totalStockValue, curr) },
+          { label: 'إجمالي قيمة المخزون بدفعات FIFO', value: formatMoney(summary.totalStockValue, curr) },
           { label: 'إجمالي القيمة التقديرية بسعر البيع', value: formatMoney(totalSell, curr) },
           { label: 'الربح المتوقع للمخزون الحالي', value: formatMoney(totalSell - summary.totalStockValue, curr), isTotal: true, highlight: true }
         ],
-        footerNotes: `تقييم مخزون خاص بـ (${branchLabel}) طبقاً للأرصدة والأسعار المسجلة بهذا الفرع.`
+        footerNotes: `تقييم مخزون خاص بـ (${branchLabel}) طبقاً لدفعات الشراء الفعلية (FIFO).`
       };
       return { title: `تقرير مخزون - ${branchLabel}`, docs: [doc] };
     }
@@ -247,7 +250,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
         title: `تقرير ديون العملاء (ذمم مدينة) - ${branchLabel}`,
         serialNo: `#REC-${today}`,
         date: today,
-        partyLabel: 'عدد العملاء:',
+        partyLabel: 'عدد العملاء',
         partyName: `${db.customers.length} عميل`,
         badge: 'ديون عملاء',
         tableHeaders: [
@@ -284,7 +287,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
       title: `تقرير مستحقات الموردين (ذمم دائنة) - ${branchLabel}`,
       serialNo: `#PAY-${today}`,
       date: today,
-      partyLabel: 'عدد الموردين:',
+      partyLabel: 'عدد الموردين',
       partyName: `${db.suppliers.length} مورد`,
       badge: 'مستحقات موردين',
       tableHeaders: [
@@ -669,8 +672,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
           {/* Inventory Valuation Cards System */}
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
             {branchProducts.map(p => {
-              const cost = p.avgCost || p.buyPrice;
-              const totalCost = p.currentQty * cost;
+              const snap = fifoLedger.getProductSummary(p.id, p.name);
+              const cost = snap.hasVerifiedPurchase ? snap.latestBuyPrice : undefined;
+              const totalCost = snap.batchValuation;
               const totalSell = p.currentQty * p.sellPrice;
               const profit = totalSell - totalCost;
 
@@ -688,20 +692,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
                   <div className="grid grid-cols-2 gap-2 text-xs bg-slate-50 p-2 rounded-lg border border-slate-100 font-mono">
                     <div>
-                      <span className="text-[10px] text-slate-500 block font-sans">تكلفة الوحدة:</span>
-                      <span className="font-bold">{formatMoney(cost, db.settings.currency)}</span>
+                      <span className="text-[10px] text-slate-500 block font-sans">تكلفة آخر دفعة (FIFO):</span>
+                      <span className="font-bold">{cost !== undefined ? formatMoney(cost, db.settings.currency) : 'غير محدد'}</span>
                     </div>
                     <div>
                       <span className="text-[10px] text-slate-500 block font-sans">سعر البيع:</span>
                       <span className="font-bold">{formatMoney(p.sellPrice, db.settings.currency)}</span>
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-500 block font-sans">إجمالي التكلفة:</span>
+                      <span className="text-[10px] text-slate-500 block font-sans">قيمة المخزون (FIFO):</span>
                       <span className="font-bold text-slate-950">{formatMoney(totalCost, db.settings.currency)}</span>
                     </div>
                     <div>
                       <span className="text-[10px] text-slate-500 block font-sans">الربح المتوقع:</span>
-                      <span className="font-bold text-emerald-700">+{formatMoney(profit, db.settings.currency)}</span>
+                      <span className="font-bold text-emerald-700">
+                        {cost !== undefined ? `+${formatMoney(profit, db.settings.currency)}` : 'غير محدد'}
+                      </span>
                     </div>
                   </div>
                 </div>

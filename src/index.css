@@ -228,22 +228,25 @@
 }
 
 .info-col-right {
-  flex: 1.2;
+  flex: 1.25 1 38%;
   text-align: right;
-  min-width: 0;
+  min-width: 100px;
   line-height: 1.35;
-  word-break: break-word;
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
 .info-col-center {
-  flex: 0 0 auto;
+  flex: 1 1 34%;
   text-align: center;
-  min-width: max-content;
+  min-width: 90px;
   line-height: 1.35;
   border-right: 1px dashed #666666;
   border-left: 1px dashed #666666;
   padding: 0 6px;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: break-word;
 }
 
 .info-col-left {
@@ -305,7 +308,7 @@
 .invoice-container table th,
 .invoice-container table td {
   border: 1.5px solid #000000;
-  padding: 4px 4px;
+  padding: 4px 5px;
   text-align: center;
   vertical-align: middle;
   font-weight: 600;

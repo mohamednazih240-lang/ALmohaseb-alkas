@@ -19,6 +19,8 @@ import {
   createInvoiceJournal,
   createVoucherJournal,
   getNextUniqueVoucherNumber,
+  buildProductFifoLedger,
+  matchProductStrictly,
   RAHMA_INVOICE_17_ITEMS
 } from './accountingStorage';
 
@@ -140,6 +142,16 @@ export function postInvoiceTransaction(
     ? `فاتورة مشتريات رقم ${invoiceNumber}`
     : `فاتورة مبيعات رقم ${invoiceNumber}`;
 
+  // Guarantee strictly monotonic createdAt on same-date operations so FIFO preserves exact event order
+  if (!invoice.createdAt) {
+    const maxExistingMs = updated.invoices.reduce((mx, i) => {
+      const t = i.createdAt ? Date.parse(i.createdAt) : 0;
+      return Number.isFinite(t) && t > mx ? t : mx;
+    }, 0);
+    const nextMs = Math.max(Date.now(), maxExistingMs + 1);
+    invoice.createdAt = new Date(nextMs).toISOString();
+  }
+
   // 1. Remove previous linked items if updating an existing invoice to prevent stale orphaned records
   const previousInvIdx = (() => {
     const byId = updated.invoices.findIndex(i => i.id === invoiceId);
@@ -147,7 +159,6 @@ export function postInvoiceTransaction(
   })();
   if (previousInvIdx > -1) {
     const prev = updated.invoices[previousInvIdx];
-    // Revert previous stock movements from catalog balances
     (prev.items || []).forEach(oldItem => {
       const prod = updated.products.find(p => p.id === oldItem.productId || p.code === oldItem.productCode);
       if (prod) {
@@ -164,12 +175,10 @@ export function postInvoiceTransaction(
       }
     });
 
-    // Clean previous stock movements strictly for this invoice
     updated.stockMovements = updated.stockMovements.filter(
       sm => sm.sourceId !== invoiceId && !(!sm.sourceId && sm.refNumber === invoiceNumber && sm.type === expectedSmType)
     );
 
-    // Clean previous treasury entries strictly for this invoice
     updated.treasury = updated.treasury.filter(tr => {
       if (tr.sourceId === invoiceId || (tr as any).invoiceId === invoiceId) return false;
       if (tr.id.startsWith(`tr_purchase_${invoiceId}`) || tr.id.startsWith(`tr_sale_${invoiceId}`)) return false;
@@ -177,39 +186,49 @@ export function postInvoiceTransaction(
       return true;
     });
 
-    // Clean previous journals
     updated.journals = updated.journals.filter(j => j.sourceId !== invoiceId && j.id !== prev.journalEntryId);
-
-    // Replace invoice in place
     updated.invoices[previousInvIdx] = invoice;
   } else {
     updated.invoices.unshift(invoice);
   }
 
-  // 2. Process stock movements & update catalog
-  const wh = updated.warehouses.find(w => w.id === warehouseId) || updated.warehouses[0];
-  (invoice.items || []).forEach(item => {
-    let prod = updated.products.find(p =>
-      (item.productId && p.id === item.productId) ||
-      (item.productCode && p.code.toLowerCase() === item.productCode.toLowerCase()) ||
-      (item.productName && p.name.trim().toLowerCase() === item.productName.trim().toLowerCase())
-    );
+  // Pre-build FIFO ledger EXCLUDING this invoice so sales pull exact FIFO batch layers chronologically
+  const priorFifoLedger = isSale ? buildProductFifoLedger(updated, branchId, invoiceId) : null;
 
-    // Auto-register new item if absent
+  // 2. Validate & process stock movements + catalog updates
+  const wh = updated.warehouses.find(w => w.id === warehouseId) || updated.warehouses[0];
+  for (const item of invoice.items || []) {
+    const matchRes = matchProductStrictly(updated, {
+      id: item.productId,
+      code: item.productCode,
+      name: item.productName,
+      unit: item.unit
+    });
+    let prod = matchRes.exactMatch;
+
+    // Rule: Sales & Sale Returns MUST use existing catalog items — block phantom creation
+    if (!prod && (isSale || isSaleReturn || invoice.invoiceKind === 'quote')) {
+      return {
+        success: false,
+        db,
+        message: `⚠️ لا يمكن ترحيل فاتورة البيع: الصنف "${item.productName || item.productCode || 'غير معروف'}" غير مسجل في دليل الأصناف. يرجى اختياره من الكتالوج المعتمد.`
+      };
+    }
+
+    // Purchases: create new catalog item ONLY when strictly new (no auto-generated selling markups)
     if (!prod && item.productName && item.productName.trim()) {
-      const newCode = item.productCode || `PRD-${100 + updated.products.length + 1}`;
-      const unitBuy = isPurchase ? item.unitPrice : (item.costPrice || 0);
-      const unitSell = isSale ? item.unitPrice : 0;
+      const newCode = item.productCode || `P-${100 + updated.products.length + 1}`;
+      const unitBuy = isPurchase ? (Number(item.unitPrice) || 0) : 0;
       prod = {
-        id: (item.productId && item.productId.startsWith('prod_')) ? item.productId : `prod_${cleanIdPart(item.productName)}`,
+        id: (item.productId && item.productId.startsWith('prod_')) ? item.productId : `prod_${cleanIdPart(item.productName)}_${Date.now().toString(36)}`,
         name: item.productName.trim(),
         code: newCode,
         barcode: '',
         category: 'عامة',
         unit: item.unit || 'قطعة',
         buyPrice: unitBuy,
-        sellPrice: unitSell,
-        wholesalePrice: unitSell * 0.9,
+        sellPrice: 0,
+        wholesalePrice: 0,
         minStock: 5,
         currentQty: 0,
         avgCost: unitBuy,
@@ -217,8 +236,8 @@ export function postInvoiceTransaction(
           [branchId]: {
             currentQty: 0,
             buyPrice: unitBuy,
-            sellPrice: unitSell,
-            wholesalePrice: unitSell * 0.9,
+            sellPrice: 0,
+            wholesalePrice: 0,
             minStock: 5,
             avgCost: unitBuy
           }
@@ -227,34 +246,37 @@ export function postInvoiceTransaction(
       updated.products.push(prod);
       item.productId = prod.id;
       item.productCode = prod.code;
+    } else if (prod) {
+      item.productId = prod.id;
+      item.productCode = prod.code;
     }
 
     if (prod) {
       const bp = getProductForBranch(prod, branchId);
       let qtyChange = 0;
       let newQty = bp.currentQty;
-      let newAvgCost = bp.avgCost || bp.buyPrice || 0;
       let newBuyPrice = bp.buyPrice || 0;
 
       if (isSale) {
         qtyChange = -item.qty;
         newQty -= item.qty;
-        item.costPrice = (bp.avgCost && bp.avgCost > 0) ? bp.avgCost : (bp.buyPrice || prod.buyPrice || 0);
+        const sim = priorFifoLedger!.simulateSaleFifoCost(prod.id, prod.name, item.qty);
+        if (sim.hasVerifiedCost && sim.effectiveUnitCost !== undefined) {
+          item.costPrice = Number(sim.effectiveUnitCost.toFixed(4));
+          item.hasVerifiedCost = sim.hasFullVerifiedCost;
+          item.uncoveredQty = sim.uncoveredQty;
+        } else {
+          item.costPrice = 0;
+          item.hasVerifiedCost = false;
+          item.uncoveredQty = Math.abs(Number(item.qty) || 0);
+        }
       } else if (isPurchase) {
         qtyChange = item.qty;
-        const oldQty = bp.currentQty;
-        const oldCost = bp.avgCost || bp.buyPrice || 0;
-        const newQ = item.qty;
-        const newCost = item.unitPrice;
-        if (oldQty <= 0) {
-          newAvgCost = newCost;
-        } else {
-          const totalQ = oldQty + newQ;
-          newAvgCost = totalQ > 0 ? ((oldQty * oldCost) + (newQ * newCost)) / totalQ : newCost;
-        }
-        newBuyPrice = newCost;
+        newBuyPrice = Number(item.unitPrice) || 0;
         newQty += item.qty;
-        item.costPrice = newCost;
+        item.costPrice = newBuyPrice;
+        item.hasVerifiedCost = newBuyPrice > 0;
+        item.uncoveredQty = 0;
       } else if (isSaleReturn) {
         qtyChange = item.qty;
         newQty += item.qty;
@@ -265,10 +287,9 @@ export function postInvoiceTransaction(
 
       const updatedProd = updateProductBranchData(prod, branchId, {
         currentQty: newQty,
-        avgCost: newAvgCost,
         buyPrice: newBuyPrice
       });
-      const pIdx = updated.products.findIndex(p => p.id === prod.id);
+      const pIdx = updated.products.findIndex(p => p.id === prod!.id);
       if (pIdx > -1) updated.products[pIdx] = updatedProd;
 
       // Deterministic Stock Movement (normalized ID without warehouse suffix to prevent duplicates)
@@ -282,7 +303,7 @@ export function postInvoiceTransaction(
         warehouseName: wh ? wh.name : 'المخزن الرئيسي',
         qtyChange,
         balanceAfter: newQty,
-        unitCost: item.costPrice || item.unitPrice,
+        unitCost: isSale ? (item.hasVerifiedCost ? item.costPrice : 0) : (item.costPrice || item.unitPrice),
         type: (isSale ? 'sale' : isPurchase ? 'purchase' : isSaleReturn ? 'sale_return' : 'purchase_return') as any,
         refNumber: invoice.number,
         sourceId: invoiceId,
@@ -297,7 +318,7 @@ export function postInvoiceTransaction(
         updated.stockMovements.unshift(smPayload);
       }
     }
-  });
+  }
 
   // 3. Process Treasury Entries & Linked Vouchers (IDEMPOTENT & DETERMINISTIC)
   const finalPaid = Number(invoice.paid) || 0;
@@ -345,68 +366,80 @@ export function postInvoiceTransaction(
       }
     });
 
-    // 3.2 Single deterministic linked voucher
+    // 3.2 Single deterministic AUTO voucher (NEVER delete manual installment vouchers)
+    const isAutoV = (v: Voucher) => !v.isManualInstallment && (v.isAutoFromInvoice || v.id.startsWith('vch_'));
+    const manualInstallmentsPaid = updated.vouchers
+      .filter(v => v.invoiceId === invoiceId && !isAutoV(v))
+      .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+    const autoPaidPortion = Math.max(0, Number((finalPaid - manualInstallmentsPaid).toFixed(2)));
+
     const deterministicVoucherId = getDeterministicVoucherId(invoiceId, 0, voucherType);
-    let linkedVoucher = updated.vouchers.find(v =>
-      v.id === deterministicVoucherId ||
-      (v as any).invoiceId === invoiceId ||
-      ((v as any).referenceNumber === invoiceNumber && v.type === voucherType)
-    );
+    if (autoPaidPortion > 0) {
+      let linkedVoucher = updated.vouchers.find(v =>
+        isAutoV(v) && (
+          v.id === deterministicVoucherId ||
+          (v as any).invoiceId === invoiceId ||
+          ((v as any).referenceNumber === invoiceNumber && v.type === voucherType)
+        )
+      );
 
-    const voucherDesc = voucherType === 'receipt'
-      ? `سند قبض مقابل فاتورة مبيعات رقم ${invoiceNumber} (${invoice.partyName})`
-      : `سند صرف مقابل فاتورة مشتريات رقم ${invoiceNumber} (${invoice.partyName})`;
+      const voucherDesc = voucherType === 'receipt'
+        ? `سند قبض مقابل فاتورة مبيعات رقم ${invoiceNumber} (${invoice.partyName})`
+        : `سند صرف مقابل فاتورة مشتريات رقم ${invoiceNumber} (${invoice.partyName})`;
 
-    if (linkedVoucher) {
-      linkedVoucher.id = deterministicVoucherId;
-      linkedVoucher.type = voucherType;
-      linkedVoucher.amount = finalPaid;
-      linkedVoucher.date = invoice.date;
-      linkedVoucher.partyId = invoice.partyId;
-      linkedVoucher.partyName = invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
-      linkedVoucher.paymentMethod = invoice.paymentMethod || 'نقدي';
-      linkedVoucher.description = voucherDesc;
-      linkedVoucher.branchId = branchId;
-      linkedVoucher.branchName = invoice.branchName || 'الفرع الرئيسي';
-      linkedVoucher.invoiceId = invoiceId;
-      linkedVoucher.referenceNumber = invoiceNumber;
-      linkedVoucher.updatedAt = new Date().toISOString();
-      linkedVoucher.updatedBy = operatorName;
+      if (linkedVoucher) {
+        linkedVoucher.id = deterministicVoucherId;
+        linkedVoucher.type = voucherType;
+        linkedVoucher.amount = autoPaidPortion;
+        linkedVoucher.date = invoice.date;
+        linkedVoucher.partyId = invoice.partyId;
+        linkedVoucher.partyName = invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
+        linkedVoucher.paymentMethod = invoice.paymentMethod || 'نقدي';
+        linkedVoucher.description = voucherDesc;
+        linkedVoucher.branchId = branchId;
+        linkedVoucher.branchName = invoice.branchName || 'الفرع الرئيسي';
+        linkedVoucher.invoiceId = invoiceId;
+        linkedVoucher.referenceNumber = invoiceNumber;
+        linkedVoucher.isAutoFromInvoice = true;
+        linkedVoucher.updatedAt = new Date().toISOString();
+        linkedVoucher.updatedBy = operatorName;
+      } else {
+        const { number: vNum, nextSeq } = getNextUniqueVoucherNumber(updated, voucherType);
+        const settingKey = voucherType === 'receipt' ? 'nextReceipt' : 'nextPayment';
+        updated.settings[settingKey] = Math.max(updated.settings[settingKey] || 1, nextSeq + 1);
+
+        linkedVoucher = {
+          id: deterministicVoucherId,
+          number: vNum,
+          type: voucherType,
+          date: invoice.date,
+          partyId: invoice.partyId,
+          partyName: invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام'),
+          amount: autoPaidPortion,
+          paymentMethod: invoice.paymentMethod || 'نقدي',
+          description: voucherDesc,
+          referenceNumber: invoiceNumber,
+          invoiceId,
+          isAutoFromInvoice: true,
+          branchId,
+          branchName: invoice.branchName || 'الفرع الرئيسي',
+          createdAt: invoice.createdAt || new Date().toISOString(),
+          createdBy: invoice.createdBy || operatorName
+        };
+        updated.vouchers.unshift(linkedVoucher);
+      }
+
+      updated.vouchers = updated.vouchers.filter(v => {
+        if (v.id === deterministicVoucherId || !isAutoV(v)) return true;
+        const isDuplicate = (v as any).invoiceId === invoiceId ||
+                            ((v as any).referenceNumber === invoiceNumber && v.type === voucherType);
+        return !isDuplicate;
+      });
     } else {
-      const { number: vNum, nextSeq } = getNextUniqueVoucherNumber(updated, voucherType);
-      const settingKey = voucherType === 'receipt' ? 'nextReceipt' : 'nextPayment';
-      updated.settings[settingKey] = Math.max(updated.settings[settingKey] || 1, nextSeq + 1);
-
-      linkedVoucher = {
-        id: deterministicVoucherId,
-        number: vNum,
-        type: voucherType,
-        date: invoice.date,
-        partyId: invoice.partyId,
-        partyName: invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام'),
-        amount: finalPaid,
-        paymentMethod: invoice.paymentMethod || 'نقدي',
-        description: voucherDesc,
-        referenceNumber: invoiceNumber,
-        invoiceId,
-        branchId,
-        branchName: invoice.branchName || 'الفرع الرئيسي',
-        createdAt: invoice.createdAt || new Date().toISOString(),
-        createdBy: invoice.createdBy || operatorName
-      };
-      updated.vouchers.unshift(linkedVoucher);
+      updated.vouchers = updated.vouchers.filter(v => !isAutoV(v) || ((v as any).invoiceId !== invoiceId && (v as any).referenceNumber !== invoiceNumber));
     }
-
-    // Purge any secondary duplicate vouchers for this invoice
-    updated.vouchers = updated.vouchers.filter(v => {
-      if (v.id === deterministicVoucherId) return true;
-      const isDuplicate = (v as any).invoiceId === invoiceId ||
-                          ((v as any).referenceNumber === invoiceNumber && v.type === voucherType);
-      return !isDuplicate;
-    });
   } else {
-    // If invoice is completely credit (paid = 0), purge any old vouchers and treasury records
-    updated.vouchers = updated.vouchers.filter(v => (v as any).invoiceId !== invoiceId && (v as any).referenceNumber !== invoiceNumber);
+    updated.vouchers = updated.vouchers.filter(v => v.isManualInstallment || ((v as any).invoiceId !== invoiceId && (v as any).referenceNumber !== invoiceNumber));
     updated.treasury = updated.treasury.filter(tr => tr.sourceId !== invoiceId && !tr.id.startsWith(`tr_${isPurchase ? 'purchase' : 'sale'}_${invoiceId}`));
   }
 
@@ -467,42 +500,76 @@ export function postManualVoucherTransaction(
   const trDirection: 'in' | 'out' = isReceipt ? 'in' : 'out';
   const branchId = voucher.branchId || 'br_mawan';
 
-  // 1. If voucher was previously saved, update it and its linked records
   const existingVIdx = updated.vouchers.findIndex(v => v.id === voucherId);
-  if (existingVIdx > -1) {
-    updated.vouchers[existingVIdx] = voucher;
-  } else {
-    updated.vouchers.unshift(voucher);
+  const prevVoucher = existingVIdx > -1 ? { ...updated.vouchers[existingVIdx] } : null;
+
+  const voucherToSave: Voucher = {
+    ...voucher,
+    isManualInstallment: voucher.isAutoFromInvoice ? false : true,
+    updatedAt: new Date().toISOString(),
+    updatedBy: voucher.updatedBy || operatorName
+  };
+
+  // Validate overpayment against target linked invoice before mutating balances
+  if (voucherToSave.invoiceId || (voucherToSave as any).referenceNumber) {
+    const expectedInvType = voucherToSave.type === 'receipt' ? 'sale' : 'purchase';
+    const targetInv =
+      (voucherToSave.invoiceId ? updated.invoices.find(i => i.id === voucherToSave.invoiceId) : undefined) ||
+      ((voucherToSave as any).referenceNumber
+        ? updated.invoices.find(i => i.number === (voucherToSave as any).referenceNumber && i.type === expectedInvType)
+        : undefined);
+    if (targetInv) {
+      voucherToSave.invoiceId = targetInv.id;
+      voucherToSave.referenceNumber = targetInv.number;
+      const otherPaid = updated.vouchers
+        .filter(v =>
+          v.id !== voucherId &&
+          (v.invoiceId === targetInv.id || ((v as any).referenceNumber === targetInv.number && v.type === (targetInv.type === 'sale' ? 'receipt' : 'payment')))
+        )
+        .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+      const maxAllowable = Math.max(0, Number((targetInv.total - otherPaid).toFixed(2)));
+      if (voucherToSave.amount > maxAllowable + 0.01) {
+        return {
+          success: false,
+          db,
+          message: `⚠️ مبلغ السند (${voucherToSave.amount}) يتجاوز المتبقي المستحق على الفاتورة #${targetInv.number} (${maxAllowable}).`
+        };
+      }
+    }
   }
 
-  // 2. Deterministic treasury entry linked directly to voucher
+  // 1. Insert or replace voucher
+  if (existingVIdx > -1) {
+    updated.vouchers[existingVIdx] = voucherToSave;
+  } else {
+    updated.vouchers.unshift(voucherToSave);
+  }
+
+  // 2. Clean any old treasury entries (including direction changes) & insert fresh deterministic treasury entry
+  updated.treasury = updated.treasury.filter(
+    t => t.sourceId !== voucherId && !t.id.startsWith(`tr_voucher_${cleanIdPart(voucherId)}_`)
+  );
   const deterministicTrId = `tr_voucher_${cleanIdPart(voucherId)}_${trDirection}`;
   const trEntry: TreasuryEntry = {
     id: deterministicTrId,
-    date: voucher.date,
+    date: voucherToSave.date,
     direction: trDirection,
-    amount: voucher.amount,
-    method: voucher.paymentMethod,
-    description: `${isReceipt ? 'سند قبض' : 'سند صرف'} ${voucher.number} - ${voucher.partyName}: ${voucher.description || ''}`,
-    sourceType: voucher.type,
+    amount: voucherToSave.amount,
+    method: voucherToSave.paymentMethod,
+    description: `${isReceipt ? 'سند قبض' : 'سند صرف'} ${voucherToSave.number} - ${voucherToSave.partyName}: ${voucherToSave.description || ''}`,
+    sourceType: voucherToSave.type,
     sourceId: voucherId,
     branchId,
-    branchName: voucher.branchName || 'الفرع الرئيسي'
+    branchName: voucherToSave.branchName || 'الفرع الرئيسي'
   };
-
-  const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId || t.sourceId === voucherId);
-  if (existingTrIdx > -1) {
-    updated.treasury[existingTrIdx] = trEntry;
-  } else {
-    updated.treasury.unshift(trEntry);
-  }
+  updated.treasury.unshift(trEntry);
 
   // 3. Balanced journal entry
   const deterministicJournalId = `jrn_voucher_${cleanIdPart(voucherId)}`;
-  const journal = createVoucherJournal(updated, voucher);
+  const journal = createVoucherJournal(updated, voucherToSave);
   journal.id = deterministicJournalId;
   journal.sourceId = voucherId;
-  voucher.journalEntryId = deterministicJournalId;
+  voucherToSave.journalEntryId = deterministicJournalId;
 
   const existingJIdx = updated.journals.findIndex(j => j.id === deterministicJournalId || j.sourceId === voucherId);
   if (existingJIdx > -1) {
@@ -511,48 +578,56 @@ export function postManualVoucherTransaction(
     updated.journals.unshift(journal);
   }
 
-  // 4. If linked to an invoice, safely update invoice paid and remaining
-  if (voucher.invoiceId || (voucher as any).referenceNumber) {
-    const expectedInvType = voucher.type === 'receipt' ? 'sale' : 'purchase';
-    const linkedInv =
-      (voucher.invoiceId ? updated.invoices.find(i => i.id === voucher.invoiceId) : undefined) ||
-      ((voucher as any).referenceNumber
-        ? updated.invoices.find(i => i.number === (voucher as any).referenceNumber && i.type === expectedInvType)
-        : undefined);
-    if (linkedInv) {
-      // Sum all active vouchers for this invoice
-      const allVouchersForInv = updated.vouchers.filter(v =>
-        (v as any).invoiceId === linkedInv.id ||
-        ((v as any).referenceNumber === linkedInv.number && v.type === (linkedInv.type === 'sale' ? 'receipt' : 'payment'))
-      );
-      const totalPaidOnVouchers = allVouchersForInv.reduce((s, v) => s + v.amount, 0);
-      linkedInv.paid = totalPaidOnVouchers;
-      linkedInv.remaining = Math.max(0, linkedInv.total - totalPaidOnVouchers);
-      linkedInv.status = linkedInv.paid <= 0 ? 'آجل' : linkedInv.remaining <= 0 ? 'مدفوع' : 'جزئي';
-    }
-  }
+  // Helper to recompute an invoice's paid/remaining/status cleanly from all active vouchers
+  const recomputeInvoicePayments = (invId?: string, refNum?: string, vType?: 'receipt' | 'payment') => {
+    if (!invId && !refNum) return;
+    const expectedInvType = vType === 'receipt' ? 'sale' : 'purchase';
+    const inv =
+      (invId ? updated.invoices.find(i => i.id === invId) : undefined) ||
+      (refNum ? updated.invoices.find(i => i.number === refNum && i.type === expectedInvType) : undefined);
+    if (!inv) return;
+    const allVouchersForInv = updated.vouchers.filter(v =>
+      (v as any).invoiceId === inv.id ||
+      ((v as any).referenceNumber === inv.number && v.type === (inv.type === 'sale' ? 'receipt' : 'payment'))
+    );
+    const totalPaidOnVouchers = Number(allVouchersForInv.reduce((s, v) => s + (Number(v.amount) || 0), 0).toFixed(2));
+    inv.paid = totalPaidOnVouchers;
+    inv.remaining = Math.max(0, Number((inv.total - totalPaidOnVouchers).toFixed(2)));
+    inv.status = inv.paid <= 0 ? 'آجل' : inv.remaining <= 0 ? 'مدفوع' : 'جزئي';
+  };
 
-  // 5. Update party balance
-  if (voucher.partyId) {
-    if (isReceipt) {
-      const cust = updated.customers.find(c => c.id === voucher.partyId);
+  // 4. Recalculate previous linked invoice (if edited/unlinked) AND current linked invoice
+  if (prevVoucher && (prevVoucher.invoiceId !== voucherToSave.invoiceId || prevVoucher.type !== voucherToSave.type)) {
+    recomputeInvoicePayments(prevVoucher.invoiceId, (prevVoucher as any).referenceNumber, prevVoucher.type);
+  }
+  recomputeInvoicePayments(voucherToSave.invoiceId, (voucherToSave as any).referenceNumber, voucherToSave.type);
+
+  // 5. Recalculate old party (if party changed) AND current party balance
+  const recomputePartyBalance = (pId?: string, receiptFlag?: boolean) => {
+    if (!pId) return;
+    if (receiptFlag) {
+      const cust = updated.customers.find(c => c.id === pId);
       if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
     } else {
-      const supp = updated.suppliers.find(s => s.id === voucher.partyId);
+      const supp = updated.suppliers.find(s => s.id === pId);
       if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
     }
+  };
+  if (prevVoucher && (prevVoucher.partyId !== voucherToSave.partyId || prevVoucher.type !== voucherToSave.type)) {
+    recomputePartyBalance(prevVoucher.partyId, prevVoucher.type === 'receipt');
   }
+  recomputePartyBalance(voucherToSave.partyId, isReceipt);
 
   logAudit(
     updated,
-    isReceipt ? 'تسجيل سند قبض' : 'تسجيل سند صرف',
-    `سند رقم ${voucher.number} بمبلغ ${formatMoney(voucher.amount, updated.settings.currency)} للطرف ${voucher.partyName}`
+    existingVIdx > -1 ? (isReceipt ? 'تعديل سند قبض' : 'تعديل سند صرف') : (isReceipt ? 'تسجيل سند قبض' : 'تسجيل سند صرف'),
+    `سند رقم ${voucherToSave.number} بمبلغ ${formatMoney(voucherToSave.amount, updated.settings.currency)} للطرف ${voucherToSave.partyName} بواسطة [${operatorName}]`
   );
 
   return {
     success: true,
     db: updated,
-    message: `تم حفظ ${isReceipt ? 'سند القبض' : 'سند الصرف'} رقم ${voucher.number} وترحيل أثره المالي بنجاح!`,
+    message: `تم حفظ ${isReceipt ? 'سند القبض' : 'سند الصرف'} رقم ${voucherToSave.number} وترحيل أثره المالي بنجاح!`,
     transactionId: voucherId
   };
 }
@@ -725,7 +800,7 @@ export function cancelOrDeleteVoucherTransaction(
   // 3. Remove voucher
   updated.vouchers = updated.vouchers.filter(v => v.id !== targetVoucher.id);
 
-  // 4. If linked to an invoice, revert invoice paid and remaining
+  // 4. If linked to an invoice, re-sum remaining vouchers for this invoice accurately
   if (targetVoucher.invoiceId || (targetVoucher as any).referenceNumber) {
     const expectedInvType = isReceipt ? 'sale' : 'purchase';
     const linkedInv =
@@ -734,8 +809,15 @@ export function cancelOrDeleteVoucherTransaction(
         ? updated.invoices.find(i => i.number === (targetVoucher as any).referenceNumber && i.type === expectedInvType)
         : undefined);
     if (linkedInv) {
-      linkedInv.paid = Math.max(0, (linkedInv.paid || 0) - targetVoucher.amount);
-      linkedInv.remaining = Math.max(0, (linkedInv.total || 0) - linkedInv.paid);
+      const expectedVoucherType = isReceipt ? 'receipt' : 'payment';
+      const remainingVouchersPaid = updated.vouchers
+        .filter(v =>
+          v.invoiceId === linkedInv.id ||
+          ((v as any).referenceNumber === linkedInv.number && v.type === expectedVoucherType)
+        )
+        .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+      linkedInv.paid = Number(remainingVouchersPaid.toFixed(2));
+      linkedInv.remaining = Math.max(0, Number((linkedInv.total - linkedInv.paid).toFixed(2)));
       linkedInv.status = linkedInv.paid <= 0 ? 'آجل' : linkedInv.remaining <= 0 ? 'مدفوع' : 'جزئي';
     }
   }
@@ -801,44 +883,48 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
     const expectedVoucherType: 'receipt' | 'payment' = (isSale || inv.invoiceKind === 'purchase_return') ? 'receipt' : 'payment';
     const expectedTrDirection: 'in' | 'out' = (isPurchase || inv.invoiceKind === 'sale_return') ? 'out' : 'in';
 
-    // 1.1 Find all vouchers linked to this invoice
-    const linkedVouchers = updated.vouchers.filter(v =>
-      v.invoiceId === inv.id ||
-      (v as any).sourceId === inv.id ||
-      ((v as any).referenceNumber === inv.number && v.type === expectedVoucherType) ||
-      (v.description && v.description.includes(`رقم ${inv.number}`) && v.type === expectedVoucherType)
+    // 1.1 Find all AUTO vouchers linked to this invoice (NEVER delete manual installment vouchers!)
+    const isAutoV = (v: Voucher) => !v.isManualInstallment && (v.isAutoFromInvoice || v.id.startsWith('vch_'));
+    const autoLinkedVouchers = updated.vouchers.filter(v =>
+      isAutoV(v) && (
+        v.invoiceId === inv.id ||
+        (v as any).sourceId === inv.id ||
+        ((v as any).referenceNumber === inv.number && v.type === expectedVoucherType) ||
+        (v.description && v.description.includes(`رقم ${inv.number}`) && v.type === expectedVoucherType)
+      )
     );
+    const manualInstallmentsPaid = updated.vouchers
+      .filter(v => v.invoiceId === inv.id && !isAutoV(v))
+      .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+    const autoExpectedPaid = Math.max(0, Number((paid - manualInstallmentsPaid).toFixed(2)));
 
-    if (paid <= 0) {
-      // If invoice is 100% credit, remove any lingering vouchers
-      if (linkedVouchers.length > 0) {
-        duplicateVouchersRemoved += linkedVouchers.length;
-        const removeIds = new Set(linkedVouchers.map(v => v.id));
+    if (autoExpectedPaid <= 0) {
+      if (autoLinkedVouchers.length > 0) {
+        duplicateVouchersRemoved += autoLinkedVouchers.length;
+        const removeIds = new Set(autoLinkedVouchers.map(v => v.id));
         updated.vouchers = updated.vouchers.filter(v => !removeIds.has(v.id));
       }
     } else {
-      // Invoice has a paid amount.
-      // If there are multiple vouchers for this invoice:
-      if (linkedVouchers.length > 1) {
-        // Keep ONLY the authoritative voucher matching the paid amount, or pick the first and remove duplicates
-        const primary = linkedVouchers[0];
-        primary.amount = paid;
+      if (autoLinkedVouchers.length > 1) {
+        const primary = autoLinkedVouchers[0];
+        primary.amount = autoExpectedPaid;
         primary.id = getDeterministicVoucherId(inv.id, 0, expectedVoucherType);
         primary.invoiceId = inv.id;
         primary.referenceNumber = inv.number;
+        primary.isAutoFromInvoice = true;
 
-        const duplicates = linkedVouchers.slice(1);
+        const duplicates = autoLinkedVouchers.slice(1);
         const dupIds = new Set(duplicates.map(d => d.id));
         updated.vouchers = updated.vouchers.filter(v => !dupIds.has(v.id));
         duplicateVouchersRemoved += duplicates.length;
         fixedInvoicesCount++;
-      } else if (linkedVouchers.length === 1) {
-        // Normalize single voucher to deterministic ID and exact paid amount
-        const v = linkedVouchers[0];
+      } else if (autoLinkedVouchers.length === 1) {
+        const v = autoLinkedVouchers[0];
         v.id = getDeterministicVoucherId(inv.id, 0, expectedVoucherType);
         v.invoiceId = inv.id;
         v.referenceNumber = inv.number;
-        v.amount = paid;
+        v.isAutoFromInvoice = true;
+        v.amount = autoExpectedPaid;
       }
     }
 
@@ -856,17 +942,17 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
       ))
     );
 
-    if (paid <= 0) {
+    if (autoExpectedPaid <= 0) {
       if (linkedTreasury.length > 0) {
         duplicateTreasuryRemoved += linkedTreasury.length;
         const removeIds = new Set(linkedTreasury.map(t => t.id));
         updated.treasury = updated.treasury.filter(t => !removeIds.has(t.id));
       }
     } else {
-      // Should have exactly ONE treasury entry per payment installment
+      // Should have exactly ONE treasury entry for the direct invoice payment portion
       if (linkedTreasury.length > 1) {
         const primaryTr = linkedTreasury[0];
-        primaryTr.amount = paid;
+        primaryTr.amount = autoExpectedPaid;
         primaryTr.direction = expectedTrDirection;
         primaryTr.id = getDeterministicTreasuryId(isPurchase ? 'purchase' : 'sale', inv.id, 0, expectedTrDirection);
         primaryTr.sourceId = inv.id;
@@ -878,7 +964,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
         fixedInvoicesCount++;
       } else if (linkedTreasury.length === 1) {
         const t = linkedTreasury[0];
-        t.amount = paid;
+        t.amount = autoExpectedPaid;
         t.direction = expectedTrDirection;
         t.id = getDeterministicTreasuryId(isPurchase ? 'purchase' : 'sale', inv.id, 0, expectedTrDirection);
         t.sourceId = inv.id;
@@ -904,13 +990,14 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   });
   updated.treasury = cleanTreasury;
 
-  // 3. Global deduplication of vouchers:
+  // 3. Global deduplication of vouchers (preserve distinct manual installment vouchers on same invoice):
   const seenVoucherKeys = new Set<string>();
   const cleanVouchers: Voucher[] = [];
   (updated.vouchers || []).forEach(v => {
     let key = v.id;
-    if (v.invoiceId) {
-      key = `vch_inv_${v.invoiceId}_${v.type}`;
+    const isAuto = !v.isManualInstallment && (v.isAutoFromInvoice || v.id.startsWith('vch_'));
+    if (v.invoiceId && isAuto) {
+      key = `vch_auto_inv_${v.invoiceId}_${v.type}`;
     }
     if (!seenVoucherKeys.has(key)) {
       seenVoucherKeys.add(key);

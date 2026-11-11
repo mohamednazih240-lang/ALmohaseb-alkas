@@ -90,7 +90,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
           unit: p.unit,
           qty: 1,
           unitPrice: p.sellPrice,
-          costPrice: p.avgCost || p.buyPrice,
+          costPrice: p.buyPrice || 0,
           discount: 0,
           taxRate: 0,
           total: p.sellPrice

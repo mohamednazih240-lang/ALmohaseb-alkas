@@ -51,6 +51,7 @@ import { SystemViews } from './components/SystemViews';
 import { InvoicePrintModal } from './components/InvoicePrintModal';
 import { QuickSearchModal } from './components/QuickSearchModal';
 import { ProductModal } from './components/ProductModal';
+import { SellingPricesView } from './components/SellingPricesView';
 import { DailyClosingView } from './components/DailyClosingView';
 import { ProfitsView } from './components/ProfitsView';
 import { YearEndClosingView } from './components/YearEndClosingView';
@@ -75,6 +76,7 @@ import {
   getCloudLatestTimestamp,
   subscribeToSyncStatus,
   normalizeCompanyCode,
+  testFirestoreConnection,
   CloudSyncState
 } from './services/cloudSyncService';
 
@@ -174,6 +176,8 @@ export default function App() {
 
   // Hydrate database from IndexedDB on startup (handles large databases up to gigabytes)
   useEffect(() => {
+    void testFirestoreConnection();
+
     // 1. Hydrate from IndexedDB on startup
     loadFromIndexedDB().then(idbData => {
       if (idbData && idbData.settings) {
@@ -492,7 +496,7 @@ export default function App() {
   const validPages: PageId[] = [
     'dashboard', 'sales', 'purchases', 'procurement', 'quotes', 'orders', 'returns',
     'customers', 'suppliers', 'receipts', 'payments', 'products', 'barcodes',
-    'warehouses', 'stock', 'inventory', 'prices', 'treasury',
+    'warehouses', 'stock', 'inventory', 'prices', 'selling_prices', 'treasury',
     'bank_reconciliation', 'cost_centers', 'currencies', 'fixed_assets',
     'expenses', 'revenues', 'accounts', 'journals', 'ledger',
     'daily_closing', 'profits',
@@ -613,6 +617,7 @@ export default function App() {
       case 'receipts': return 'سندات القبض المالية';
       case 'payments': return 'سندات الصرف للموردين';
       case 'products': return 'دليل الأصناف والمستودعات';
+      case 'selling_prices': return 'إدارة أسعار البيع';
       case 'barcodes': return 'استوديو طباعة باركود الأصناف والملصقات';
       case 'warehouses': return 'المخازن والتحويلات الداخلية';
       case 'stock': return 'كارت حركة المخزون الشامل';
@@ -965,6 +970,15 @@ export default function App() {
               db={db}
               onUpdateDb={handleUpdateDb}
               activeBranchId={activeBranchId}
+            />
+          )}
+
+          {currentPage === 'selling_prices' && (
+            <SellingPricesView
+              db={db}
+              onUpdateDb={handleUpdateDb}
+              activeBranchId={activeBranchId}
+              onSelectBranch={handleRequestBranchSwitch}
             />
           )}
 

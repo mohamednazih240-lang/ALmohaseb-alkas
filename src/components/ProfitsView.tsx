@@ -24,10 +24,8 @@ import {
 import {
   formatMoney,
   getTodayDate,
-  getProductForBranch,
   deleteInvoiceAndRevert,
-  getLatestVerifiedPurchaseInfo,
-  buildPurchaseCostMap
+  buildProductFifoLedger
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
@@ -105,63 +103,88 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     return true;
   };
 
-  // 1. INVOICE PROFITS CALCULATION (O(N) Indexed Purchase Cost Lookup)
-  const costIndex = useMemo(() => buildPurchaseCostMap(db), [db.invoices, db.products]);
+  // 1. INVOICE PROFITS CALCULATION (Strict FIFO Batch Costing - Zero Average Cost)
+  const fifoLedger = useMemo(
+    () => buildProductFifoLedger(db, selectedBranchId === 'all' ? undefined : selectedBranchId),
+    [db, selectedBranchId]
+  );
 
   const invoiceProfitsData = useMemo(() => {
-    const sales = db.invoices.filter(i => (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') && isDateMatch(i.date) && isTargetBranch(i.branchId));
+    const sales = db.invoices.filter(
+      i =>
+        (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+        isDateMatch(i.date) &&
+        isTargetBranch(i.branchId)
+    );
 
-    return sales.map(inv => {
-      let invoiceCost = 0;
-      let hasUndefinedCost = false;
+    return sales
+      .map(inv => {
+        let invoiceCost = 0;
+        let verifiedRevenue = 0;
+        let hasAnyVerifiedCost = false;
+        let hasUndefinedCost = false;
 
-      inv.items.forEach(it => {
-        const costInfo = costIndex.getCost(it.productId, it.productName);
-        if (costInfo.hasPurchases) {
-          const unitCost = (db.settings.cost === 'average')
-            ? (costInfo.avgCost || costInfo.latestBuyPrice)
-            : (costInfo.latestBuyPrice || costInfo.avgCost);
-          invoiceCost += it.qty * unitCost;
-        } else if (it.costPrice && it.costPrice > 0) {
-          invoiceCost += it.qty * it.costPrice;
-        } else {
-          hasUndefinedCost = true;
-        }
+        inv.items.forEach((it, idx) => {
+          const alloc = fifoLedger.getSaleAllocation(inv.id, it.productId, it.productName, idx);
+          const q = Number(it.qty) || 0;
+          const lineTotal = Number(it.total) || q * (Number(it.unitPrice) || 0);
+          if (alloc && alloc.hasVerifiedCost) {
+            hasAnyVerifiedCost = true;
+            invoiceCost += alloc.verifiedCostTotal;
+            const coveredRatio = q > 0 ? Math.min(1, alloc.coveredQty / q) : 0;
+            verifiedRevenue += lineTotal * coveredRatio;
+            if (!alloc.hasFullVerifiedCost) {
+              hasUndefinedCost = true;
+            }
+          } else {
+            hasUndefinedCost = true;
+          }
+        });
+
+        const revenue = Number(inv.total) || 0;
+        const subtotal = Number(inv.subtotal) || inv.items.reduce((s, it) => s + (Number(it.total) || 0), 0);
+        const invoiceAdjustment = (Number(inv.extraIncomeVal) || 0) + (Number(inv.tax) || 0) - (Number(inv.discount) || 0);
+        const cost = Number(invoiceCost.toFixed(2));
+        // If NO items have verified purchase batches, profit is explicitly undefined ('غير محدد')
+        const effectiveVerifiedRev = hasUndefinedCost
+          ? Number((verifiedRevenue + (hasAnyVerifiedCost ? invoiceAdjustment : 0)).toFixed(2))
+          : revenue;
+        const profit = hasAnyVerifiedCost ? Number((effectiveVerifiedRev - cost).toFixed(2)) : 0;
+        const margin = hasAnyVerifiedCost && effectiveVerifiedRev > 0 ? (profit / effectiveVerifiedRev) * 100 : 0;
+
+        return {
+          invoice: inv,
+          id: inv.id,
+          number: inv.number,
+          date: inv.date,
+          time: inv.time || '12:00',
+          customer: inv.partyName || 'عميل نقدي',
+          paymentMethod: inv.paymentMethod,
+          itemsCount: inv.items.length,
+          revenue,
+          cost,
+          profit,
+          margin,
+          hasAnyVerifiedCost,
+          hasUndefinedCost
+        };
+      })
+      .filter(row => {
+        if (!searchQuery) return true;
+        const q = searchQuery.toLowerCase();
+        return (
+          row.number.toLowerCase().includes(q) ||
+          row.customer.toLowerCase().includes(q) ||
+          row.paymentMethod.toLowerCase().includes(q)
+        );
       });
+  }, [db, fifoLedger, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
 
-      const revenue = inv.total;
-      const profit = revenue - invoiceCost;
-      const margin = revenue > 0 ? (profit / revenue) * 100 : 0;
-
-      return {
-        invoice: inv,
-        id: inv.id,
-        number: inv.number,
-        date: inv.date,
-        time: inv.time || '12:00',
-        customer: inv.partyName || 'عميل نقدي',
-        paymentMethod: inv.paymentMethod,
-        itemsCount: inv.items.length,
-        revenue,
-        cost: invoiceCost,
-        profit,
-        margin,
-        hasUndefinedCost
-      };
-    }).filter(row => {
-      if (!searchQuery) return true;
-      const q = searchQuery.toLowerCase();
-      return (
-        row.number.toLowerCase().includes(q) ||
-        row.customer.toLowerCase().includes(q) ||
-        row.paymentMethod.toLowerCase().includes(q)
-      );
-    });
-  }, [db, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
-
-  // Grand Total of Gross Invoice Profits
+  // Grand Total of Gross Invoice Profits (strictly sums verified profits displayed in table)
   const grandTotalInvoiceProfits = useMemo(() => {
-    return invoiceProfitsData.reduce((sum, row) => sum + row.profit, 0);
+    return Number(
+      invoiceProfitsData.reduce((sum, row) => sum + (row.hasAnyVerifiedCost ? row.profit : 0), 0).toFixed(2)
+    );
   }, [invoiceProfitsData]);
 
   // Operating Expenses for date and branch filter
@@ -173,41 +196,57 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
   // Net Business Profit = Gross Merchandise Profit - Operating Expenses
   const netBusinessProfit = useMemo(() => {
-    return grandTotalInvoiceProfits - operatingExpenses;
+    return Number((grandTotalInvoiceProfits - operatingExpenses).toFixed(2));
   }, [grandTotalInvoiceProfits, operatingExpenses]);
 
-  // 2. PRODUCT PROFITS CALCULATION (Strict Rule 4: Verified Purchase Info)
+  // 2. PRODUCT PROFITS CALCULATION (Strict FIFO Batch Allocations - Never Weighted Average)
   const itemProfitsData = useMemo(() => {
-    const sales = db.invoices.filter(i => (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') && isDateMatch(i.date) && isTargetBranch(i.branchId));
+    const sales = db.invoices.filter(
+      i =>
+        (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+        isDateMatch(i.date) &&
+        isTargetBranch(i.branchId)
+    );
 
-    // Map: productId -> aggregated data
-    const map = new Map<string, {
-      product: Product | undefined;
-      productId: string;
-      code: string;
-      name: string;
-      category: string;
-      unit: string;
-      qtySold: number;
-      totalRevenue: number;
-      totalCost: number;
-      hasVerifiedCost: boolean;
-      verifiedCostPrice: number;
-    }>();
+    const map = new Map<
+      string,
+      {
+        product: Product | undefined;
+        productId: string;
+        code: string;
+        name: string;
+        category: string;
+        unit: string;
+        qtySold: number;
+        coveredQty: number;
+        uncoveredQty: number;
+        totalRevenue: number;
+        verifiedRevenue: number;
+        totalCost: number;
+        hasVerifiedCost: boolean;
+        hasPartialUncovered: boolean;
+      }
+    >();
 
     sales.forEach(inv => {
-      inv.items.forEach(it => {
+      inv.items.forEach((it, idx) => {
         const normName = it.productName ? it.productName.trim().toLowerCase() : '';
-        const prod = db.products.find(p => p.id === it.productId || (it.productCode && p.code === it.productCode) || (normName && p.name.trim().toLowerCase() === normName));
+        const prod = db.products.find(
+          p =>
+            p.id === it.productId ||
+            (it.productCode && p.code === it.productCode) ||
+            (normName && p.name.trim().toLowerCase() === normName)
+        );
         const groupKey = prod?.id || it.productId || normName || it.productName;
-        const costInfo = costIndex.getCost(prod?.id || it.productId, it.productName);
-        const hasVerified = costInfo.hasPurchases;
-        const verifiedCost = hasVerified
-          ? ((db.settings.cost === 'average') ? (costInfo.avgCost || costInfo.latestBuyPrice) : (costInfo.latestBuyPrice || costInfo.avgCost))
-          : (it.costPrice && it.costPrice > 0 ? it.costPrice : 0);
+        const alloc = fifoLedger.getSaleAllocation(inv.id, prod?.id || it.productId, it.productName, idx);
+
         const itemQty = Number(it.qty) || 0;
-        const itemRev = Number(it.total) || (itemQty * (Number(it.unitPrice) || 0));
-        const itemCost = itemQty * verifiedCost;
+        const itemRev = Number(it.total) || itemQty * (Number(it.unitPrice) || 0);
+        const coveredQty = alloc ? alloc.coveredQty : 0;
+        const uncoveredQty = alloc ? alloc.uncoveredQty : itemQty;
+        const verifiedCostTotal = alloc && alloc.hasVerifiedCost ? alloc.verifiedCostTotal : 0;
+        const coveredRatio = itemQty > 0 ? Math.min(1, coveredQty / itemQty) : 0;
+        const verifiedItemRev = itemRev * coveredRatio;
 
         if (!map.has(groupKey)) {
           map.set(groupKey, {
@@ -218,38 +257,53 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             category: prod?.category || 'عام',
             unit: it.unit || prod?.unit || 'قطعة',
             qtySold: 0,
+            coveredQty: 0,
+            uncoveredQty: 0,
             totalRevenue: 0,
+            verifiedRevenue: 0,
             totalCost: 0,
-            hasVerifiedCost: hasVerified || (Boolean(it.costPrice) && it.costPrice > 0),
-            verifiedCostPrice: verifiedCost
+            hasVerifiedCost: false,
+            hasPartialUncovered: false
           });
         }
 
         const entry = map.get(groupKey)!;
         entry.qtySold += itemQty;
+        entry.coveredQty += coveredQty;
+        entry.uncoveredQty += uncoveredQty;
         entry.totalRevenue += itemRev;
-        entry.totalCost += itemCost;
-        if (hasVerified) {
+        entry.verifiedRevenue += verifiedItemRev;
+        entry.totalCost += verifiedCostTotal;
+        if (coveredQty > 0.00001) {
           entry.hasVerifiedCost = true;
-          entry.verifiedCostPrice = verifiedCost;
+        }
+        if (uncoveredQty > 0.00001) {
+          entry.hasPartialUncovered = true;
         }
       });
     });
 
     const list = Array.from(map.values()).map(item => {
-      const actualSellPrice = item.qtySold > 0
-        ? Number((item.totalRevenue / item.qtySold).toFixed(2))
-        : (item.product?.sellPrice && item.product.sellPrice > 0 ? item.product.sellPrice : 0);
+      const actualSellPrice =
+        item.qtySold > 0
+          ? Number((item.totalRevenue / item.qtySold).toFixed(2))
+          : item.product?.sellPrice && item.product.sellPrice > 0
+          ? item.product.sellPrice
+          : 0;
+      const fifoUnitCost =
+        item.hasVerifiedCost && item.coveredQty > 0.00001
+          ? Number((item.totalCost / item.coveredQty).toFixed(2))
+          : 0;
       const totalCost = item.hasVerifiedCost ? Number(item.totalCost.toFixed(2)) : 0;
-      const profit = item.hasVerifiedCost ? Number((item.totalRevenue - totalCost).toFixed(2)) : 0;
-      const unitNetProfit = item.hasVerifiedCost
-        ? Number((actualSellPrice - item.verifiedCostPrice).toFixed(2))
-        : 0;
-      const margin = (item.hasVerifiedCost && item.totalRevenue > 0) ? (profit / item.totalRevenue) * 100 : 0;
+      const verifiedRev = item.hasVerifiedCost ? Number(item.verifiedRevenue.toFixed(2)) : 0;
+      const profit = item.hasVerifiedCost ? Number((verifiedRev - totalCost).toFixed(2)) : 0;
+      const unitNetProfit = item.hasVerifiedCost ? Number((actualSellPrice - fifoUnitCost).toFixed(2)) : 0;
+      const margin = item.hasVerifiedCost && verifiedRev > 0 ? (profit / verifiedRev) * 100 : 0;
 
       return {
         ...item,
         rawTotalCost: item.hasVerifiedCost ? item.totalCost : 0,
+        verifiedCostPrice: fifoUnitCost,
         totalCost,
         actualSellPrice,
         unitNetProfit,
@@ -258,7 +312,6 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       };
     });
 
-    // Search filter
     return list.filter(it => {
       if (!searchQuery) return true;
       const q = searchQuery.toLowerCase();
@@ -268,15 +321,15 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         it.category.toLowerCase().includes(q)
       );
     });
-  }, [db, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
+  }, [db, fifoLedger, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
 
-  // Invoice-level discounts, extra income & taxes for exact reconciliation between Item Profits and Invoice Profits
+  // Invoice-level discounts, extra income & taxes (for invoices with verified cost)
   const salesAdjustments = useMemo(() => {
-    const sales = db.invoices.filter(i => (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') && isDateMatch(i.date) && isTargetBranch(i.branchId));
+    const verifiedSales = invoiceProfitsData.filter(r => r.hasAnyVerifiedCost).map(r => r.invoice);
     let discounts = 0;
     let extraIncome = 0;
     let taxes = 0;
-    for (const inv of sales) {
+    for (const inv of verifiedSales) {
       discounts += Number(inv.discount) || 0;
       extraIncome += Number(inv.extraIncomeVal) || 0;
       taxes += Number(inv.tax) || 0;
@@ -286,10 +339,10 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       extraIncome: Number(extraIncome.toFixed(2)),
       taxes: Number(taxes.toFixed(2))
     };
-  }, [db.invoices, dateFilter, fromDate, toDate, selectedBranchId]);
+  }, [invoiceProfitsData]);
 
   const totalItemsRevenueSum = useMemo(
-    () => Number(itemProfitsData.reduce((s, it) => s + it.totalRevenue, 0).toFixed(2)),
+    () => Number(itemProfitsData.reduce((s, it) => s + (it.hasVerifiedCost ? it.verifiedRevenue : 0), 0).toFixed(2)),
     [itemProfitsData]
   );
   const totalItemsCostSum = useMemo(
@@ -297,15 +350,17 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     [itemProfitsData]
   );
 
-  // Grand Total of Item Profits (before invoice-level discounts/extra income)
+  // Grand Total of Item Profits (matches sum of item.profit directly)
   const grandTotalItemProfits = useMemo(() => {
-    return Number((totalItemsRevenueSum - totalItemsCostSum).toFixed(2));
-  }, [totalItemsRevenueSum, totalItemsCostSum]);
+    return Number(itemProfitsData.reduce((s, it) => s + (it.hasVerifiedCost ? it.profit : 0), 0).toFixed(2));
+  }, [itemProfitsData]);
 
-  // Adjusted Item Profits (after invoice-level discounts/extra income/taxes when not filtered by product search) -> matches grandTotalInvoiceProfits identically
+  // Adjusted Item Profits (matches grandTotalInvoiceProfits identically when unfiltered)
   const adjustedGrandTotalItemProfits = useMemo(() => {
     if (searchQuery.trim()) return grandTotalItemProfits;
-    return Number((grandTotalItemProfits - salesAdjustments.discounts + salesAdjustments.extraIncome + salesAdjustments.taxes).toFixed(2));
+    return Number(
+      (grandTotalItemProfits - salesAdjustments.discounts + salesAdjustments.extraIncome + salesAdjustments.taxes).toFixed(2)
+    );
   }, [grandTotalItemProfits, salesAdjustments, searchQuery]);
 
   // Permission check for invoice deletion
@@ -320,7 +375,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       return;
     }
 
-    if (!confirm(`هل أنت متأكد من حذف الفاتورة "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) {
+    if (
+      !confirm(
+        `هل أنت متأكد من حذف الفاتورة "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`
+      )
+    ) {
       return;
     }
 
@@ -329,7 +388,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   };
 
   // Convert an invoice profit row to a print block
-  const buildInvoiceProfitPrintBlock = (row: typeof invoiceProfitsData[0]): MovementPrintBlock => {
+  const buildInvoiceProfitPrintBlock = (row: (typeof invoiceProfitsData)[0]): MovementPrintBlock => {
     return {
       title: 'تحليل أرباح فاتورة مبيعات',
       serialNo: row.number,
@@ -338,8 +397,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       partyName: row.customer,
       partyCode: row.invoice.partyId || '—',
       partySubId: `وسيلة الدفع: ${row.paymentMethod}`,
-      statement: `تقرير تفصيلي لربحية الفاتورة (${row.number}) ومقارنة سعر البيع مع تكلفة الشراء`,
-      badge: row.profit >= 0 ? 'ربح محقق' : 'خسارة',
+      statement: `تقرير تفصيلي لربحية الفاتورة (${row.number}) وفق تكلفة الدفعات الفعلية (FIFO)`,
+      badge: !row.hasAnyVerifiedCost ? 'تكلفة غير محددة' : row.profit >= 0 ? 'ربح محقق' : 'خسارة',
       typeTitle: 'بيان ربحية الفاتورة',
       tableHeaders: [
         { label: 'الصنف', width: '40%', align: 'right' },
@@ -348,30 +407,40 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         { label: 'سعر التكلفة', width: '16%', align: 'center' },
         { label: 'ربح الصنف', width: '16%', align: 'center' }
       ],
-      tableRows: row.invoice.items.map(it => {
-        const costInfo = costIndex.getCost(it.productId, it.productName);
-        const cost = costInfo.hasPurchases
-          ? ((db.settings.cost === 'average') ? costInfo.avgCost : costInfo.latestBuyPrice)
-          : (it.costPrice || 0);
-        const lineProfit = it.total - (it.qty * cost);
+      tableRows: row.invoice.items.map((it, idx) => {
+        const alloc = fifoLedger.getSaleAllocation(row.invoice.id, it.productId, it.productName, idx);
+        const hasCost = Boolean(alloc && alloc.hasVerifiedCost);
+        const unitCost = hasCost && alloc?.effectiveUnitCost !== undefined ? alloc.effectiveUnitCost : 0;
+        const lineProfit = hasCost ? it.total * (alloc!.coveredQty / Math.max(1, it.qty)) - alloc!.verifiedCostTotal : 0;
         return {
           cols: [
             it.productName,
             formatCleanNumber(it.qty),
             formatCleanNumber(it.unitPrice),
-            formatCleanNumber(cost),
-            formatCleanNumber(lineProfit)
+            hasCost ? formatCleanNumber(unitCost) : 'غير محدد',
+            hasCost ? formatCleanNumber(lineProfit) : 'غير محدد'
           ],
           isBold: false
         };
       }),
       summaryLines: [
         { label: 'إجمالي قيمة الفاتورة', value: `${formatCleanNumber(row.revenue)} ${db.settings.currency}` },
-        { label: 'إجمالي تكلفة البضاعة', value: `${formatCleanNumber(row.cost)} ${db.settings.currency}` },
-        { label: 'صافي ربح الفاتورة', value: `${formatCleanNumber(row.profit)} ${db.settings.currency}`, isTotal: true },
-        { label: 'نسبة الربح %', value: `${row.margin.toFixed(1)}%`, highlight: true }
+        {
+          label: 'إجمالي تكلفة البضاعة (FIFO)',
+          value: row.hasAnyVerifiedCost ? `${formatCleanNumber(row.cost)} ${db.settings.currency}` : 'غير محدد'
+        },
+        {
+          label: 'صافي ربح الفاتورة',
+          value: row.hasAnyVerifiedCost ? `${formatCleanNumber(row.profit)} ${db.settings.currency}` : 'غير محدد',
+          isTotal: true
+        },
+        {
+          label: 'نسبة الربح %',
+          value: row.hasAnyVerifiedCost ? `${row.margin.toFixed(1)}%` : '—',
+          highlight: true
+        }
       ],
-      footerNotes: `فارق الإيرادات والتكلفة لفاتورة ${row.number}`,
+      footerNotes: `فارق الإيرادات والتكلفة وفق دفعات الشراء الفعلية لفاتورة ${row.number}`,
       createdBy: row.invoice.createdBy || db.currentUser?.name
     };
   };
@@ -445,7 +514,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       serialNo: `#PROF-${Date.now().toString().slice(-4)}`,
       date: today,
       time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
-      partyLabel: 'النطاق الزمني:',
+      partyLabel: 'النطاق الزمني',
       partyName: dateFilter === 'all' ? 'جميع الفترات' : `من ${fromDate || today} إلى ${toDate || today}`,
       partySubId: `عدد الأصناف المخرجة: ${itemProfitsData.length}`,
       badge: 'تقرير معتمد',
@@ -464,8 +533,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           formatCleanNumber(it.qtySold),
           it.hasVerifiedCost ? formatCleanNumber(it.verifiedCostPrice) : 'غير محدد',
           formatCleanNumber(it.actualSellPrice),
-          it.hasVerifiedCost ? formatCleanNumber(it.unitNetProfit) : '—',
-          it.hasVerifiedCost ? formatCleanNumber(it.profit) : '—'
+          it.hasVerifiedCost ? formatCleanNumber(it.unitNetProfit) : 'غير محدد',
+          it.hasVerifiedCost ? formatCleanNumber(it.profit) : 'غير محدد'
         ],
         isBold: false
       })),
@@ -539,8 +608,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       'التصنيف',
       'الوحدة',
       'الكمية المباعة',
-      'متوسط سعر البيع',
-      'متوسط التكلفة',
+      'سعر البيع الفعلي',
+      'تكلفة الدفعات (FIFO)',
       'إجمالي المبيعات',
       'إجمالي التكلفة',
       'صافي ربح الصنف',
@@ -824,11 +893,17 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                         {formatCleanNumber(row.revenue)}
                       </td>
                       <td className="py-1.5 px-1 border-l border-slate-200 font-mono text-slate-700 break-words">
-                        {formatCleanNumber(row.cost)}
+                        {row.hasAnyVerifiedCost ? formatCleanNumber(row.cost) : <span className="text-amber-700 font-bold text-[10px]">غير محدد</span>}
                       </td>
                       <td className="py-1.5 px-1 border-l border-slate-200 font-mono">
-                        <div className="font-black text-emerald-700">{formatCleanNumber(row.profit)}</div>
-                        <div className="text-[9px] font-bold text-amber-700">{row.margin.toFixed(1)}%</div>
+                        {row.hasAnyVerifiedCost ? (
+                          <>
+                            <div className="font-black text-emerald-700">{formatCleanNumber(row.profit)}</div>
+                            <div className="text-[9px] font-bold text-amber-700">{row.margin.toFixed(1)}%</div>
+                          </>
+                        ) : (
+                          <span className="text-amber-700 font-bold text-[10px]">غير محدد</span>
+                        )}
                       </td>
                       <td className="py-1.5 px-0.5">
                         <div className="flex flex-wrap items-center justify-center gap-0.5">
@@ -900,16 +975,16 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                         {formatCleanNumber(it.qtySold)}
                       </td>
                       <td className="py-1.5 px-1 border-l border-slate-200 font-mono text-slate-700">
-                        {it.hasVerifiedCost ? formatCleanNumber(it.verifiedCostPrice) : '—'}
+                        {it.hasVerifiedCost ? formatCleanNumber(it.verifiedCostPrice) : <span className="text-amber-700 font-bold">غير محدد</span>}
                       </td>
                       <td className="py-1.5 px-1 border-l border-slate-200 font-mono font-bold text-slate-950">
                         {formatCleanNumber(it.actualSellPrice)}
                       </td>
                       <td className="py-1.5 px-1 border-l border-slate-200 font-mono font-bold text-emerald-700">
-                        {it.hasVerifiedCost ? formatCleanNumber(it.unitNetProfit) : '—'}
+                        {it.hasVerifiedCost ? formatCleanNumber(it.unitNetProfit) : 'غير محدد'}
                       </td>
                       <td className="py-1.5 px-1 font-mono font-black text-emerald-700">
-                        {it.hasVerifiedCost ? formatCleanNumber(it.profit) : '—'}
+                        {it.hasVerifiedCost ? formatCleanNumber(it.profit) : 'غير محدد'}
                       </td>
                     </tr>
                   ))}

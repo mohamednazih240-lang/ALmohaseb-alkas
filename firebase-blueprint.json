@@ -1,50 +1,167 @@
 {
   "entities": {
-    "HesabatyAppData": {
-      "title": "HesabatyAppData",
-      "description": "Enterprise multi-tenant accounting and company database document",
+    "HesabatyManifestDoc": {
+      "title": "HesabatyManifestDoc",
+      "description": "Company manifest document storing metadata, shard counts, and lightweight non-sharded database core payload",
       "type": "object",
       "properties": {
         "companyCode": {
           "type": "string",
-          "description": "Company tenant code such as COMP-101 or COMP-102"
+          "description": "Company tenant code such as COMP-102",
+          "minLength": 3,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9_-]+$"
         },
         "companyName": {
           "type": "string",
-          "description": "Display name of the company or establishment"
+          "description": "Display name of the company or establishment",
+          "maxLength": 200
         },
         "updatedAt": {
           "type": "number",
-          "description": "Timestamp of the last transaction or change"
+          "description": "Epoch timestamp of the last sync mutation"
         },
         "updatedBy": {
           "type": "string",
-          "description": "User name or role who executed the change"
+          "description": "Name of the operator who saved the change",
+          "maxLength": 120
         },
-        "data": {
+        "updatedRole": {
           "type": "string",
-          "description": "Serialized database payload including accounts, invoices, and users"
+          "description": "Role of the operator who saved the change",
+          "maxLength": 60
         },
         "deviceId": {
           "type": "string",
-          "description": "Originating device or browser instance ID"
+          "description": "Originating browser or device instance ID",
+          "maxLength": 120
+        },
+        "actionDesc": {
+          "type": "string",
+          "description": "Short summary of the last recorded accounting action",
+          "maxLength": 500
         },
         "sharded": {
           "type": "boolean",
           "description": "True when heavy collections are sharded into chunked shard documents"
         },
+        "shardPrefix": {
+          "type": "string",
+          "description": "Prefix used for shard document IDs",
+          "maxLength": 40
+        },
         "shardCounts": {
           "type": "object",
-          "description": "Count of shards per sharded collection"
+          "description": "Count of shard pages per collection"
+        },
+        "hasSeparateLogo": {
+          "type": "boolean",
+          "description": "True when company logo is stored in a dedicated asset document"
+        },
+        "invoicesCount": {
+          "type": "number",
+          "description": "Total invoice count"
+        },
+        "productsCount": {
+          "type": "number",
+          "description": "Total product catalog count"
+        },
+        "data": {
+          "type": "string",
+          "description": "Serialized core AccountingDB JSON string excluding sharded arrays and separate logo",
+          "maxLength": 950000
         }
       },
-      "required": ["companyCode", "updatedAt"]
+      "required": ["companyCode", "updatedAt", "data"]
+    },
+    "HesabatyShardDoc": {
+      "title": "HesabatyShardDoc",
+      "description": "Chunked collection shard document supporting 10M+ records within 1 MiB document limits",
+      "type": "object",
+      "properties": {
+        "companyCode": {
+          "type": "string",
+          "description": "Company tenant code",
+          "minLength": 3,
+          "maxLength": 40
+        },
+        "collection": {
+          "type": "string",
+          "description": "Sharded collection key",
+          "enum": ["invoices", "stockMovements", "vouchers", "treasury", "journals", "products", "audit"]
+        },
+        "shardIndex": {
+          "type": "number",
+          "description": "Zero-based shard page index"
+        },
+        "count": {
+          "type": "number",
+          "description": "Number of records inside this shard"
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Epoch timestamp of the shard write"
+        },
+        "itemsJson": {
+          "type": "string",
+          "description": "Serialized JSON array slice for this shard page",
+          "maxLength": 950000
+        }
+      },
+      "required": ["companyCode", "collection", "shardIndex", "count", "updatedAt", "itemsJson"]
+    },
+    "HesabatyLogoDoc": {
+      "title": "HesabatyLogoDoc",
+      "description": "Dedicated company logo asset document",
+      "type": "object",
+      "properties": {
+        "companyCode": {
+          "type": "string",
+          "description": "Company tenant code",
+          "minLength": 3,
+          "maxLength": 40
+        },
+        "logo": {
+          "type": "string",
+          "description": "Base64 or data URL of company logo",
+          "maxLength": 950000
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Epoch timestamp"
+        }
+      },
+      "required": ["companyCode", "logo", "updatedAt"]
+    },
+    "HesabatyDirectoryDoc": {
+      "title": "HesabatyDirectoryDoc",
+      "description": "Directory registry mapping company codes to company metadata",
+      "type": "object",
+      "properties": {}
+    },
+    "ConnectionProbe": {
+      "title": "ConnectionProbe",
+      "description": "Read-only startup connection probe document",
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        }
+      }
     }
   },
   "firestore": {
     "/hesabaty_app_data/{docId}": {
-      "schema": "HesabatyAppData",
-      "description": "Collection storing isolated company database snapshots and real-time tenant documents"
+      "schema": {
+        "$ref": "#/entities/HesabatyManifestDoc"
+      },
+      "description": "Isolated tenant manifests, sharded collection pages, separated logos, and company directory registry"
+    },
+    "/test/{docId}": {
+      "schema": {
+        "$ref": "#/entities/ConnectionProbe"
+      },
+      "description": "Startup Firestore server connectivity verification path"
     }
   }
 }

@@ -420,9 +420,12 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     // 1. Check Invoice totals match sum of items
     db.invoices.forEach(inv => {
       const computedSubtotal = inv.items.reduce((s, it) => s + it.total, 0);
-      const computedTotal = Math.max(0, computedSubtotal - (inv.discount || 0));
+      const computedTotal = Math.max(
+        0,
+        Number((computedSubtotal - (inv.discount || 0) + (inv.tax || 0) + (inv.extraIncomeVal || 0)).toFixed(2))
+      );
       if (Math.abs(computedTotal - inv.total) > 0.05) {
-        errors.push(`الفاتورة رقم ${inv.number}: إجمالي الفاتورة (${inv.total}) لا يطابق مجموع البنود بعد الخصم (${computedTotal}).`);
+        errors.push(`الفاتورة رقم ${inv.number}: إجمالي الفاتورة (${inv.total}) لا يطابق صافي الفاتورة (${computedTotal}).`);
       }
       // Check items reference valid products
       inv.items.forEach(it => {
@@ -1638,12 +1641,12 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">طريقة تقييم تكلفة المخزون</label>
                 <select
-                  value={settingsForm.cost}
+                  value={settingsForm.cost === 'average' ? 'fifo' : settingsForm.cost}
                   onChange={e => setSettingsForm({ ...settingsForm, cost: e.target.value as any })}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:bg-white focus:border-black outline-none cursor-pointer"
                 >
-                  <option value="average">المتوسط المرجح للتكلفة (Weighted Average Costing)</option>
-                  <option value="last">آخر سعر شراء (Last Purchase Price)</option>
+                  <option value="fifo">الوارد أولاً صادر أولاً - دفعات الشراء الفعلية (FIFO)</option>
+                  <option value="last">آخر سعر شراء موثق (Last Purchase Price)</option>
                 </select>
               </div>
 

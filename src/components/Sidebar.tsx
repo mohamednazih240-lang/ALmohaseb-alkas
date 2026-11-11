@@ -53,6 +53,7 @@ export type PageId =
   | 'receipts'
   | 'payments'
   | 'products'
+  | 'selling_prices'
   | 'barcodes'
   | 'warehouses'
   | 'stock'
@@ -117,6 +118,7 @@ export function canUserAccessPage(user?: User, pageId?: PageId): boolean {
     case 'payments':
       return p ? p.canCreatePayments !== false : true;
     case 'products':
+    case 'selling_prices':
     case 'prices':
       return p ? p.canViewProducts !== false : true;
     case 'barcodes':
@@ -209,6 +211,7 @@ const navSections: NavSection[] = [
     title: 'المستودعات والباركود',
     items: [
       { id: 'products', label: 'دليل الأصناف', icon: Package },
+      { id: 'selling_prices', label: 'أسعار البيع', icon: Coins },
       { id: 'barcodes', label: 'طباعة ملصقات الباركود', icon: Barcode },
       { id: 'warehouses', label: 'المخازن والتحويلات', icon: Warehouse },
       { id: 'stock', label: 'كارت حركة المخزون', icon: ArrowLeftRight },

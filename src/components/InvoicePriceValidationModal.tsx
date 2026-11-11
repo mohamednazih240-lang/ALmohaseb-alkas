@@ -168,9 +168,9 @@ export const InvoicePriceValidationModal: React.FC<InvoicePriceValidationModalPr
                     className="bg-white border border-rose-200 hover:border-rose-300 rounded-xl p-3.5 shadow-2xs space-y-2 transition-all"
                   >
                     {/* Item Title and Badges */}
-                    <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2">
-                      <div>
-                        <h4 className="font-black text-sm text-slate-900">{item.productName}</h4>
+                    <div className="flex flex-wrap items-start justify-between gap-2 border-b border-slate-100 pb-2">
+                      <div className="min-w-0 flex-1">
+                        <h4 className="font-black text-sm text-slate-900 break-words">{item.productName}</h4>
                         <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-2 flex-wrap">
                           <span>كود: {item.productCode}</span>
                           {item.previousInvoiceNumber && (
@@ -280,11 +280,11 @@ export const InvoicePriceValidationModal: React.FC<InvoicePriceValidationModalPr
             * سيتم تسجيل قرار الموافقة واسم المستخدم وتاريخ ووقت العملية في سجل التدقيق المحاسبي (Audit Log).
           </div>
           
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               type="button"
               onClick={onCancelAndModify}
-              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer border border-slate-300"
+              className="w-full sm:w-auto px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer border border-slate-300"
             >
               <XCircle className="w-4 h-4 text-slate-600" />
               <span>إلغاء والعودة لتعديل الأسعار</span>
@@ -293,7 +293,7 @@ export const InvoicePriceValidationModal: React.FC<InvoicePriceValidationModalPr
             <button
               type="button"
               onClick={onApproveAndContinue}
-              className={`px-5 py-2 text-white rounded-xl font-black text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-md ${
+              className={`w-full sm:w-auto px-5 py-2 text-white rounded-xl font-black text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-md ${
                 isBelowCost
                   ? 'bg-rose-700 hover:bg-rose-800 focus:ring-4 focus:ring-rose-200'
                   : 'bg-emerald-700 hover:bg-emerald-800 focus:ring-4 focus:ring-emerald-200'

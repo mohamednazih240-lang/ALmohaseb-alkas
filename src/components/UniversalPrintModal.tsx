@@ -367,10 +367,19 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                       </div>
                     </div>
 
-                    {/* 2. صندوق البيانات المعتمد بدون أي تداخل نصوص */}
+                    {/* 2. صندوق البيانات المعتمد بدون أي تداخل أو انضغاط نصوص */}
                     <div className="invoice-info-box">
                       <div className="info-grid">
-                        <div className="info-col-right" style={{ flex: '1.4', overflow: 'hidden' }}>
+                        <div
+                          className="info-col-right"
+                          style={{
+                            flex: '1.25 1 38%',
+                            minWidth: '100px',
+                            overflow: 'visible',
+                            wordBreak: 'keep-all',
+                            overflowWrap: 'break-word'
+                          }}
+                        >
                           {doc.partyCode && doc.partyCode !== doc.serialNo ? (
                             <div className="mb-0.5 text-[10px]">
                               <strong>الكود: </strong>
@@ -378,7 +387,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                             </div>
                           ) : null}
                           <div className="text-[10.5px]">
-                            <strong>{doc.partyLabel || 'الطرف المعني'}: </strong>
+                            <strong>{(doc.partyLabel || 'الطرف المعني').replace(/:+\s*$/, '')}: </strong>
                             <span className="font-bold">{doc.partyName || 'طرف نقدي عام'}</span>
                           </div>
                           {doc.partySubId ? (
@@ -389,10 +398,20 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                           ) : null}
                         </div>
 
-                        <div className="info-col-center" style={{ flex: '1', overflow: 'hidden' }}>
-                          <div className="font-extrabold text-[12px] text-slate-900">{doc.typeTitle || doc.title}</div>
+                        <div
+                          className="info-col-center"
+                          style={{
+                            flex: '1 1 34%',
+                            minWidth: '90px',
+                            overflow: 'visible',
+                            whiteSpace: 'normal',
+                            wordBreak: 'keep-all',
+                            overflowWrap: 'break-word'
+                          }}
+                        >
+                          <div className="font-extrabold text-[11.5px] text-slate-900 leading-snug">{doc.typeTitle || doc.title}</div>
                           {doc.serialNo ? (
-                            <div className="text-[10.5px] font-bold mt-0.5">
+                            <div className="text-[10px] font-bold mt-0.5">
                               <span>رقم: </span>
                               <bdi dir="ltr" className="font-mono font-extrabold">{doc.serialNo}</bdi>
                             </div>
@@ -405,7 +424,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                         </div>
 
                         <div className="info-col-left" style={{ flex: '0 0 auto', minWidth: 'max-content', textAlign: 'start' }}>
-                          <div className="text-[10.5px] whitespace-nowrap flex items-center gap-1 justify-start">
+                          <div className="text-[10px] whitespace-nowrap flex items-center gap-1 justify-start">
                             <strong className="whitespace-nowrap">التاريخ:</strong>
                             <span dir="ltr" className="font-mono font-bold whitespace-nowrap inline-block" style={{ wordBreak: 'keep-all', whiteSpace: 'nowrap' }}>
                               {doc.date || new Date().toISOString().slice(0, 10)}
@@ -458,7 +477,7 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                   wordBreak: 'keep-all',
                                   overflowWrap: 'break-word',
                                   fontSize: paperSize === 'A5' ? '10px' : paperSize === 'thermal' ? '9px' : '11px',
-                                  padding: '4px 3px',
+                                  padding: '4px 5px',
                                   lineHeight: 1.25,
                                   overflow: 'hidden'
                                 }}
@@ -485,16 +504,16 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                                       textAlign: doc.tableHeaders[cIdx]?.align || 'center',
                                       wordBreak: 'keep-all',
                                       overflowWrap: 'break-word',
-                                      padding: '4px 3px',
+                                      padding: isDateCol ? '4px 5px' : '4px 4px',
                                       fontSize: paperSize === 'A5' ? '10px' : paperSize === 'thermal' ? '9px' : '11px',
                                       lineHeight: isTextCol ? 1.35 : 1.2,
-                                      overflow: 'hidden'
+                                      overflow: isDateCol ? 'visible' : 'hidden'
                                     }}
                                   >
                                     {isDateCol ? (
                                       <span
                                         dir="ltr"
-                                        className="inline-block font-mono text-[9.5px] tabular-nums whitespace-nowrap"
+                                        className="inline-block font-mono text-[9px] tabular-nums whitespace-nowrap px-0.5"
                                         style={{ wordBreak: 'keep-all', whiteSpace: 'nowrap', display: 'inline-block' }}
                                       >
                                         {col}
