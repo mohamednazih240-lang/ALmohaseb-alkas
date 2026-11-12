@@ -14,7 +14,8 @@ import {
   Trash2,
   Edit,
   ArrowUpDown,
-  RefreshCw
+  RefreshCw,
+  Layers
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -34,6 +35,7 @@ import {
   formatCleanNumber
 } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface ProfitsViewProps {
   db: AccountingDB;
@@ -59,9 +61,10 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     if (activeBranchId) setSelectedBranchId(activeBranchId);
   }, [activeBranchId]);
 
-  const [profitTab, setProfitTab] = useState<'invoices' | 'items'>('invoices');
+  const [profitTab, setProfitTab] = useState<'invoices' | 'items' | 'transactions'>('invoices');
+  const { isSubmitting, runWithLock } = useSubmitLock();
   const [searchQuery, setSearchQuery] = useState('');
-  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | 'week' | 'month' | 'custom'>('all');
+  const [dateFilter, setDateFilter] = useState<'all' | 'today' | 'yesterday' | 'week' | 'month' | 'year' | 'custom'>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
 
@@ -95,6 +98,10 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       const m = new Date();
       m.setDate(1);
       return dateStr >= m.toISOString().slice(0, 10) && dateStr <= today;
+    }
+    if (dateFilter === 'year') {
+      const yr = new Date().getFullYear().toString();
+      return dateStr.startsWith(yr) && dateStr <= today;
     }
     if (dateFilter === 'custom') {
       if (fromDate && dateStr < fromDate) return false;
@@ -365,6 +372,122 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     );
   }, [grandTotalItemProfits, salesAdjustments, searchQuery]);
 
+  // 3. TRANSACTION-BY-TRANSACTION SALE LINE PROFITS (Strict Non-Averaged Batch Costing)
+  const saleTransactionProfitsData = useMemo(() => {
+    const sales = db.invoices.filter(
+      i =>
+        (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+        isDateMatch(i.date) &&
+        isTargetBranch(i.branchId)
+    );
+
+    const rows: {
+      id: string;
+      invoiceId: string;
+      invoiceNumber: string;
+      date: string;
+      time: string;
+      customer: string;
+      paymentMethod: string;
+      productId: string;
+      productName: string;
+      productCode: string;
+      unit: string;
+      qty: number;
+      unitPrice: number;
+      lineTotal: number;
+      hasVerifiedCost: boolean;
+      verifiedUnitCost: number;
+      verifiedCostTotal: number;
+      unitNetProfit: number;
+      lineProfit: number;
+      margin: number;
+      invoice: Invoice;
+    }[] = [];
+
+    sales.forEach(inv => {
+      inv.items.forEach((it, idx) => {
+        const normName = normalizeArabicText(it.productName);
+        const cleanCode = (it.productCode || '').trim().toLowerCase();
+        const prod = db.products.find(
+          p =>
+            p.id === it.productId ||
+            (cleanCode && (p.code || '').trim().toLowerCase() === cleanCode) ||
+            (normName && normalizeArabicText(p.name) === normName)
+        );
+        const alloc = fifoLedger.getSaleAllocation(inv.id, prod?.id || it.productId, it.productName, idx);
+
+        const q = Number(it.qty) || 0;
+        const unitPrice = Number(it.unitPrice) || 0;
+        const lineTotal = Number(it.total) || q * unitPrice;
+        const hasVerifiedCost = Boolean(alloc && alloc.hasVerifiedCost);
+        const verifiedUnitCost = hasCostUnit(alloc);
+        const verifiedCostTotal = hasVerifiedCost && alloc ? alloc.verifiedCostTotal : 0;
+        const unitNetProfit = hasVerifiedCost ? Number((unitPrice - verifiedUnitCost).toFixed(2)) : 0;
+        const lineProfit = hasVerifiedCost ? Number((lineTotal - verifiedCostTotal).toFixed(2)) : 0;
+        const margin = hasVerifiedCost && lineTotal > 0 ? (lineProfit / lineTotal) * 100 : 0;
+
+        rows.push({
+          id: `${inv.id}_item_${idx}`,
+          invoiceId: inv.id,
+          invoiceNumber: inv.number,
+          date: inv.date,
+          time: inv.time || '12:00',
+          customer: inv.partyName || 'عميل نقدي',
+          paymentMethod: inv.paymentMethod || 'نقدي',
+          productId: prod?.id || it.productId,
+          productName: it.productName || prod?.name || 'صنف',
+          productCode: it.productCode || prod?.code || '—',
+          unit: it.unit || prod?.unit || 'قطعة',
+          qty: q,
+          unitPrice,
+          lineTotal,
+          hasVerifiedCost,
+          verifiedUnitCost,
+          verifiedCostTotal,
+          unitNetProfit,
+          lineProfit,
+          margin,
+          invoice: inv
+        });
+      });
+    });
+
+    return rows.filter(r => {
+      if (!searchQuery) return true;
+      const q = searchQuery.toLowerCase();
+      return (
+        r.invoiceNumber.toLowerCase().includes(q) ||
+        r.customer.toLowerCase().includes(q) ||
+        r.productName.toLowerCase().includes(q) ||
+        r.productCode.toLowerCase().includes(q) ||
+        r.paymentMethod.toLowerCase().includes(q)
+      );
+    });
+  }, [db, fifoLedger, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
+
+  function hasCostUnit(alloc: ReturnType<typeof fifoLedger.getSaleAllocation>): number {
+    if (!alloc || !alloc.hasVerifiedCost) return 0;
+    if (alloc.effectiveUnitCost !== undefined) return alloc.effectiveUnitCost;
+    return alloc.coveredQty > 0 ? Number((alloc.verifiedCostTotal / alloc.coveredQty).toFixed(2)) : 0;
+  }
+
+  const grandTotalTransactionProfits = useMemo(() => {
+    return Number(
+      saleTransactionProfitsData.reduce((sum, r) => sum + (r.hasVerifiedCost ? r.lineProfit : 0), 0).toFixed(2)
+    );
+  }, [saleTransactionProfitsData]);
+
+  const currentGrossProfit = useMemo(() => {
+    if (profitTab === 'invoices') return grandTotalInvoiceProfits;
+    if (profitTab === 'items') return adjustedGrandTotalItemProfits;
+    return grandTotalTransactionProfits;
+  }, [profitTab, grandTotalInvoiceProfits, adjustedGrandTotalItemProfits, grandTotalTransactionProfits]);
+
+  const currentNetProfit = useMemo(() => {
+    return Number((currentGrossProfit - operatingExpenses).toFixed(2));
+  }, [currentGrossProfit, operatingExpenses]);
+
   // Permission check for invoice deletion
   const userPerms = db.currentUser?.permissions;
   const isManager = db.currentUser?.role === 'مدير';
@@ -372,21 +495,23 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
   // Delete invoice handler
   const handleDeleteInvoice = (inv: Invoice) => {
-    if (!canDeleteSales) {
-      alert('عذراً، ليس لديك صلاحية لحذف الفواتير. الحذف مقتصر على المدير أو من يمنحه المدير الصلاحية.');
-      return;
-    }
+    runWithLock(() => {
+      if (!canDeleteSales) {
+        alert('عذراً، ليس لديك صلاحية لحذف الفواتير. الحذف مقتصر على المدير أو من يمنحه المدير الصلاحية.');
+        return;
+      }
 
-    if (
-      !confirm(
-        `هل أنت متأكد من حذف الفاتورة "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`
-      )
-    ) {
-      return;
-    }
+      if (
+        !confirm(
+          `هل أنت متأكد من حذف الفاتورة "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`
+        )
+      ) {
+        return;
+      }
 
-    const updated = deleteInvoiceAndRevert(db, inv);
-    onUpdateDb(updated);
+      const updated = deleteInvoiceAndRevert(db, inv);
+      onUpdateDb(updated);
+    });
   };
 
   // Convert an invoice profit row to a print block
@@ -650,6 +775,120 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     exportTableToCsv(`تقرير_أرباح_الأصناف_${Date.now()}.csv`, headers, rows);
   };
 
+  // Export Transactions to Excel
+  const handleExportTransactionsCsv = () => {
+    if (saleTransactionProfitsData.length === 0) {
+      alert('لا توجد بيانات للتصدير');
+      return;
+    }
+
+    const headers = [
+      'رقم الفاتورة',
+      'التاريخ',
+      'العميل',
+      'اسم الصنف',
+      'كود الصنف',
+      'الكمية المباعة',
+      'سعر الشراء (FIFO)',
+      'سعر البيع',
+      'ربح الوحدة',
+      'إجمالي ربح الحركة',
+      'نسبة الربح %'
+    ];
+
+    const rows = saleTransactionProfitsData.map(r => [
+      r.invoiceNumber,
+      r.date,
+      r.customer,
+      r.productName,
+      r.productCode,
+      r.qty,
+      r.hasVerifiedCost ? r.verifiedUnitCost.toFixed(2) : 'غير محدد',
+      r.unitPrice.toFixed(2),
+      r.hasVerifiedCost ? r.unitNetProfit.toFixed(2) : 'غير محدد',
+      r.hasVerifiedCost ? r.lineProfit.toFixed(2) : 'غير محدد',
+      r.hasVerifiedCost ? `${r.margin.toFixed(1)}%` : '—'
+    ]);
+
+    rows.push([
+      'إجمالي أرباح الحركات الموثقة',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      grandTotalTransactionProfits,
+      ''
+    ]);
+
+    exportTableToCsv(`تقرير_حركات_البيع_والأرباح_${Date.now()}.csv`, headers, rows);
+  };
+
+  // Print all transaction profits
+  const handleBatchPrintTransactions = () => {
+    if (saleTransactionProfitsData.length === 0) {
+      alert('لا توجد حركات للطباعة');
+      return;
+    }
+
+    const block: MovementPrintBlock = {
+      title: 'تقرير أرباح حركات البيع التفصيلية (حركة بحركة)',
+      serialNo: `#TRX-${Date.now().toString().slice(-4)}`,
+      date: today,
+      time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
+      partyLabel: 'النطاق الزمني',
+      partyName: dateFilter === 'all' ? 'جميع الفترات' : `من ${fromDate || today} إلى ${toDate || today}`,
+      partySubId: `عدد حركات البيع: ${saleTransactionProfitsData.length}`,
+      badge: 'تقرير معتمد',
+      typeTitle: 'بيان حركات البيع الفردية والأرباح',
+      tableHeaders: [
+        { label: 'الفاتورة / الصنف', width: '30%', align: 'right' },
+        { label: 'العميل', width: '18%', align: 'right' },
+        { label: 'الكمية', width: '10%', align: 'center' },
+        { label: 'سعر الشراء', width: '14%', align: 'center' },
+        { label: 'سعر البيع', width: '14%', align: 'center' },
+        { label: 'ربح الحركة', width: '14%', align: 'center' }
+      ],
+      tableRows: saleTransactionProfitsData.map(r => ({
+        cols: [
+          `${r.invoiceNumber} - ${r.productName}`,
+          r.customer,
+          formatCleanNumber(r.qty),
+          r.hasVerifiedCost ? formatCleanNumber(r.verifiedUnitCost) : 'غير محدد',
+          formatCleanNumber(r.unitPrice),
+          r.hasVerifiedCost ? formatCleanNumber(r.lineProfit) : 'غير محدد'
+        ],
+        isBold: false
+      })),
+      summaryLines: [
+        {
+          label: 'إجمالي أرباح حركات البيع الموثقة',
+          value: `${formatCleanNumber(grandTotalTransactionProfits)} ${db.settings.currency}`,
+          isTotal: true,
+          highlight: true
+        },
+        {
+          label: 'المصروفات التشغيلية',
+          value: `${formatCleanNumber(operatingExpenses)} ${db.settings.currency}`
+        },
+        {
+          label: 'صافي ربح النشاط',
+          value: `${formatCleanNumber(grandTotalTransactionProfits - operatingExpenses)} ${db.settings.currency}`,
+          isTotal: true
+        }
+      ],
+      footerNotes: 'تم احتساب ربح كل حركة بيع بشكل منفصل ومستقل تماماً وفق سعر شراء دفعتها الفعلية دون أي خلط أو متوسطات.',
+      createdBy: db.currentUser?.name
+    };
+
+    setPrintDocuments([block]);
+    setPrintDocTitle(`تقرير_حركات_البيع_والأرباح`);
+    setPrintModalOpen(true);
+  };
+
   return (
     <div className="space-y-3.5 pb-12">
       {/* Top Header */}
@@ -680,6 +919,15 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
               <Package className="w-3.5 h-3.5" />
               <span>أرباح الأصناف ({itemProfitsData.length})</span>
             </button>
+            <button
+              onClick={() => setProfitTab('transactions')}
+              className={`flex-1 sm:flex-initial px-3 py-1.5 rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                profitTab === 'transactions' ? 'bg-white text-slate-900 shadow-2xs font-black' : 'text-slate-600 hover:text-black'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>حركات البيع ({saleTransactionProfitsData.length})</span>
+            </button>
           </div>
         </div>
       </div>
@@ -693,14 +941,24 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             </div>
             <div className="min-w-0">
               <span className="text-xs sm:text-sm font-black text-white block truncate">
-                {profitTab === 'invoices' ? 'عداد الأرباح الإجمالية للنشاط' : 'عداد أرباح الأصناف المخرجة'}
+                {profitTab === 'invoices'
+                  ? 'عداد الأرباح الإجمالية للنشاط'
+                  : profitTab === 'items'
+                  ? 'عداد أرباح الأصناف المخرجة'
+                  : 'عداد أرباح حركات البيع التفصيلية'}
               </span>
             </div>
           </div>
 
           <button
             type="button"
-            onClick={handleBatchPrintItems}
+            onClick={
+              profitTab === 'invoices'
+                ? handleBatchPrintInvoices
+                : profitTab === 'items'
+                ? handleBatchPrintItems
+                : handleBatchPrintTransactions
+            }
             className="px-2.5 py-1.5 bg-white text-emerald-900 hover:bg-emerald-50 rounded-lg text-[11px] font-black transition-all flex items-center gap-1 shadow-xs shrink-0 cursor-pointer"
           >
             <Printer className="w-3.5 h-3.5" />
@@ -711,10 +969,10 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         <div className="grid grid-cols-3 gap-2">
           <div className="text-center bg-black/20 px-2 sm:px-3.5 py-2 rounded-xl border border-white/20">
             <span className="text-[10px] font-bold text-emerald-100 block truncate">
-              {profitTab === 'invoices' ? 'ربح البضاعة' : 'ربح الأصناف'}
+              {profitTab === 'invoices' ? 'ربح البضاعة' : profitTab === 'items' ? 'ربح الأصناف' : 'ربح الحركات'}
             </span>
             <span className="text-xs sm:text-base font-black font-mono tracking-tight text-white">
-              {formatMoney(profitTab === 'invoices' ? grandTotalInvoiceProfits : adjustedGrandTotalItemProfits, db.settings.currency)}
+              {formatMoney(currentGrossProfit, db.settings.currency)}
             </span>
           </div>
           <div className="text-center bg-black/20 px-2 sm:px-3.5 py-2 rounded-xl border border-white/20">
@@ -730,7 +988,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
               صافي الربح
             </span>
             <span className="text-xs sm:text-lg font-black font-mono tracking-tight text-white">
-              {formatMoney((profitTab === 'invoices' ? netBusinessProfit : (adjustedGrandTotalItemProfits - operatingExpenses)), db.settings.currency)}
+              {formatMoney(currentNetProfit, db.settings.currency)}
             </span>
           </div>
         </div>
@@ -770,6 +1028,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
               { id: 'yesterday', label: 'أمس' },
               { id: 'week', label: 'آخر 7 أيام' },
               { id: 'month', label: 'هذا الشهر' },
+              { id: 'year', label: 'هذا العام' },
               { id: 'custom', label: 'فترة مخصصة' }
             ].map(f => (
               <button
@@ -790,7 +1049,13 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={profitTab === 'invoices' ? handleExportInvoicesCsv : handleExportItemsCsv}
+              onClick={
+                profitTab === 'invoices'
+                  ? handleExportInvoicesCsv
+                  : profitTab === 'items'
+                  ? handleExportItemsCsv
+                  : handleExportTransactionsCsv
+              }
               className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
@@ -799,7 +1064,13 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
             <button
               type="button"
-              onClick={profitTab === 'invoices' ? handleBatchPrintInvoices : handleBatchPrintItems}
+              onClick={
+                profitTab === 'invoices'
+                  ? handleBatchPrintInvoices
+                  : profitTab === 'items'
+                  ? handleBatchPrintItems
+                  : handleBatchPrintTransactions
+              }
               className="px-3 py-1.5 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
@@ -840,7 +1111,9 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             placeholder={
               profitTab === 'invoices'
                 ? 'بحث برقم الفاتورة، اسم العميل، أو وسيلة الدفع...'
-                : 'بحث باسم الصنف، الكود، أو التصنيف...'
+                : profitTab === 'items'
+                ? 'بحث باسم الصنف، الكود، أو التصنيف...'
+                : 'بحث برقم الفاتورة، اسم الصنف، أو العميل...'
             }
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
@@ -923,7 +1196,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                             </button>
                           )}
                           {canDeleteSales && (
-                            <button type="button" onClick={() => handleDeleteInvoice(row.invoice)} className="hidden sm:inline-flex p-1 text-slate-400 hover:text-rose-600 rounded cursor-pointer" title="حذف">
+                            <button type="button" disabled={isSubmitting} onClick={() => handleDeleteInvoice(row.invoice)} className="hidden sm:inline-flex p-1 text-slate-400 hover:text-rose-600 rounded cursor-pointer disabled:opacity-50" title="حذف">
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
@@ -936,7 +1209,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
             </div>
           )}
         </div>
-      ) : (
+      ) : profitTab === 'items' ? (
         /* -------------------------------------------------------------
             TAB 2: PRODUCT / ITEM PROFITS VIEW (Image 2 Crisp Bordered Table)
         -------------------------------------------------------------- */
@@ -987,6 +1260,82 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                       </td>
                       <td className="py-1.5 px-1 font-mono font-black text-emerald-700">
                         {it.hasVerifiedCost ? formatCleanNumber(it.profit) : 'غير محدد'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* -------------------------------------------------------------
+            TAB 3: TRANSACTION-BY-TRANSACTION SALE LINE PROFITS LOG
+        -------------------------------------------------------------- */
+        <div className="space-y-3">
+          {saleTransactionProfitsData.length === 0 ? (
+            <div className="p-10 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
+              <Layers className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+              <div className="text-sm font-bold text-slate-700">لا توجد حركات بيع مطابقة للبحث أو الفترة المحددة</div>
+            </div>
+          ) : (
+            <div className="bg-white rounded-xl border border-slate-300 overflow-hidden shadow-2xs">
+              <table className="w-full table-fixed border-collapse text-center text-[10px] sm:text-xs">
+                <colgroup>
+                  <col style={{ width: '15%' }} />
+                  <col style={{ width: '23%' }} />
+                  <col style={{ width: '18%' }} />
+                  <col style={{ width: '10%' }} />
+                  <col style={{ width: '11%' }} />
+                  <col style={{ width: '11%' }} />
+                  <col style={{ width: '12%' }} />
+                </colgroup>
+                <thead className="bg-slate-100 border-b border-slate-300 font-black text-slate-900">
+                  <tr>
+                    <th className="py-2 px-1 border-l border-slate-300">الفاتورة</th>
+                    <th className="py-2 px-1 border-l border-slate-300 text-right">الصنف</th>
+                    <th className="py-2 px-1 border-l border-slate-300 text-right">العميل</th>
+                    <th className="py-2 px-1 border-l border-slate-300">الكمية</th>
+                    <th className="py-2 px-1 border-l border-slate-300">شراء (FIFO)</th>
+                    <th className="py-2 px-1 border-l border-slate-300">البيع</th>
+                    <th className="py-2 px-1">ربح الحركة</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {saleTransactionProfitsData.map(r => (
+                    <tr key={r.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono">
+                        <div className="font-black text-slate-950">{r.invoiceNumber}</div>
+                        <div className="text-[9px] text-slate-500 leading-tight">{r.date.slice(5)}</div>
+                      </td>
+                      <td className="py-1.5 px-1.5 border-l border-slate-200 text-right font-bold text-slate-900 break-words leading-tight">
+                        <div>{r.productName}</div>
+                        {r.productCode && r.productCode !== '—' && (
+                          <div className="text-[9px] text-slate-400 font-mono">{r.productCode}</div>
+                        )}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 text-right text-slate-800 break-words font-medium">
+                        <div className="truncate">{r.customer}</div>
+                        <div className="text-[9px] text-slate-500">{r.paymentMethod}</div>
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono font-bold text-slate-900">
+                        {formatCleanNumber(r.qty)}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono text-slate-700">
+                        {r.hasVerifiedCost ? formatCleanNumber(r.verifiedUnitCost) : <span className="text-amber-700 font-bold">غير محدد</span>}
+                      </td>
+                      <td className="py-1.5 px-1 border-l border-slate-200 font-mono font-bold text-slate-950">
+                        {formatCleanNumber(r.unitPrice)}
+                      </td>
+                      <td className="py-1.5 px-1 font-mono">
+                        {r.hasVerifiedCost ? (
+                          <>
+                            <div className="font-black text-emerald-700">{formatCleanNumber(r.lineProfit)}</div>
+                            <div className="text-[9px] text-emerald-600 font-bold">+{formatCleanNumber(r.unitNetProfit)}/وحدة</div>
+                          </>
+                        ) : (
+                          <span className="text-amber-700 font-bold">غير محدد</span>
+                        )}
                       </td>
                     </tr>
                   ))}

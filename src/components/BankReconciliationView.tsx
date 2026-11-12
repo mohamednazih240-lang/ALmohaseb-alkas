@@ -16,10 +16,20 @@ import {
   ArrowDownLeft,
   ArrowUpRight
 } from 'lucide-react';
-import { AccountingDB, BankReconciliation, PaymentMethod, Voucher } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit } from '../services/accountingStorage';
+import { AccountingDB, BankReconciliation, JournalEntry, PaymentMethod, TreasuryEntry, Voucher } from '../types/accounting';
+import {
+  formatMoney,
+  roundMoney,
+  isFinitePositive,
+  assertJournalBalanced,
+  getMethodAccountId,
+  generateId,
+  getTodayDate,
+  logAudit
+} from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface BankReconciliationViewProps {
   db: AccountingDB;
@@ -38,6 +48,7 @@ interface ReconcileItem {
 }
 
 export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ db, onUpdateDb }) => {
+  const { isSubmitting, runWithLock } = useSubmitLock();
   // Accounts eligible for bank reconciliation: bank accounts, wallets, cash
   const bankAccounts = db.accounts.filter(a => 
     a.type === 'asset' && 
@@ -197,8 +208,8 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
     .reduce((s, it) => s + it.amount, 0);
 
   // Adjusted Bank Balance = Statement Balance + Uncleared Deposits - Uncleared Payments
-  const adjustedBankBalance = statementBalance + unclearedDeposits - unclearedPayments;
-  const difference = Math.abs(calculatedBookBalance - adjustedBankBalance);
+  const adjustedBankBalance = roundMoney(statementBalance + unclearedDeposits - unclearedPayments);
+  const difference = roundMoney(Math.abs(calculatedBookBalance - adjustedBankBalance));
   const isBalanced = difference < 0.05 && items.length > 0;
 
   // Toggle single item
@@ -219,60 +230,136 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
     setClearedIds(new Set());
   };
 
-  // Add Bank Fee voucher
+  // Add Bank Fee voucher + Treasury outflow + Balanced double-entry Journal
   const handleAddFee = (e: React.FormEvent) => {
     e.preventDefault();
-    if (feeAmount <= 0) return;
+    runWithLock(() => {
+      const cleanAmt = roundMoney(Number(feeAmount));
+      if (!isFinitePositive(cleanAmt)) {
+        alert('يرجى إدخال قيمة عمولة بنكية صحيحة أكبر من صفر.');
+        return;
+      }
+      if (!feeDescription.trim()) {
+        alert('يرجى إدخال وصف العمولة البنكية.');
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const newFeeVoucher: Voucher = {
-      id: generateId('vch_fee'),
-      number: `FEE-${Date.now().toString().slice(-4)}`,
-      type: 'payment',
-      date: statementDate,
-      partyName: 'مصاريف وعمولات بنكية',
-      amount: Number(feeAmount),
-      paymentMethod: (accountMethod || 'تحويل بنكي') as PaymentMethod,
-      description: feeDescription.trim()
-    };
-    updated.vouchers.push(newFeeVoucher);
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const activeMethod = (accountMethod || 'تحويل بنكي') as PaymentMethod;
+      const activeBranchId = updated.currentUser?.branchId || updated.branches?.[0]?.id || 'br_main';
+      const activeBranchName = updated.branches?.find(b => b.id === activeMethod)?.name || updated.branches?.[0]?.name || 'الفرع الرئيسي';
+      const feeVoucherId = generateId('vch_fee');
+      const feeNumber = `FEE-${Date.now().toString().slice(-4)}`;
 
-    // Also record audit
-    logAudit(updated, 'تسجيل عمولة بنكية', `${formatMoney(feeAmount, db.settings.currency)} - ${feeDescription}`);
-    onUpdateDb(updated);
-    setShowFeeModal(false);
-    // Auto clear the newly added fee
-    const next = new Set(clearedIds);
-    next.add(newFeeVoucher.id);
-    setClearedIds(next);
+      const methodAccId = getMethodAccountId(activeMethod);
+      const methodAcc = updated.accounts.find(a => a.id === methodAccId) || updated.accounts.find(a => a.id === 'acc_bank') || updated.accounts.find(a => a.id === 'acc_cash')!;
+      const bankChargesAcc = updated.accounts.find(a => a.id === 'acc_bank_charges') || updated.accounts.find(a => a.id === 'acc_exp')!;
+
+      const jEntry: JournalEntry = {
+        id: generateId('jrn_fee'),
+        number: `J-FEE-${Date.now().toString().slice(-5)}`,
+        date: statementDate,
+        description: `مصروف / عمولة بنكية: ${feeDescription.trim()} (${feeNumber})`,
+        sourceType: 'expense',
+        sourceId: feeVoucherId,
+        lines: [
+          {
+            accountId: bankChargesAcc.id,
+            accountCode: bankChargesAcc.code,
+            accountName: bankChargesAcc.name,
+            debit: cleanAmt,
+            credit: 0,
+            notes: feeDescription.trim()
+          },
+          {
+            accountId: methodAcc.id,
+            accountCode: methodAcc.code,
+            accountName: methodAcc.name,
+            debit: 0,
+            credit: cleanAmt,
+            notes: `خصم عمولة من: ${methodAcc.name}`
+          }
+        ],
+        createdAt: new Date().toISOString()
+      };
+
+      const balCheck = assertJournalBalanced(jEntry);
+      if (!balCheck.balanced) {
+        alert(balCheck.reason || 'القيد المحاسبي للعمولة غير متوازن.');
+        return;
+      }
+
+      const newFeeVoucher: Voucher = {
+        id: feeVoucherId,
+        number: feeNumber,
+        type: 'payment',
+        date: statementDate,
+        partyName: 'مصاريف وعمولات بنكية',
+        amount: cleanAmt,
+        paymentMethod: activeMethod,
+        description: feeDescription.trim(),
+        journalEntryId: jEntry.id,
+        branchId: activeBranchId,
+        branchName: activeBranchName
+      };
+
+      const trEntry: TreasuryEntry = {
+        id: generateId('tr_fee'),
+        date: statementDate,
+        direction: 'out',
+        amount: cleanAmt,
+        method: activeMethod,
+        description: `عمولة بنكية ${feeNumber}: ${feeDescription.trim()}`,
+        sourceType: 'voucher',
+        sourceId: feeVoucherId,
+        branchId: activeBranchId,
+        branchName: activeBranchName
+      };
+
+      updated.vouchers.push(newFeeVoucher);
+      updated.treasury.unshift(trEntry);
+      updated.journals.unshift(jEntry);
+
+      logAudit(updated, 'تسجيل عمولة بنكية', `${formatMoney(cleanAmt, db.settings.currency)} - ${feeDescription.trim()}`);
+      onUpdateDb(updated);
+      setShowFeeModal(false);
+      const next = new Set(clearedIds);
+      next.add(newFeeVoucher.id);
+      setClearedIds(next);
+    });
   };
 
   // Save Finalized Reconciliation
   const handleSaveReconciliation = () => {
     if (!selectedAccount) return;
+    runWithLock(() => {
+      if (!Number.isFinite(statementBalance)) {
+        alert('رصيد كشف الحساب البنكي غير صالح.');
+        return;
+      }
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const recRecord: BankReconciliation = {
+        id: generateId('rec'),
+        statementDate,
+        bankAccountId: selectedAccount.id,
+        bankAccountName: selectedAccount.name,
+        statementEndingBalance: roundMoney(statementBalance),
+        bookBalance: roundMoney(calculatedBookBalance),
+        difference,
+        matchedTransactionIds: Array.from(clearedIds),
+        status: isBalanced ? 'مطابق ومغلق' : 'مسودة',
+        createdAt: new Date().toISOString()
+      };
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const recRecord: BankReconciliation = {
-      id: generateId('rec'),
-      statementDate,
-      bankAccountId: selectedAccount.id,
-      bankAccountName: selectedAccount.name,
-      statementEndingBalance: statementBalance,
-      bookBalance: calculatedBookBalance,
-      difference,
-      matchedTransactionIds: Array.from(clearedIds),
-      status: isBalanced ? 'مطابق ومغلق' : 'مسودة',
-      createdAt: new Date().toISOString()
-    };
-
-    updated.bankReconciliations.unshift(recRecord);
-    logAudit(
-      updated,
-      'اعتماد مذكرة تسوية بنكية',
-      `تسوية حساب ${selectedAccount.name} بتاريخ ${statementDate} - الفارق: ${difference.toFixed(2)}`
-    );
-    onUpdateDb(updated);
-    alert(isBalanced ? 'تم حفظ واعتماد التسوية البنكية بنجاح (مطابقة تامة 100%).' : 'تم حفظ مسودة التسوية البنكية للمراجعة لاحقاً.');
+      updated.bankReconciliations.unshift(recRecord);
+      logAudit(
+        updated,
+        'اعتماد مذكرة تسوية بنكية',
+        `تسوية حساب ${selectedAccount.name} بتاريخ ${statementDate} - الفارق: ${difference.toFixed(2)}`
+      );
+      onUpdateDb(updated);
+      alert(isBalanced ? 'تم حفظ واعتماد التسوية البنكية بنجاح (مطابقة تامة 100%).' : 'تم حفظ مسودة التسوية البنكية للمراجعة لاحقاً.');
+    });
   };
 
   const handleDownloadPdf = async () => {
@@ -619,14 +706,15 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
           <div className="flex items-center gap-2">
             <button
               onClick={handleSaveReconciliation}
-              className={`px-6 py-2.5 text-xs font-black rounded-xl transition-all flex items-center gap-2 shadow-xs ${
+              disabled={isSubmitting}
+              className={`px-6 py-2.5 text-xs font-black rounded-xl transition-all flex items-center gap-2 shadow-xs disabled:opacity-50 ${
                 isBalanced
                   ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
                   : 'bg-slate-900 hover:bg-slate-800 text-white'
               }`}
             >
               <ShieldCheck className="w-4 h-4" />
-              <span>{isBalanced ? 'اعتماد وإغلاق التسوية البنكية (مطابق)' : 'حفظ مسودة التسوية'}</span>
+              <span>{isSubmitting ? 'جارٍ الحفظ...' : (isBalanced ? 'اعتماد وإغلاق التسوية البنكية (مطابق)' : 'حفظ مسودة التسوية')}</span>
             </button>
           </div>
         </div>
@@ -724,9 +812,10 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl"
                 >
-                  إثبات بالسجلات
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'إثبات بالسجلات'}
                 </button>
               </div>
             </form>

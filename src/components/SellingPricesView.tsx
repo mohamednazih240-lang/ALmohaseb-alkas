@@ -25,10 +25,13 @@ import {
   logAudit,
   normalizeArabicText,
   parseNum,
-  updateProductBranchData
+  updateProductBranchData,
+  roundMoney,
+  isFiniteNonNegative
 } from '../services/accountingStorage';
 import { UniversalPrintModal, MovementPrintBlock } from './UniversalPrintModal';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface SellingPricesViewProps {
   db: AccountingDB;
@@ -66,6 +69,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
   const [modalWholesalePrice, setModalWholesalePrice] = useState('');
   const [modalNote, setModalNote] = useState('');
   const [showPrintModal, setShowPrintModal] = useState(false);
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   useModalBackHandler(!!pendingConfirm, () => setPendingConfirm(null), 'sp_confirm');
   useModalBackHandler(!!historyProduct, () => setHistoryProduct(null), 'sp_history');
@@ -181,74 +185,78 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
     note: string = '',
     approvedLossOverride: boolean = false
   ) => {
-    const bp = getProductForBranch(product, activeBranchId);
-    const oldSellPrice = Number(bp.sellPrice || 0);
-    const oldWholesalePrice = Number(bp.wholesalePrice || 0);
-    const nowIso = new Date().toISOString();
+    runWithLock(() => {
+      const cleanSell = roundMoney(newSellPrice);
+      const cleanWholesale = roundMoney(newWholesalePrice);
+      const bp = getProductForBranch(product, activeBranchId);
+      const oldSellPrice = roundMoney(Number(bp.sellPrice || 0));
+      const oldWholesalePrice = roundMoney(Number(bp.wholesalePrice || 0));
+      const nowIso = new Date().toISOString();
 
-    const historyEntry: SellingPriceHistoryEntry = {
-      id: generateId('sph'),
-      date: nowIso,
-      oldSellPrice,
-      newSellPrice,
-      oldWholesalePrice,
-      newWholesalePrice,
-      updatedBy: currentUserName,
-      branchId: activeBranchId,
-      note: approvedLossOverride
-        ? `${note ? note + ' - ' : ''}تم اعتماد سعر البيع رغم انخفاضه عن التكلفة أو عدم توفر تكلفة شراء موثقة`
-        : note || undefined
-    };
+      const historyEntry: SellingPriceHistoryEntry = {
+        id: generateId('sph'),
+        date: nowIso,
+        oldSellPrice,
+        newSellPrice: cleanSell,
+        oldWholesalePrice,
+        newWholesalePrice: cleanWholesale,
+        updatedBy: currentUserName,
+        branchId: activeBranchId,
+        note: approvedLossOverride
+          ? `${note ? note + ' - ' : ''}تم اعتماد سعر البيع رغم انخفاضه عن التكلفة أو عدم توفر تكلفة شراء موثقة`
+          : note || undefined
+      };
 
-    const existingHistory = Array.isArray(product.sellingPriceHistory) ? product.sellingPriceHistory : [];
-    const nextHistory = [historyEntry, ...existingHistory].slice(0, 100);
+      const existingHistory = Array.isArray(product.sellingPriceHistory) ? product.sellingPriceHistory : [];
+      const nextHistory = [historyEntry, ...existingHistory].slice(0, 100);
 
-    const updatedProductBranch = updateProductBranchData(product, activeBranchId, {
-      sellPrice: newSellPrice,
-      wholesalePrice: newWholesalePrice,
-      sellingPriceUpdatedAt: nowIso,
-      sellingPriceUpdatedBy: currentUserName
+      const updatedProductBranch = updateProductBranchData(product, activeBranchId, {
+        sellPrice: cleanSell,
+        wholesalePrice: cleanWholesale,
+        sellingPriceUpdatedAt: nowIso,
+        sellingPriceUpdatedBy: currentUserName
+      });
+
+      const finalProduct: Product = {
+        ...updatedProductBranch,
+        sellPrice:
+          activeBranchId === 'br_mawan' || activeBranchId === 'br_main' || !product.branchesData
+            ? cleanSell
+            : product.sellPrice,
+        wholesalePrice:
+          activeBranchId === 'br_mawan' || activeBranchId === 'br_main' || !product.branchesData
+            ? cleanWholesale
+            : product.wholesalePrice,
+        sellingPriceUpdatedAt: nowIso,
+        sellingPriceUpdatedBy: currentUserName,
+        sellingPriceHistory: nextHistory
+      };
+
+      const updatedProducts = (db.products || []).map(p => (p.id === product.id ? finalProduct : p));
+      const nextDb: AccountingDB = {
+        ...db,
+        products: updatedProducts,
+        audit: [...(db.audit || [])]
+      };
+
+      logAudit(
+        nextDb,
+        'تحديث سعر البيع',
+        `الصنف: ${product.name} | قطاعي: ${oldSellPrice} -> ${cleanSell} | جملة: ${oldWholesalePrice} -> ${cleanWholesale} | بواسطة: ${currentUserName}`
+      );
+
+      onUpdateDb(nextDb);
+      setDraftPrices(prev => {
+        const copy = { ...prev };
+        delete copy[product.id];
+        return copy;
+      });
+      setStatusBanner({
+        type: 'success',
+        text: `تم حفظ سعر بيع «${product.name}» بنجاح (${formatMoney(cleanSell, currency)}) — يسري على فواتير البيع الجديدة فقط دون تعديل أي فواتير تاريخية.`
+      });
+      setTimeout(() => setStatusBanner(null), 5000);
     });
-
-    const finalProduct: Product = {
-      ...updatedProductBranch,
-      sellPrice:
-        activeBranchId === 'br_mawan' || activeBranchId === 'br_main' || !product.branchesData
-          ? newSellPrice
-          : product.sellPrice,
-      wholesalePrice:
-        activeBranchId === 'br_mawan' || activeBranchId === 'br_main' || !product.branchesData
-          ? newWholesalePrice
-          : product.wholesalePrice,
-      sellingPriceUpdatedAt: nowIso,
-      sellingPriceUpdatedBy: currentUserName,
-      sellingPriceHistory: nextHistory
-    };
-
-    const updatedProducts = (db.products || []).map(p => (p.id === product.id ? finalProduct : p));
-    const nextDb: AccountingDB = {
-      ...db,
-      products: updatedProducts,
-      audit: [...(db.audit || [])]
-    };
-
-    logAudit(
-      nextDb,
-      'تحديث سعر البيع',
-      `الصنف: ${product.name} | قطاعي: ${oldSellPrice} -> ${newSellPrice} | جملة: ${oldWholesalePrice} -> ${newWholesalePrice} | بواسطة: ${currentUserName}`
-    );
-
-    onUpdateDb(nextDb);
-    setDraftPrices(prev => {
-      const copy = { ...prev };
-      delete copy[product.id];
-      return copy;
-    });
-    setStatusBanner({
-      type: 'success',
-      text: `تم حفظ سعر بيع «${product.name}» بنجاح (${formatMoney(newSellPrice, currency)}) — يسري على فواتير البيع الجديدة فقط دون تعديل أي فواتير تاريخية.`
-    });
-    setTimeout(() => setStatusBanner(null), 5000);
   };
 
   const requestSaveRow = (
@@ -259,8 +267,18 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
     hasVerifiedCost?: boolean,
     note: string = ''
   ) => {
-    const newSellPrice = Math.max(0, parseNum(sellRaw));
-    const newWholesalePrice = Math.max(0, parseNum(wholesaleRaw));
+    const rawSell = parseNum(sellRaw);
+    const rawWholesale = wholesaleRaw.trim() === '' ? 0 : parseNum(wholesaleRaw);
+    if (!isFiniteNonNegative(rawSell) || !isFiniteNonNegative(rawWholesale)) {
+      setStatusBanner({
+        type: 'error',
+        text: `يرجى إدخال أسعار صالحة غير سالبة للصنف «${product.name}»`
+      });
+      return;
+    }
+
+    const newSellPrice = roundMoney(rawSell);
+    const newWholesalePrice = roundMoney(rawWholesale);
 
     if (newSellPrice <= 0) {
       setStatusBanner({
@@ -616,6 +634,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
 
                 <button
                   type="button"
+                  disabled={isSubmitting}
                   onClick={() =>
                     requestSaveRow(
                       item.raw,
@@ -625,7 +644,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
                       item.hasVerifiedCost
                     )
                   }
-                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer transition-all"
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-xl text-xs font-black flex items-center justify-center gap-1.5 cursor-pointer transition-all disabled:opacity-50"
                 >
                   <Save className="w-3.5 h-3.5" />
                   <span>حفظ سعر البيع</span>
@@ -753,6 +772,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
                         <div className="flex items-center justify-center gap-1.5">
                           <button
                             type="button"
+                            disabled={isSubmitting}
                             onClick={() =>
                               requestSaveRow(
                                 item.raw,
@@ -762,7 +782,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
                                 item.hasVerifiedCost
                               )
                             }
-                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-black text-[11px] flex items-center gap-1 cursor-pointer"
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-black text-[11px] flex items-center gap-1 cursor-pointer disabled:opacity-50"
                           >
                             <Save className="w-3.5 h-3.5" />
                             <span>حفظ</span>
@@ -900,7 +920,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
               </button>
               <button
                 type="button"
-                disabled={!modalSelectedId}
+                disabled={!modalSelectedId || isSubmitting}
                 onClick={() => {
                   const sel = (db.products || []).find(p => p.id === modalSelectedId);
                   if (!sel) return;
@@ -993,6 +1013,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
               </button>
               <button
                 type="button"
+                disabled={isSubmitting}
                 onClick={() => {
                   const target = pendingConfirm;
                   setPendingConfirm(null);
@@ -1004,7 +1025,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
                     true
                   );
                 }}
-                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-black cursor-pointer"
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-black cursor-pointer disabled:opacity-50"
               >
                 اعتماد وحفظ السعر
               </button>

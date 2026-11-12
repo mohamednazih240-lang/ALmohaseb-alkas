@@ -20,9 +20,19 @@ import {
   FileSpreadsheet
 } from 'lucide-react';
 import { AccountingDB, FixedAsset, JournalEntry, JournalLine } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit } from '../services/accountingStorage';
+import {
+  formatMoney,
+  roundMoney,
+  isFinitePositive,
+  isFiniteNonNegative,
+  assertJournalBalanced,
+  generateId,
+  getTodayDate,
+  logAudit
+} from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface FixedAssetsViewProps {
   db: AccountingDB;
@@ -30,6 +40,7 @@ interface FixedAssetsViewProps {
 }
 
 export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb }) => {
+  const { isSubmitting, runWithLock } = useSubmitLock();
   const [showModal, setShowModal] = useState(false);
   const [editingAsset, setEditingAsset] = useState<FixedAsset | null>(null);
 
@@ -77,156 +88,185 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || purchaseCost <= 0) return alert('أكمل بيانات الأصل وتكلفة الشراء');
+    runWithLock(() => {
+      const cleanCost = roundMoney(Number(purchaseCost));
+      const cleanSalvage = roundMoney(Number(salvageValue) || 0);
+      const cleanLife = Math.round(Number(usefulLifeYears) || 0);
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (!code.trim() || !name.trim() || !isFinitePositive(cleanCost)) {
+        alert('أكمل بيانات الأصل وأدخل تكلفة شراء صحيحة أكبر من صفر.');
+        return;
+      }
+      if (!isFiniteNonNegative(cleanSalvage) || cleanSalvage >= cleanCost) {
+        alert('قيمة الخردة يجب أن تكون غير سالبة وأقل من تكلفة الشراء الأصلية.');
+        return;
+      }
+      if (cleanLife < 1) {
+        alert('العمر الإنتاجي يجب أن يكون سنة واحدة على الأقل.');
+        return;
+      }
 
-    if (editingAsset) {
-      const idx = updated.fixedAssets.findIndex(a => a.id === editingAsset.id);
-      if (idx !== -1) {
-        updated.fixedAssets[idx] = {
-          ...updated.fixedAssets[idx],
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+
+      if (editingAsset) {
+        const idx = updated.fixedAssets.findIndex(a => a.id === editingAsset.id);
+        if (idx !== -1) {
+          updated.fixedAssets[idx] = {
+            ...updated.fixedAssets[idx],
+            code: code.trim(),
+            name: name.trim(),
+            category,
+            purchaseDate,
+            purchaseCost: cleanCost,
+            salvageValue: cleanSalvage,
+            usefulLifeYears: cleanLife,
+            notes: notes.trim()
+          };
+        }
+        logAudit(updated, 'تعديل أصل ثابت', name.trim());
+      } else {
+        const newAsset: FixedAsset = {
+          id: generateId('ast'),
           code: code.trim(),
           name: name.trim(),
           category,
           purchaseDate,
-          purchaseCost: Number(purchaseCost),
-          salvageValue: Number(salvageValue) || 0,
-          usefulLifeYears: Number(usefulLifeYears) || 1,
+          purchaseCost: cleanCost,
+          salvageValue: cleanSalvage,
+          usefulLifeYears: cleanLife,
+          depreciationMethod: 'straight_line',
+          accumulatedDepreciation: 0,
           notes: notes.trim()
         };
+        updated.fixedAssets.push(newAsset);
+        setSelectedAssetId(newAsset.id);
+        logAudit(updated, 'إضافة أصل ثابت جديد', `${newAsset.name} - تكلفة ${newAsset.purchaseCost}`);
       }
-      logAudit(updated, 'تعديل أصل ثابت', name);
-    } else {
-      const newAsset: FixedAsset = {
-        id: generateId('ast'),
-        code: code.trim(),
-        name: name.trim(),
-        category,
-        purchaseDate,
-        purchaseCost: Number(purchaseCost),
-        salvageValue: Number(salvageValue) || 0,
-        usefulLifeYears: Number(usefulLifeYears) || 1,
-        depreciationMethod: 'straight_line',
-        accumulatedDepreciation: 0,
-        notes: notes.trim()
-      };
-      updated.fixedAssets.push(newAsset);
-      setSelectedAssetId(newAsset.id);
-      logAudit(updated, 'إضافة أصل ثابت جديد', `${newAsset.name} - تكلفة ${newAsset.purchaseCost}`);
-    }
 
-    onUpdateDb(updated);
-    setShowModal(false);
+      onUpdateDb(updated);
+      setShowModal(false);
+    });
   };
 
   const handleDelete = (id: string, astName: string) => {
-    if (!confirm(`هل أنت متأكد من حذف الأصل (${astName})؟`)) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.fixedAssets = updated.fixedAssets.filter(a => a.id !== id);
-    if (selectedAssetId === id) {
-      setSelectedAssetId(updated.fixedAssets[0]?.id || '');
-    }
-    logAudit(updated, 'حذف أصل ثابت', astName);
-    onUpdateDb(updated);
+    runWithLock(() => {
+      if (!confirm(`هل أنت متأكد من حذف الأصل (${astName})؟`)) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.fixedAssets = updated.fixedAssets.filter(a => a.id !== id);
+      if (selectedAssetId === id) {
+        setSelectedAssetId(updated.fixedAssets[0]?.id || '');
+      }
+      logAudit(updated, 'حذف أصل ثابت', astName);
+      onUpdateDb(updated);
+    });
   };
 
-  // Automated Depreciation calculation
+  // Automated Depreciation calculation (exact cent precision, capped by remaining depreciable base)
   const calculateDepreciation = (ast: FixedAsset) => {
-    const depreciableBase = Math.max(0, ast.purchaseCost - ast.salvageValue);
-    const annualDepreciation = ast.usefulLifeYears > 0 ? depreciableBase / ast.usefulLifeYears : 0;
-    const monthlyDepreciation = annualDepreciation / 12;
-    const netBookValue = Math.max(ast.salvageValue, ast.purchaseCost - ast.accumulatedDepreciation);
+    const depreciableBase = roundMoney(Math.max(0, ast.purchaseCost - ast.salvageValue));
+    const annualDepreciation = ast.usefulLifeYears > 0 ? roundMoney(depreciableBase / ast.usefulLifeYears) : 0;
+    const monthlyDepreciation = ast.usefulLifeYears > 0 ? roundMoney(depreciableBase / (ast.usefulLifeYears * 12)) : 0;
+    const netBookValue = roundMoney(Math.max(ast.salvageValue, ast.purchaseCost - ast.accumulatedDepreciation));
+    const remainingDepreciable = roundMoney(Math.max(0, depreciableBase - ast.accumulatedDepreciation));
 
     return {
       depreciableBase,
       annualDepreciation,
       monthlyDepreciation,
-      netBookValue
+      netBookValue,
+      remainingDepreciable
     };
   };
 
   // Post Automated Depreciation Entry for Selected Asset
   const handlePostDepreciation = (ast: FixedAsset, monthsToDepreciate: number = 12) => {
-    const { annualDepreciation, monthlyDepreciation, netBookValue } = calculateDepreciation(ast);
-    const amount = monthsToDepreciate === 12 ? annualDepreciation : monthlyDepreciation * monthsToDepreciate;
+    runWithLock(() => {
+      const { annualDepreciation, monthlyDepreciation, remainingDepreciable } = calculateDepreciation(ast);
+      const rawAmount = monthsToDepreciate === 12 ? annualDepreciation : roundMoney(monthlyDepreciation * monthsToDepreciate);
+      const amount = roundMoney(Math.min(remainingDepreciable, rawAmount));
 
-    if (amount <= 0 || netBookValue <= ast.salvageValue) {
-      alert('الأصل مهلك دفترياً بالكامل أو تم الوصول لقيمة الخردة.');
-      return;
-    }
-
-    const confirmMsg = `تأكيد ترحيل قيد الإهلاك:\n\n` +
-      `الأصل: ${ast.name} (${ast.code})\n` +
-      `مبلغ الإهلاك المحتسب: ${formatMoney(amount, db.settings.currency)}\n\n` +
-      `سيتم إنشاء قيد يومية مزدوج:\n` +
-      `من حـ/ مصروف إهلاك الأصول الثابتة (5401)\n` +
-      `إلى حـ/ مجمع إهلاك الأصول الثابتة (1402)`;
-
-    if (!confirm(confirmMsg)) return;
-
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const today = getTodayDate();
-    const entryId = generateId('jrn_dep');
-    const entryNumber = `DEP-${ast.code}-${Date.now().toString().slice(-4)}`;
-
-    const depExpAcc = updated.accounts.find(a => a.id === 'acc_dep_exp') || {
-      id: 'acc_dep_exp', code: '5401', name: 'مصروف إهلاك الأصول الثابتة'
-    };
-    const accumAcc = updated.accounts.find(a => a.id === 'acc_accum_dep') || {
-      id: 'acc_accum_dep', code: '1402', name: 'مجمع إهلاك الأصول الثابتة'
-    };
-
-    const lines: JournalLine[] = [
-      {
-        accountId: depExpAcc.id,
-        accountName: depExpAcc.name,
-        accountCode: depExpAcc.code,
-        debit: amount,
-        credit: 0,
-        notes: `إهلاك أصل ${ast.name} (${monthsToDepreciate} شهر)`
-      },
-      {
-        accountId: accumAcc.id,
-        accountName: accumAcc.name,
-        accountCode: accumAcc.code,
-        debit: 0,
-        credit: amount,
-        notes: `مجمع إهلاك ${ast.name}`
+      if (amount <= 0 || remainingDepreciable <= 0) {
+        alert('الأصل مهلك دفترياً بالكامل أو تم الوصول لقيمة الخردة.');
+        return;
       }
-    ];
 
-    const jEntry: JournalEntry = {
-      id: entryId,
-      number: entryNumber,
-      date: today,
-      description: `قيد إهلاك أصل ${ast.name} (${ast.code})`,
-      sourceType: 'adjustment',
-      sourceId: ast.id,
-      lines,
-      createdAt: new Date().toISOString()
-    };
-    updated.journals.push(jEntry);
+      const confirmMsg = `تأكيد ترحيل قيد الإهلاك:\n\n` +
+        `الأصل: ${ast.name} (${ast.code})\n` +
+        `مبلغ الإهلاك المحتسب: ${formatMoney(amount, db.settings.currency)}\n\n` +
+        `سيتم إنشاء قيد يومية مزدوج:\n` +
+        `من حـ/ مصروف إهلاك الأصول الثابتة (5401)\n` +
+        `إلى حـ/ مجمع إهلاك الأصول الثابتة (1402)`;
 
-    // Update asset accumulated depreciation
-    const astIdx = updated.fixedAssets.findIndex(a => a.id === ast.id);
-    if (astIdx !== -1) {
-      updated.fixedAssets[astIdx].accumulatedDepreciation += amount;
-      updated.fixedAssets[astIdx].lastDepreciationDate = today;
-    }
+      if (!confirm(confirmMsg)) return;
 
-    logAudit(updated, 'ترحيل قيد إهلاك أصل ثابت', `${ast.name} بمبلغ ${formatMoney(amount, db.settings.currency)}`);
-    onUpdateDb(updated);
-    alert('تم احتساب وترحيل قيد الإهلاك إلى دفتر اليومية ومجمع الإهلاك بنجاح.');
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const today = getTodayDate();
+      const entryId = generateId('jrn_dep');
+      const entryNumber = `DEP-${ast.code}-${Date.now().toString().slice(-4)}`;
+
+      const depExpAcc = updated.accounts.find(a => a.id === 'acc_dep_exp') || {
+        id: 'acc_dep_exp', code: '5401', name: 'مصروف إهلاك الأصول الثابتة'
+      };
+      const accumAcc = updated.accounts.find(a => a.id === 'acc_accum_dep') || {
+        id: 'acc_accum_dep', code: '1402', name: 'مجمع إهلاك الأصول الثابتة'
+      };
+
+      const lines: JournalLine[] = [
+        {
+          accountId: depExpAcc.id,
+          accountName: depExpAcc.name,
+          accountCode: depExpAcc.code,
+          debit: amount,
+          credit: 0,
+          notes: `إهلاك أصل ${ast.name} (${monthsToDepreciate} شهر)`
+        },
+        {
+          accountId: accumAcc.id,
+          accountName: accumAcc.name,
+          accountCode: accumAcc.code,
+          debit: 0,
+          credit: amount,
+          notes: `مجمع إهلاك ${ast.name}`
+        }
+      ];
+
+      const jEntry: JournalEntry = {
+        id: entryId,
+        number: entryNumber,
+        date: today,
+        description: `قيد إهلاك أصل ${ast.name} (${ast.code})`,
+        sourceType: 'adjustment',
+        sourceId: ast.id,
+        lines,
+        createdAt: new Date().toISOString()
+      };
+      const bal = assertJournalBalanced(jEntry);
+      if (!bal.balanced) {
+        alert(bal.reason || 'قيد الإهلاك غير متوازن.');
+        return;
+      }
+      updated.journals.push(jEntry);
+
+      // Update asset accumulated depreciation safely with exact rounding
+      const astIdx = updated.fixedAssets.findIndex(a => a.id === ast.id);
+      if (astIdx !== -1) {
+        updated.fixedAssets[astIdx].accumulatedDepreciation = roundMoney(updated.fixedAssets[astIdx].accumulatedDepreciation + amount);
+        updated.fixedAssets[astIdx].lastDepreciationDate = today;
+      }
+
+      logAudit(updated, 'ترحيل قيد إهلاك أصل ثابت', `${ast.name} بمبلغ ${formatMoney(amount, db.settings.currency)}`);
+      onUpdateDb(updated);
+      alert('تم احتساب وترحيل قيد الإهلاك إلى دفتر اليومية ومجمع الإهلاك بنجاح.');
+    });
   };
 
   const selectedAsset = db.fixedAssets.find(a => a.id === selectedAssetId) || db.fixedAssets[0];
   const selectedCalc = selectedAsset ? calculateDepreciation(selectedAsset) : null;
 
   // Total summary of all assets
-  const totalAssetsCost = db.fixedAssets.reduce((s, a) => s + a.purchaseCost, 0);
-  const totalAccumDep = db.fixedAssets.reduce((s, a) => s + a.accumulatedDepreciation, 0);
-  const totalNetBookValue = totalAssetsCost - totalAccumDep;
+  const totalAssetsCost = roundMoney(db.fixedAssets.reduce((s, a) => s + a.purchaseCost, 0));
+  const totalAccumDep = roundMoney(db.fixedAssets.reduce((s, a) => s + a.accumulatedDepreciation, 0));
+  const totalNetBookValue = roundMoney(totalAssetsCost - totalAccumDep);
 
   const handleDownloadPdf = async () => {
     setIsExportingPdf(true);
@@ -387,7 +427,8 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
                   </button>
                   <button
                     onClick={() => handleDelete(selectedAsset.id, selectedAsset.name)}
-                    className="p-1.5 text-rose-500 hover:text-rose-700 rounded-lg hover:bg-rose-50"
+                    disabled={isSubmitting}
+                    className="p-1.5 text-rose-500 hover:text-rose-700 disabled:opacity-50 rounded-lg hover:bg-rose-50"
                     title="حذف"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -452,14 +493,16 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
                 <div className="pt-2 flex flex-wrap items-center gap-2">
                   <button
                     onClick={() => handlePostDepreciation(selectedAsset, 12)}
-                    className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
+                    disabled={isSubmitting}
+                    className="px-4 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
                   >
                     <CheckCircle2 className="w-4 h-4" />
-                    <span>ترحيل قيد إهلاك سنوي (سنة كاملة)</span>
+                    <span>{isSubmitting ? 'جارٍ الترحيل...' : 'ترحيل قيد إهلاك سنوي (سنة كاملة)'}</span>
                   </button>
                   <button
                     onClick={() => handlePostDepreciation(selectedAsset, 1)}
-                    className="px-3.5 py-2 bg-white border border-blue-300 hover:bg-blue-50 text-blue-900 rounded-xl text-xs font-bold transition-all"
+                    disabled={isSubmitting}
+                    className="px-3.5 py-2 bg-white border border-blue-300 hover:bg-blue-50 disabled:opacity-50 text-blue-900 rounded-xl text-xs font-bold transition-all"
                   >
                     <span>ترحيل قيد إهلاك شهري (شهر واحد)</span>
                   </button>
@@ -619,9 +662,10 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold rounded-xl"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl"
                 >
-                  حفظ الأصل
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الأصل'}
                 </button>
               </div>
             </form>

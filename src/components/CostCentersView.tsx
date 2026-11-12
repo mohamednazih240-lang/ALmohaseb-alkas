@@ -20,9 +20,10 @@ import {
   Filter
 } from 'lucide-react';
 import { AccountingDB, CostCenter } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit } from '../services/accountingStorage';
+import { formatMoney, generateId, getTodayDate, logAudit, roundMoney, isFiniteNonNegative } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface CostCentersViewProps {
   db: AccountingDB;
@@ -32,6 +33,7 @@ interface CostCentersViewProps {
 export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb }) => {
   const [showModal, setShowModal] = useState(false);
   const [editingCenter, setEditingCenter] = useState<CostCenter | null>(null);
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   useModalBackHandler(showModal, () => setShowModal(false), 'cost_center_modal');
   const [selectedCenterId, setSelectedCenterId] = useState<string>(
@@ -73,53 +75,62 @@ export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return alert('أدخل اسم مركز التكلفة');
+    runWithLock(() => {
+      if (!name.trim()) return alert('أدخل اسم مركز التكلفة');
+      const cleanBudget = roundMoney(Number(budget) || 0);
+      if (!isFiniteNonNegative(cleanBudget)) {
+        alert('الميزانية التقديرية يجب أن تكون رقماً غير سالب.');
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
-    if (editingCenter) {
-      const idx = updated.costCenters.findIndex(c => c.id === editingCenter.id);
-      if (idx !== -1) {
-        updated.costCenters[idx] = {
-          ...updated.costCenters[idx],
-          code: code.trim(),
+      if (editingCenter) {
+        const idx = updated.costCenters.findIndex(c => c.id === editingCenter.id);
+        if (idx !== -1) {
+          updated.costCenters[idx] = {
+            ...updated.costCenters[idx],
+            code: code.trim(),
+            name: name.trim(),
+            type,
+            budget: cleanBudget,
+            manager: manager.trim(),
+            notes: notes.trim()
+          };
+        }
+        logAudit(updated, 'تعديل مركز تكلفة', name);
+      } else {
+        const newCC: CostCenter = {
+          id: generateId('cc'),
+          code: code.trim() || `CC-${Date.now().toString().slice(-3)}`,
           name: name.trim(),
           type,
-          budget: Number(budget) || 0,
+          budget: cleanBudget,
           manager: manager.trim(),
-          notes: notes.trim()
+          notes: notes.trim(),
+          status: 'نشط'
         };
+        updated.costCenters.push(newCC);
+        setSelectedCenterId(newCC.id);
+        logAudit(updated, 'إضافة مركز تكلفة جديد', newCC.name);
       }
-      logAudit(updated, 'تعديل مركز تكلفة', name);
-    } else {
-      const newCC: CostCenter = {
-        id: generateId('cc'),
-        code: code.trim() || `CC-${Date.now().toString().slice(-3)}`,
-        name: name.trim(),
-        type,
-        budget: Number(budget) || 0,
-        manager: manager.trim(),
-        notes: notes.trim(),
-        status: 'نشط'
-      };
-      updated.costCenters.push(newCC);
-      setSelectedCenterId(newCC.id);
-      logAudit(updated, 'إضافة مركز تكلفة جديد', newCC.name);
-    }
 
-    onUpdateDb(updated);
-    setShowModal(false);
+      onUpdateDb(updated);
+      setShowModal(false);
+    });
   };
 
   const handleDelete = (id: string, ccName: string) => {
-    if (!confirm(`هل أنت متأكد من حذف مركز التكلفة (${ccName})؟`)) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.costCenters = updated.costCenters.filter(c => c.id !== id);
-    if (selectedCenterId === id) {
-      setSelectedCenterId(updated.costCenters[0]?.id || '');
-    }
-    logAudit(updated, 'حذف مركز تكلفة', ccName);
-    onUpdateDb(updated);
+    runWithLock(() => {
+      if (!confirm(`هل أنت متأكد من حذف مركز التكلفة (${ccName})؟`)) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.costCenters = updated.costCenters.filter(c => c.id !== id);
+      if (selectedCenterId === id) {
+        setSelectedCenterId(updated.costCenters[0]?.id || '');
+      }
+      logAudit(updated, 'حذف مركز تكلفة', ccName);
+      onUpdateDb(updated);
+    });
   };
 
   // Compute Cost Center P&L and utilization
@@ -548,9 +559,10 @@ export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-xl"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl"
                 >
-                  {editingCenter ? 'حفظ التعديلات' : 'إضافة المركز'}
+                  {isSubmitting ? 'جارٍ الحفظ...' : editingCenter ? 'حفظ التعديلات' : 'إضافة المركز'}
                 </button>
               </div>
             </form>

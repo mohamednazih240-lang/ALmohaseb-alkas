@@ -26,9 +26,10 @@ import {
   Invoice,
   StockMovement
 } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit } from '../services/accountingStorage';
+import { formatMoney, generateId, getTodayDate, logAudit, roundQty, roundMoney } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface ProcurementViewProps {
   db: AccountingDB;
@@ -49,6 +50,7 @@ export const ProcurementView: React.FC<ProcurementViewProps> = ({
 
   useModalBackHandler(showGRNModal, () => setShowGRNModal(false), 'grn_modal');
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   // Purchase Orders from db.orders
   const purchaseOrders = db.orders.filter(o => o.type === 'purchase');
@@ -134,73 +136,75 @@ export const ProcurementView: React.FC<ProcurementViewProps> = ({
   // Create GRN (Goods Received Note) from selected PO
   const handleCreateGRNFromPO = () => {
     if (!selectedPO) return;
+    runWithLock(() => {
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const nextGRNNum = updated.settings.nextGRN || 7001;
+      const grnNumber = `GRN-${nextGRNNum}`;
+      const defaultWh = updated.warehouses.find(w => w.isDefault) || updated.warehouses[0];
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const nextGRNNum = updated.settings.nextGRN || 7001;
-    const grnNumber = `GRN-${nextGRNNum}`;
-    const defaultWh = updated.warehouses.find(w => w.isDefault) || updated.warehouses[0];
-
-    const grnItems: GoodsReceivedItem[] = selectedPO.items.map(it => ({
-      productId: it.productId,
-      productCode: it.productCode,
-      productName: it.productName,
-      unit: it.unit,
-      orderedQty: it.qty,
-      receivedQty: it.qty,
-      acceptedQty: it.qty,
-      unitCost: it.unitPrice
-    }));
-
-    const newGRN: GoodsReceivedNote = {
-      id: generateId('grn'),
-      number: grnNumber,
-      date: getTodayDate(),
-      orderId: selectedPO.id,
-      orderNumber: selectedPO.number,
-      supplierId: selectedPO.partyId || 'supp_1',
-      supplierName: selectedPO.partyName,
-      warehouseId: defaultWh.id,
-      warehouseName: defaultWh.name,
-      items: grnItems,
-      status: 'معتمد ومستلم',
-      receivedBy: db.currentUser?.name || 'أمين المخزن'
-    };
-
-    // Update stock levels for each item
-    selectedPO.items.forEach(it => {
-      const prod = updated.products.find(p => p.id === it.productId);
-      if (prod) {
-        prod.currentQty += Number(it.qty);
-      }
-      const sm: StockMovement = {
-        id: generateId('sm'),
-        date: getTodayDate(),
+      const grnItems: GoodsReceivedItem[] = selectedPO.items.map(it => ({
         productId: it.productId,
+        productCode: it.productCode,
         productName: it.productName,
+        unit: it.unit,
+        orderedQty: roundQty(it.qty),
+        receivedQty: roundQty(it.qty),
+        acceptedQty: roundQty(it.qty),
+        unitCost: roundMoney(it.unitPrice)
+      }));
+
+      const newGRN: GoodsReceivedNote = {
+        id: generateId('grn'),
+        number: grnNumber,
+        date: getTodayDate(),
+        orderId: selectedPO.id,
+        orderNumber: selectedPO.number,
+        supplierId: selectedPO.partyId || 'supp_1',
+        supplierName: selectedPO.partyName,
         warehouseId: defaultWh.id,
         warehouseName: defaultWh.name,
-        qtyChange: Number(it.qty),
-        balanceAfter: (prod?.currentQty || 0),
-        unitCost: it.unitPrice,
-        type: 'purchase',
-        refNumber: grnNumber,
-        sourceId: newGRN.id
+        items: grnItems,
+        status: 'معتمد ومستلم',
+        receivedBy: db.currentUser?.name || 'أمين المخزن'
       };
-      updated.stockMovements.push(sm);
+
+      // Update stock levels for each item
+      selectedPO.items.forEach(it => {
+        const cleanQty = roundQty(Number(it.qty) || 0);
+        const prod = updated.products.find(p => p.id === it.productId);
+        if (prod) {
+          prod.currentQty = roundQty((Number(prod.currentQty) || 0) + cleanQty);
+        }
+        const sm: StockMovement = {
+          id: generateId('sm'),
+          date: getTodayDate(),
+          productId: it.productId,
+          productName: it.productName,
+          warehouseId: defaultWh.id,
+          warehouseName: defaultWh.name,
+          qtyChange: cleanQty,
+          balanceAfter: roundQty(prod?.currentQty || 0),
+          unitCost: roundMoney(it.unitPrice),
+          type: 'purchase',
+          refNumber: grnNumber,
+          sourceId: newGRN.id
+        };
+        updated.stockMovements.push(sm);
+      });
+
+      updated.goodsReceivedNotes.push(newGRN);
+      updated.settings.nextGRN = nextGRNNum + 1;
+
+      // Update PO status to Completed
+      const poIdx = updated.orders.findIndex(o => o.id === selectedPO.id);
+      if (poIdx !== -1) {
+        updated.orders[poIdx].status = 'مكتمل';
+      }
+
+      logAudit(updated, 'استلام بضاعة مخزنية (GRN)', `تم استلام أمر الشراء ${selectedPO.number} بموجب الإذن ${grnNumber}`);
+      onUpdateDb(updated);
+      alert(`تم إصدار إذن استلام المخزن ${grnNumber} وتحديث أرصدة المخازن بنجاح.`);
     });
-
-    updated.goodsReceivedNotes.push(newGRN);
-    updated.settings.nextGRN = nextGRNNum + 1;
-
-    // Update PO status to Completed
-    const poIdx = updated.orders.findIndex(o => o.id === selectedPO.id);
-    if (poIdx !== -1) {
-      updated.orders[poIdx].status = 'مكتمل';
-    }
-
-    logAudit(updated, 'استلام بضاعة مخزنية (GRN)', `تم استلام أمر الشراء ${selectedPO.number} بموجب الإذن ${grnNumber}`);
-    onUpdateDb(updated);
-    alert(`تم إصدار إذن استلام المخزن ${grnNumber} وتحديث أرصدة المخازن بنجاح.`);
   };
 
   const handleDownloadPdf = async () => {
@@ -378,11 +382,12 @@ export const ProcurementView: React.FC<ProcurementViewProps> = ({
 
                   {linkedGRNs.length === 0 && (
                     <button
+                      disabled={isSubmitting}
                       onClick={handleCreateGRNFromPO}
-                      className="px-4 py-2 bg-teal-700 hover:bg-teal-800 text-white text-xs font-bold rounded-xl shadow-xs transition-all flex items-center gap-1.5"
+                      className="px-4 py-2 bg-teal-700 hover:bg-teal-800 text-white text-xs font-bold rounded-xl shadow-xs transition-all flex items-center gap-1.5 disabled:opacity-50"
                     >
                       <PackageCheck className="w-4 h-4" />
-                      <span>إصدار محضر استلام مخزني (GRN) وتحديث الأرصدة</span>
+                      <span>{isSubmitting ? 'جاري الإصدار...' : 'إصدار محضر استلام مخزني (GRN) وتحديث الأرصدة'}</span>
                     </button>
                   )}
                 </div>

@@ -19,9 +19,10 @@ import {
   ReturnInvoice,
   Invoice
 } from '../types/accounting';
-import { formatMoney, logAudit, getProductForBranch, updateProductBranchData, calculateCustomerBalance, calculateSupplierBalance } from '../services/accountingStorage';
+import { formatMoney, logAudit, getProductForBranch, updateProductBranchData, calculateCustomerBalance, calculateSupplierBalance, roundQty } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
   UniversalPrintModal,
   MovementPrintBlock,
@@ -57,6 +58,7 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   const [returnAutoPrint, setReturnAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('سند مرتجع');
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   // Mobile back button: exit returns editor to list
   useModalBackHandler(activeTab === 'editor', () => {
@@ -210,41 +212,43 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   };
 
   const handleDeleteReturn = (ret: ReturnInvoice) => {
-    const isManager = db.currentUser?.role === 'مدير';
-    if (!isManager) {
-      alert('عذراً، لا يمكن حذف أي حركة أو سند مرتجع إلا من قِبل المدير العام فقط.');
-      return;
-    }
+    runWithLock(() => {
+      const isManager = db.currentUser?.role === 'مدير';
+      if (!isManager) {
+        alert('عذراً، لا يمكن حذف أي حركة أو سند مرتجع إلا من قِبل المدير العام فقط.');
+        return;
+      }
 
-    if (!confirm(`هل أنت متأكد من حذف المرتجع "${ret.number}" وعكس آثاره؟`)) return;
+      if (!confirm(`هل أنت متأكد من حذف المرتجع "${ret.number}" وعكس آثاره؟`)) return;
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const prod = updated.products.find(p => p.id === ret.productId);
-    if (prod) {
-      const bId = ret.branchId || 'br_main';
-      const bp = getProductForBranch(prod, bId);
-      const newQty = bp.currentQty + (ret.type === 'sale' ? -ret.qty : ret.qty);
-      const prodUpdated = updateProductBranchData(prod, bId, { currentQty: newQty });
-      const pIdx = updated.products.findIndex(p => p.id === ret.productId);
-      if (pIdx > -1) updated.products[pIdx] = prodUpdated;
-    }
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const prod = updated.products.find(p => p.id === ret.productId);
+      if (prod) {
+        const bId = ret.branchId || 'br_main';
+        const bp = getProductForBranch(prod, bId);
+        const newQty = roundQty(bp.currentQty + (ret.type === 'sale' ? -ret.qty : ret.qty));
+        const prodUpdated = updateProductBranchData(prod, bId, { currentQty: newQty });
+        const pIdx = updated.products.findIndex(p => p.id === ret.productId);
+        if (pIdx > -1) updated.products[pIdx] = prodUpdated;
+      }
 
-    updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.sourceId !== ret.id);
-    const retKind = ret.type === 'sale' ? 'sale_return' : 'purchase_return';
-    updated.treasury = (updated.treasury || []).filter(tr => tr.sourceId !== ret.id && !(tr.sourceType === retKind && ret.number && tr.description?.includes(`رقم ${ret.number}`)));
-    updated.journals = (updated.journals || []).filter(j => j.sourceId !== ret.id);
-    updated.returns = (updated.returns || []).filter(r => r.id !== ret.id);
-    updated.invoices = (updated.invoices || []).filter(i => i.id !== ret.id && !(i.number === ret.number && i.invoiceKind === retKind));
+      updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.sourceId !== ret.id);
+      const retKind = ret.type === 'sale' ? 'sale_return' : 'purchase_return';
+      updated.treasury = (updated.treasury || []).filter(tr => tr.sourceId !== ret.id && !(tr.sourceType === retKind && ret.number && tr.description?.includes(`رقم ${ret.number}`)));
+      updated.journals = (updated.journals || []).filter(j => j.sourceId !== ret.id);
+      updated.returns = (updated.returns || []).filter(r => r.id !== ret.id);
+      updated.invoices = (updated.invoices || []).filter(i => i.id !== ret.id && !(i.number === ret.number && i.invoiceKind === retKind));
 
-    if (ret.partyId) {
-      const cust = updated.customers.find(c => c.id === ret.partyId);
-      if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
-      const supp = updated.suppliers.find(s => s.id === ret.partyId);
-      if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
-    }
+      if (ret.partyId) {
+        const cust = updated.customers.find(c => c.id === ret.partyId);
+        if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
+        const supp = updated.suppliers.find(s => s.id === ret.partyId);
+        if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
+      }
 
-    logAudit(updated, 'حذف مرتجع', `تم حذف المرتجع ${ret.number} وعكس قيوده ومخزونه والأرصدة بالكامل`);
-    onUpdateDb(updated);
+      logAudit(updated, 'حذف مرتجع', `تم حذف المرتجع ${ret.number} وعكس قيوده ومخزونه والأرصدة بالكامل`);
+      onUpdateDb(updated);
+    });
   };
 
   // If in Editor Mode: clean full screen editor without redundant top banners
@@ -481,8 +485,9 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
                   <div className="flex items-center gap-1">
                     {db.currentUser?.role === 'مدير' && (
                       <button
+                        disabled={isSubmitting}
                         onClick={() => handleDeleteReturn(r)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer disabled:opacity-50"
                         title="حذف المرتجع وعكس القيود والمخزن (صلاحية المدير العام)"
                       >
                         <Trash2 className="w-4 h-4" />

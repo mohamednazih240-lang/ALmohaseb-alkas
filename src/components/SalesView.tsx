@@ -39,6 +39,7 @@ import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
   UniversalPrintModal,
   MovementPrintBlock,
@@ -72,6 +73,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
   const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
   const isManager = db.currentUser?.role === 'مدير';
   const [branchFilter, setBranchFilter] = useState<'current' | 'all'>(isManager ? 'all' : 'current');
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   const [activeTab, setActiveTab] = useState<'editor' | 'list'>(initialTab);
   const [salesSection, setSalesSection] = useState<'sales' | 'returns'>('sales');
@@ -343,17 +345,19 @@ export const SalesView: React.FC<SalesViewProps> = ({
   };
 
   const handleDeleteInvoice = (inv: Invoice) => {
-    if (!canDeleteSales) {
-      alert('عذراً، ليس لديك صلاحية لحذف فواتير المبيعات.');
-      return;
-    }
+    runWithLock(() => {
+      if (!canDeleteSales) {
+        alert('عذراً، ليس لديك صلاحية لحذف فواتير المبيعات.');
+        return;
+      }
 
-    if (!confirm(`هل أنت متأكد من حذف فاتورة البيع "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) {
-      return;
-    }
+      if (!confirm(`هل أنت متأكد من حذف فاتورة البيع "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) {
+        return;
+      }
 
-    const updated = deleteInvoiceAndRevert(db, inv);
-    onUpdateDb(updated);
+      const updated = deleteInvoiceAndRevert(db, inv);
+      onUpdateDb(updated);
+    });
   };
 
   // If in Editor Mode: render the invoice page cleanly without redundant top spacing or banners
@@ -848,8 +852,9 @@ export const SalesView: React.FC<SalesViewProps> = ({
 
                     {canDeleteSales && (
                       <button
+                        disabled={isSubmitting}
                         onClick={() => handleDeleteInvoice(inv)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer disabled:opacity-50"
                         title="حذف الفاتورة وعكس القيود"
                       >
                         <Trash2 className="w-3.5 h-3.5" />

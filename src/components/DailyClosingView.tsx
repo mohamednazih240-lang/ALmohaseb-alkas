@@ -30,8 +30,11 @@ import {
   generateId,
   getTodayDate,
   logAudit,
-  getProductForBranch
+  getProductForBranch,
+  roundMoney,
+  isFiniteNonNegative
 } from '../services/accountingStorage';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
   UniversalPrintModal,
   MovementPrintBlock,
@@ -54,6 +57,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
   const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
   const [historyBranchFilter, setHistoryBranchFilter] = useState<'current' | 'all'>('current');
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   const [activeTab, setActiveTab] = useState<'current' | 'history'>('current');
   const [selectedDate, setSelectedDate] = useState<string>(getTodayDate());
@@ -196,81 +200,108 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
   // Save current shift closing
   const handleSaveClosing = () => {
-    if (!confirm(`هل أنت متأكد من حفظ واعتماد تقفيل "${shiftName}" لتاريخ ${selectedDate}؟`)) {
-      return;
-    }
+    runWithLock(() => {
+      const cleanStarting = roundMoney(startingCash);
+      const cleanActual = roundMoney(actualCash);
+      if (!isFiniteNonNegative(cleanStarting) || !isFiniteNonNegative(cleanActual)) {
+        alert('رصيد البداية والنقد الفعلي يجب أن يكونا قيماً غير سالبة.');
+        return;
+      }
+      if (!shiftName.trim()) {
+        alert('يرجى كتابة اسم أو رقم الوردية.');
+        return;
+      }
+      if (!confirm(`هل أنت متأكد من حفظ واعتماد تقفيل "${shiftName}" لتاريخ ${selectedDate}؟`)) {
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    if (!updated.dailyClosings) updated.dailyClosings = [];
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (!updated.dailyClosings) updated.dailyClosings = [];
 
-    const newClosing: DailyClosing = {
-      id: generateId('cls'),
-      shiftNumber: shiftName,
-      date: selectedDate,
-      time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
-      openedBy: db.currentUser?.name || 'مدير النظام',
-      closedBy: db.currentUser?.name || 'مدير النظام',
-      startingCash,
-      cashIn: liveStats.totalCashIn,
-      cashOut: liveStats.totalCashOut,
-      salesTotal: liveStats.salesTotal,
-      returnsTotal: liveStats.returnsTotal,
-      netSales: liveStats.netSales,
-      cogs: liveStats.cogs,
-      grossProfit: liveStats.grossProfit,
-      profitMargin: liveStats.profitMargin,
-      actualCash,
-      expectedCash: liveStats.expectedCash,
-      difference: liveStats.diff,
-      status: 'مغلق',
-      notes: shiftNotes,
-      branchId: targetBranchId,
-      branchName: currentBranch.name,
-      createdAt: new Date().toISOString()
-    };
+      const expected = roundMoney(cleanStarting + liveStats.totalCashIn - liveStats.totalCashOut);
+      const diff = roundMoney(cleanActual - expected);
 
-    updated.dailyClosings.unshift(newClosing);
-    logAudit(updated, 'تقفيل يومية ووردية', `تم تقفيل ${shiftName} لفرع ${currentBranch.name} بتاريخ ${selectedDate} بنسبة أرباح ${liveStats.profitMargin.toFixed(1)}%`);
+      const newClosing: DailyClosing = {
+        id: generateId('cls'),
+        shiftNumber: shiftName.trim(),
+        date: selectedDate,
+        time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
+        openedBy: db.currentUser?.name || 'مدير النظام',
+        closedBy: db.currentUser?.name || 'مدير النظام',
+        startingCash: cleanStarting,
+        cashIn: roundMoney(liveStats.totalCashIn),
+        cashOut: roundMoney(liveStats.totalCashOut),
+        salesTotal: roundMoney(liveStats.salesTotal),
+        returnsTotal: roundMoney(liveStats.returnsTotal),
+        netSales: roundMoney(liveStats.netSales),
+        cogs: roundMoney(liveStats.cogs),
+        grossProfit: roundMoney(liveStats.grossProfit),
+        profitMargin: Number(liveStats.profitMargin.toFixed(2)),
+        actualCash: cleanActual,
+        expectedCash: expected,
+        difference: diff,
+        status: 'مغلق',
+        notes: shiftNotes,
+        branchId: targetBranchId,
+        branchName: currentBranch.name,
+        createdAt: new Date().toISOString()
+      };
 
-    onUpdateDb(updated);
-    alert('تم حفظ تقفيل الوردية بنجاح!');
-    setActiveTab('history');
+      updated.dailyClosings.unshift(newClosing);
+      logAudit(updated, 'تقفيل يومية ووردية', `تم تقفيل ${shiftName} لفرع ${currentBranch.name} بتاريخ ${selectedDate} بنسبة أرباح ${liveStats.profitMargin.toFixed(1)}%`);
+
+      onUpdateDb(updated);
+      alert('تم حفظ تقفيل الوردية بنجاح!');
+      setActiveTab('history');
+    });
   };
 
   // Update existing closing
   const handleUpdateClosing = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingClosing) return;
+    runWithLock(() => {
+      if (!editingClosing) return;
+      const cleanActual = roundMoney(editingClosing.actualCash);
+      const cleanExpected = roundMoney(editingClosing.expectedCash);
+      if (!isFiniteNonNegative(cleanActual) || !isFiniteNonNegative(cleanExpected)) {
+        alert('قيم النقد الفعلي والمتوقع يجب أن تكون أرقاماً غير سالبة.');
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    if (!updated.dailyClosings) updated.dailyClosings = [];
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (!updated.dailyClosings) updated.dailyClosings = [];
 
-    const idx = updated.dailyClosings.findIndex(c => c.id === editingClosing.id);
-    if (idx !== -1) {
-      updated.dailyClosings[idx] = {
-        ...editingClosing,
-        difference: editingClosing.actualCash - editingClosing.expectedCash
-      };
-      logAudit(updated, 'تعديل تقفيل يومية', `تم تعديل بيانات التقفيل ${editingClosing.shiftNumber}`);
-      onUpdateDb(updated);
-      setEditingClosing(null);
-      alert('تم تحديث التقفيل بنجاح');
-    }
+      const idx = updated.dailyClosings.findIndex(c => c.id === editingClosing.id);
+      if (idx !== -1) {
+        updated.dailyClosings[idx] = {
+          ...editingClosing,
+          actualCash: cleanActual,
+          expectedCash: cleanExpected,
+          difference: roundMoney(cleanActual - cleanExpected)
+        };
+        logAudit(updated, 'تعديل تقفيل يومية', `تم تعديل بيانات التقفيل ${editingClosing.shiftNumber}`);
+        onUpdateDb(updated);
+        setEditingClosing(null);
+        alert('تم تحديث التقفيل بنجاح');
+      }
+    });
   };
 
   // Delete closing
   const handleDeleteClosing = (closing: DailyClosing) => {
-    if (!confirm(`هل أنت متأكد من حذف سجل تقفيل الوردية "${closing.shiftNumber}" المؤرخ في ${closing.date}؟`)) {
-      return;
-    }
+    runWithLock(() => {
+      if (!confirm(`هل أنت متأكد من حذف سجل تقفيل الوردية "${closing.shiftNumber}" المؤرخ في ${closing.date}؟`)) {
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    if (!updated.dailyClosings) updated.dailyClosings = [];
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (!updated.dailyClosings) updated.dailyClosings = [];
 
-    updated.dailyClosings = updated.dailyClosings.filter(c => c.id !== closing.id);
-    logAudit(updated, 'حذف تقفيل يومية', `تم حذف سجل التقفيل ${closing.shiftNumber}`);
+      updated.dailyClosings = updated.dailyClosings.filter(c => c.id !== closing.id);
+      logAudit(updated, 'حذف تقفيل يومية', `تم حذف سجل التقفيل ${closing.shiftNumber}`);
 
-    onUpdateDb(updated);
+      onUpdateDb(updated);
+    });
   };
 
   // Print single closing
@@ -654,11 +685,12 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
                 <button
                   type="button"
+                  disabled={isSubmitting}
                   onClick={handleSaveClosing}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
                 >
                   <ShieldCheck className="w-4 h-4" />
-                  <span>اعتماد وإغلاق الوردية واليومية</span>
+                  <span>{isSubmitting ? 'جارٍ الإغلاق...' : 'اعتماد وإغلاق الوردية واليومية'}</span>
                 </button>
               </div>
             </div>
@@ -889,9 +921,10 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold shadow-2xs"
+                  disabled={isSubmitting}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg font-bold shadow-2xs"
                 >
-                  حفظ التعديلات
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ التعديلات'}
                 </button>
               </div>
             </form>

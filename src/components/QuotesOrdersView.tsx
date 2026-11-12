@@ -25,13 +25,14 @@ import {
   formatMoney,
   generateId,
   getTodayDate,
-  createInvoiceJournal,
   logAudit,
-  getProductForBranch,
-  updateProductBranchData
+  roundMoney,
+  getNextUniqueInvoiceNumber
 } from '../services/accountingStorage';
+import { postInvoiceTransaction } from '../services/accountingEngine';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface QuotesOrdersViewProps {
   db: AccountingDB;
@@ -56,6 +57,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
   const [activeTab, setActiveTab] = useState<'quotes' | 'orders'>(initialTab);
   const [viewSubTab, setViewSubTab] = useState<'editor' | 'list'>('list');
   const [showOrderModal, setShowOrderModal] = useState(false);
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   // Mobile back buttons: exit quote editor or close order modal
   useModalBackHandler(viewSubTab === 'editor', () => {
@@ -102,157 +104,125 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
     setShowOrderModal(true);
   };
 
-  // Convert Quote to Sale Invoice Directly
+  // Convert Quote to Sale Invoice Directly via central atomic accountingEngine
   const handleConvertQuoteToSale = (q: Quote) => {
-    if (q.status === 'تم التحويل') {
-      alert('تم تحويل عرض السعر هذا إلى فاتورة بالفعل مسبقاً.');
-      return;
-    }
-
-    if (!confirm(`هل ترغب في تحويل عرض السعر "${q.number}" إلى فاتورة بيع فعلية وترحيلها للحسابات والمخزن؟`)) {
-      return;
-    }
-
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const invNumber = `INV-${String(updated.settings.nextSale).padStart(6, '0')}`;
-    updated.settings.nextSale += 1;
-
-    const invId = generateId('inv');
-    const warehouseId = updated.warehouses[0]?.id || 'wh_main';
-    const wh = updated.warehouses.find(w => w.id === warehouseId);
-
-    const branchIdForSale = q.branchId || targetBranchId;
-    const branchForSale = branches.find(b => b.id === branchIdForSale) || currentBranch;
-
-    const newInvoice: Invoice = {
-      id: invId,
-      number: invNumber,
-      type: 'sale',
-      date: getTodayDate(),
-      partyId: q.partyId,
-      partyName: q.partyName,
-      warehouseId,
-      paymentMethod: 'نقدي',
-      subtotal: q.total,
-      discount: 0,
-      tax: 0,
-      total: q.total,
-      paid: q.total,
-      remaining: 0,
-      status: 'مدفوع',
-      notes: `تم توليدها تلقائياً من عرض السعر رقم ${q.number}`,
-      branchId: branchIdForSale,
-      branchName: branchForSale.name,
-      items: JSON.parse(JSON.stringify(q.items))
-    };
-
-    // Deduct branch-isolated stock
-    newInvoice.items.forEach(item => {
-      const prod = updated.products.find(p => p.id === item.productId);
-      if (prod) {
-        const bp = getProductForBranch(prod, branchIdForSale);
-        const newQty = bp.currentQty - item.qty;
-        const prodUpdated = updateProductBranchData(prod, branchIdForSale, { currentQty: newQty });
-        const pIdx = updated.products.findIndex(p => p.id === prod.id);
-        if (pIdx > -1) updated.products[pIdx] = prodUpdated;
-
-        updated.stockMovements.unshift({
-          id: generateId('sm'),
-          date: newInvoice.date,
-          productId: prod.id,
-          productName: prod.name,
-          warehouseId,
-          warehouseName: wh ? wh.name : 'المخزن الرئيسي',
-          qtyChange: -item.qty,
-          balanceAfter: newQty,
-          unitCost: item.costPrice,
-          type: 'sale',
-          refNumber: newInvoice.number,
-          sourceId: invId,
-          branchId: branchIdForSale,
-          branchName: branchForSale.name
-        });
+    runWithLock(() => {
+      if (q.status === 'تم التحويل') {
+        alert('تم تحويل عرض السعر هذا إلى فاتورة بالفعل مسبقاً.');
+        return;
       }
+
+      if (!q.items || q.items.length === 0) {
+        alert('عرض السعر فارغ ولا يحتوي على أصناف.');
+        return;
+      }
+
+      if (!confirm(`هل ترغب في تحويل عرض السعر "${q.number}" إلى فاتورة بيع فعلية وترحيلها للحسابات والمخزن؟`)) {
+        return;
+      }
+
+      const workingDb = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const { number: invNumber } = getNextUniqueInvoiceNumber(workingDb, 'sale');
+      const invId = generateId('inv');
+      const warehouseId = workingDb.warehouses[0]?.id || 'wh_main';
+
+      const branchIdForSale = q.branchId || targetBranchId;
+      const branchForSale = branches.find(b => b.id === branchIdForSale) || currentBranch;
+      const cleanTotal = roundMoney(q.total);
+
+      const newInvoice: Invoice = {
+        id: invId,
+        number: invNumber,
+        type: 'sale',
+        invoiceKind: 'sale',
+        date: getTodayDate(),
+        partyId: q.partyId,
+        partyName: q.partyName,
+        warehouseId,
+        paymentMethod: 'نقدي',
+        payments: [{ method: 'نقدي', amount: cleanTotal }],
+        subtotal: cleanTotal,
+        discount: 0,
+        tax: 0,
+        total: cleanTotal,
+        paid: cleanTotal,
+        remaining: 0,
+        status: 'مدفوع',
+        notes: `تم توليدها تلقائياً من عرض السعر رقم ${q.number}`,
+        branchId: branchIdForSale,
+        branchName: branchForSale.name,
+        items: JSON.parse(JSON.stringify(q.items))
+      };
+
+      const res = postInvoiceTransaction(workingDb, newInvoice, workingDb.currentUser?.name || 'مدير النظام');
+      if (!res.success) {
+        alert(res.message || 'تعذر تحويل عرض السعر إلى فاتورة بيع بسبب فشل التحقق المحاسبي.');
+        return;
+      }
+
+      const updated = res.db;
+      const currentQuote = updated.quotes.find(item => item.id === q.id);
+      if (currentQuote) currentQuote.status = 'تم التحويل';
+
+      logAudit(updated, 'تحويل عرض سعر إلى بيع', `تم تحويل ${q.number} إلى فاتورة ${newInvoice.number}`);
+
+      onUpdateDb(updated);
+      alert(`تم تحويل عرض السعر بنجاح إلى فاتورة بيع رقم ${newInvoice.number} وتم قيدها في الخزينة والمخزن.`);
     });
-
-    // Treasury entry
-    updated.treasury.unshift({
-      id: generateId('tr'),
-      date: newInvoice.date,
-      direction: 'in',
-      amount: newInvoice.total,
-      method: 'نقدي',
-      description: `تحصيل فاتورة بيع ${newInvoice.number} (عرض سعر ${q.number})`,
-      sourceType: 'sale',
-      sourceId: invId,
-      branchId: branchIdForSale,
-      branchName: branchForSale.name
-    });
-
-    // Journal
-    const journal = createInvoiceJournal(updated, newInvoice);
-    newInvoice.journalEntryId = journal.id;
-    updated.journals.unshift(journal);
-
-    // Save invoice
-    updated.invoices.unshift(newInvoice);
-
-    // Mark quote as converted
-    const currentQuote = updated.quotes.find(item => item.id === q.id);
-    if (currentQuote) currentQuote.status = 'تم التحويل';
-
-    logAudit(updated, 'تحويل عرض سعر إلى بيع', `تم تحويل ${q.number} إلى فاتورة ${newInvoice.number}`);
-
-    onUpdateDb(updated);
-    alert(`تم تحويل عرض السعر بنجاح إلى فاتورة بيع رقم ${newInvoice.number} وتم قيدها في الخزينة والمخزن.`);
   };
 
   const handleSaveOrder = (e: React.FormEvent) => {
     e.preventDefault();
-    if (orderItems.length === 0) return alert('أضف بنوداً للأمر');
+    runWithLock(() => {
+      if (orderItems.length === 0) return alert('أضف بنوداً للأمر');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const list = orderType === 'sale' ? updated.customers : updated.suppliers;
-    const party = list.find(p => p.id === orderPartyId);
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const list = orderType === 'sale' ? updated.customers : updated.suppliers;
+      const party = list.find(p => p.id === orderPartyId);
 
-    const oNumber = `ORD-${String(updated.settings.nextOrder).padStart(6, '0')}`;
-    updated.settings.nextOrder += 1;
+      const oNumber = `ORD-${String(updated.settings.nextOrder).padStart(6, '0')}`;
+      updated.settings.nextOrder += 1;
 
-    const total = orderItems.reduce((s, it) => s + it.total, 0);
+      const total = roundMoney(orderItems.reduce((s, it) => s + (Number(it.total) || 0), 0));
 
-    const newOrder: Order = {
-      id: generateId('ord'),
-      number: oNumber,
-      type: orderType,
-      date: orderDate,
-      partyId: orderPartyId,
-      partyName: party ? party.name : 'طرف تجاري',
-      items: orderItems,
-      total,
-      status: 'قيد التنفيذ',
-      notes: orderNotes,
-      branchId: targetBranchId,
-      branchName: currentBranch.name
-    };
+      const newOrder: Order = {
+        id: generateId('ord'),
+        number: oNumber,
+        type: orderType,
+        date: orderDate,
+        partyId: orderPartyId,
+        partyName: party ? party.name : 'طرف تجاري',
+        items: orderItems,
+        total,
+        status: 'قيد التنفيذ',
+        notes: orderNotes,
+        branchId: targetBranchId,
+        branchName: currentBranch.name
+      };
 
-    updated.orders.unshift(newOrder);
-    logAudit(updated, 'إنشاء أمر توريد/بيع', `أمر ${newOrder.number} (${orderType === 'sale' ? 'بيع' : 'شراء'}) لفرع ${currentBranch.name}`);
-    onUpdateDb(updated);
-    setShowOrderModal(false);
+      updated.orders.unshift(newOrder);
+      logAudit(updated, 'إنشاء أمر توريد/بيع', `أمر ${newOrder.number} (${orderType === 'sale' ? 'بيع' : 'شراء'}) لفرع ${currentBranch.name}`);
+      onUpdateDb(updated);
+      setShowOrderModal(false);
+    });
   };
 
   const handleDeleteQuote = (id: string) => {
-    if (!confirm('هل ترغب في حذف عرض السعر؟')) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.quotes = updated.quotes.filter(q => q.id !== id);
-    onUpdateDb(updated);
+    runWithLock(() => {
+      if (!confirm('هل ترغب في حذف عرض السعر؟')) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.quotes = updated.quotes.filter(q => q.id !== id);
+      onUpdateDb(updated);
+    });
   };
 
   const handleDeleteOrder = (id: string) => {
-    if (!confirm('هل ترغب في حذف الأمر؟')) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.orders = updated.orders.filter(o => o.id !== id);
-    onUpdateDb(updated);
+    runWithLock(() => {
+      if (!confirm('هل ترغب في حذف الأمر؟')) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.orders = updated.orders.filter(o => o.id !== id);
+      onUpdateDb(updated);
+    });
   };
 
   // If in Editor Mode for Quotes: render clean invoice editor with close X button
@@ -407,11 +377,12 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
                   <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2">
                     {q.status !== 'تم التحويل' ? (
                       <button
+                        disabled={isSubmitting}
                         onClick={() => handleConvertQuoteToSale(q)}
-                        className="px-2.5 py-1.5 bg-black hover:bg-slate-800 text-white rounded-md text-xs font-bold flex items-center gap-1 shadow-2xs"
+                        className="px-2.5 py-1.5 bg-black hover:bg-slate-800 disabled:opacity-50 text-white rounded-md text-xs font-bold flex items-center gap-1 shadow-2xs"
                       >
                         <ArrowRightCircle className="w-3.5 h-3.5" />
-                        <span>تحويل لفاتورة بيع</span>
+                        <span>{isSubmitting ? 'جارٍ التحويل...' : 'تحويل لفاتورة بيع'}</span>
                       </button>
                     ) : (
                       <span className="text-[11px] text-purple-700 font-bold">✓ تم التحويل لفاتورة</span>
@@ -584,9 +555,10 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-black text-white rounded-lg text-xs font-bold"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-black disabled:opacity-50 text-white rounded-lg text-xs font-bold"
                 >
-                  حفظ الأمر
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الأمر'}
                 </button>
               </div>
             </form>

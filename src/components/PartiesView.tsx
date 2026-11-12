@@ -30,10 +30,13 @@ import {
   calculateSupplierBalance,
   logAudit,
   isDuplicateParty,
-  getNextUniquePartyCode
+  getNextUniquePartyCode,
+  roundMoney,
+  isFiniteNonNegative
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
   UniversalPrintModal,
   MovementPrintBlock,
@@ -60,6 +63,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
   const [sortBy, setSortBy] = useState<'name_asc' | 'balance_desc' | 'balance_asc'>('name_asc');
   const [showModal, setShowModal] = useState(false);
   const [editingParty, setEditingParty] = useState<Party | null>(null);
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   // Statement modal state
   const [statementParty, setStatementParty] = useState<Party | null>(null);
@@ -157,89 +161,104 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
   const handleSaveParty = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanName = name.trim();
-    if (!cleanName) return alert('يرجى كتابة الاسم');
+    runWithLock(() => {
+      const cleanName = name.trim();
+      if (!cleanName) return alert('يرجى كتابة الاسم');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const targetArray = isCustomer ? updated.customers : updated.suppliers;
+      const rawOpening = Number(openingBalance);
+      const rawLimit = Number(creditLimit);
+      if (!Number.isFinite(rawOpening)) {
+        return alert('يرجى إدخال قيمة رقمية صالحة للرصيد الافتتاحي.');
+      }
+      if (!isFiniteNonNegative(rawLimit)) {
+        return alert('يرجى إدخال قيمة صالحة غير سالبة للحد الائتماني.');
+      }
+      const cleanOpeningBalance = roundMoney(rawOpening);
+      const cleanCreditLimit = roundMoney(rawLimit);
 
-    // Strict duplicate prevention for party name and phone
-    const dupCheck = isDuplicateParty(
-      updated,
-      isCustomer ? 'customer' : 'supplier',
-      cleanName,
-      phone.trim(),
-      editingParty?.id
-    );
-    if (dupCheck.isDuplicate) {
-      alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
-      return;
-    }
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const targetArray = isCustomer ? updated.customers : updated.suppliers;
 
-    if (editingParty) {
-      const idx = targetArray.findIndex(p => p.id === editingParty.id);
-      if (idx !== -1) {
-        targetArray[idx] = {
-          ...targetArray[idx],
+      // Strict duplicate prevention for party name and phone
+      const dupCheck = isDuplicateParty(
+        updated,
+        isCustomer ? 'customer' : 'supplier',
+        cleanName,
+        phone.trim(),
+        editingParty?.id
+      );
+      if (dupCheck.isDuplicate) {
+        alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+        return;
+      }
+
+      if (editingParty) {
+        const idx = targetArray.findIndex(p => p.id === editingParty.id);
+        if (idx !== -1) {
+          targetArray[idx] = {
+            ...targetArray[idx],
+            name: cleanName,
+            phone: phone.trim(),
+            address: address.trim(),
+            openingBalance: cleanOpeningBalance,
+            creditLimit: cleanCreditLimit,
+            taxNumber: taxNumber.trim(),
+            notes: notes.trim()
+          };
+          logAudit(updated, `تعديل بيانات ${isCustomer ? 'عميل' : 'مورد'}`, `الاسم: ${cleanName}`);
+        }
+      } else {
+        const uniqueCode = getNextUniquePartyCode(updated, isCustomer ? 'customer' : 'supplier');
+        const newParty: Party = {
+          id: generateId(isCustomer ? 'cust' : 'supp'),
+          code: uniqueCode,
+          type,
           name: cleanName,
           phone: phone.trim(),
           address: address.trim(),
-          openingBalance,
-          creditLimit,
+          openingBalance: cleanOpeningBalance,
+          creditLimit: cleanCreditLimit,
           taxNumber: taxNumber.trim(),
           notes: notes.trim()
         };
-        logAudit(updated, `تعديل بيانات ${isCustomer ? 'عميل' : 'مورد'}`, `الاسم: ${cleanName}`);
+        targetArray.push(newParty);
+        logAudit(updated, `إضافة ${isCustomer ? 'عميل' : 'مورد'} جديد`, `الاسم: ${cleanName} (كود: ${uniqueCode})`);
       }
-    } else {
-      const uniqueCode = getNextUniquePartyCode(updated, isCustomer ? 'customer' : 'supplier');
-      const newParty: Party = {
-        id: generateId(isCustomer ? 'cust' : 'supp'),
-        code: uniqueCode,
-        type,
-        name: cleanName,
-        phone: phone.trim(),
-        address: address.trim(),
-        openingBalance,
-        creditLimit,
-        taxNumber: taxNumber.trim(),
-        notes: notes.trim()
-      };
-      targetArray.push(newParty);
-      logAudit(updated, `إضافة ${isCustomer ? 'عميل' : 'مورد'} جديد`, `الاسم: ${cleanName} (كود: ${uniqueCode})`);
-    }
 
-    onUpdateDb(updated);
-    setShowModal(false);
+      onUpdateDb(updated);
+      setShowModal(false);
+    });
   };
 
   const handleDeleteParty = (partyId: string, partyName: string) => {
-    const isManager = db.currentUser?.role === 'مدير';
-    if (!isManager) {
-      alert('عذراً، لا يمكن حذف أي طرف أو حساب إلا من قِبل المدير العام فقط.');
-      return;
-    }
+    runWithLock(() => {
+      const isManager = db.currentUser?.role === 'مدير';
+      if (!isManager) {
+        alert('عذراً، لا يمكن حذف أي طرف أو حساب إلا من قِبل المدير العام فقط.');
+        return;
+      }
 
-    const hasInvoices = db.invoices.some(i => i.partyId === partyId);
-    const hasVouchers = db.vouchers.some(v => v.partyId === partyId);
+      const hasInvoices = db.invoices.some(i => i.partyId === partyId);
+      const hasVouchers = db.vouchers.some(v => v.partyId === partyId);
 
-    if (hasInvoices || hasVouchers) {
-      alert('لا يمكن حذف هذه الجهة لوجود فواتير أو سندات مالية مسجلة باسمها.');
-      return;
-    }
+      if (hasInvoices || hasVouchers) {
+        alert('لا يمكن حذف هذه الجهة لوجود فواتير أو سندات مالية مسجلة باسمها.');
+        return;
+      }
 
-    if (!confirm(`هل أنت متأكد من حذف ${isCustomer ? 'العميل' : 'المورد'} "${partyName}"؟`)) {
-      return;
-    }
+      if (!confirm(`هل أنت متأكد من حذف ${isCustomer ? 'العميل' : 'المورد'} "${partyName}"؟`)) {
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    if (isCustomer) {
-      updated.customers = updated.customers.filter(c => c.id !== partyId);
-    } else {
-      updated.suppliers = updated.suppliers.filter(s => s.id !== partyId);
-    }
-    logAudit(updated, `حذف ${isCustomer ? 'عميل' : 'مورد'}`, `تم حذف ${partyName}`);
-    onUpdateDb(updated);
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (isCustomer) {
+        updated.customers = updated.customers.filter(c => c.id !== partyId);
+      } else {
+        updated.suppliers = updated.suppliers.filter(s => s.id !== partyId);
+      }
+      logAudit(updated, `حذف ${isCustomer ? 'عميل' : 'مورد'}`, `تم حذف ${partyName}`);
+      onUpdateDb(updated);
+    });
   };
 
   // Build Statement of Account ledger rows
@@ -773,8 +792,9 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
                     {db.currentUser?.role === 'مدير' && (
                       <button
+                        disabled={isSubmitting}
                         onClick={() => handleDeleteParty(p.id, p.name)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors disabled:opacity-50"
                         title="حذف الطرف (صلاحية المدير العام)"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -904,9 +924,10 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-black text-white rounded-lg text-xs font-bold"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-black text-white rounded-lg text-xs font-bold disabled:opacity-50"
                 >
-                  حفظ البيانات
+                  {isSubmitting ? 'جاري الحفظ...' : 'حفظ البيانات'}
                 </button>
               </div>
             </form>

@@ -11,6 +11,13 @@ import {
 } from '../types/accounting';
 import {
   formatMoney,
+  roundMoney,
+  roundQty,
+  toCents,
+  fromCents,
+  isFiniteNonNegative,
+  isFinitePositive,
+  assertJournalBalanced,
   logAudit,
   calculateCustomerBalance,
   calculateSupplierBalance,
@@ -99,6 +106,73 @@ export interface AccountingEngineResult {
 }
 
 /**
+ * Post-mutation pre-commit invariant verification.
+ * Ensures every affected journal balances strictly (debit === credit in cents),
+ * invoice totals satisfy total === paid + remaining, and no NaN/Infinity values exist.
+ */
+export function validateDbTransactionIntegrity(
+  nextDb: AccountingDB,
+  impactedJournalIds: string[] = [],
+  impactedInvoiceIds: string[] = [],
+  impactedVoucherIds: string[] = []
+): { ok: boolean; error?: string } {
+  if (!nextDb) {
+    return { ok: false, error: 'بيانات قاعدة البيانات غير صالحة.' };
+  }
+
+  for (const jId of impactedJournalIds) {
+    const j = (nextDb.journals || []).find(entry => entry.id === jId);
+    if (!j) {
+      return { ok: false, error: `القيد المحاسبي (${jId}) مفقود بعد الترحيل.` };
+    }
+    const bal = assertJournalBalanced(j);
+    if (!bal.balanced) {
+      return { ok: false, error: bal.reason || 'القيد المحاسبي غير متوازن.' };
+    }
+  }
+
+  for (const invId of impactedInvoiceIds) {
+    const inv = (nextDb.invoices || []).find(i => i.id === invId);
+    if (!inv) {
+      return { ok: false, error: `الفاتورة (${invId}) مفقودة بعد الترحيل.` };
+    }
+    if (
+      !isFiniteNonNegative(inv.total) ||
+      !isFiniteNonNegative(inv.paid) ||
+      !isFiniteNonNegative(inv.remaining)
+    ) {
+      return { ok: false, error: `قيم مالية غير صالحة في الفاتورة #${inv.number}.` };
+    }
+    if (inv.invoiceKind !== 'quote') {
+      const diffCents = Math.abs(toCents(inv.total) - (toCents(inv.paid) + toCents(inv.remaining)));
+      if (diffCents > 1) {
+        return {
+          ok: false,
+          error: `خلل في تطابق إجمالي الفاتورة #${inv.number} (الإجمالي ${inv.total} != المدفوع ${inv.paid} + المتبقي ${inv.remaining}).`
+        };
+      }
+    }
+    for (const item of inv.items || []) {
+      if (!isFinitePositive(item.qty) || !isFiniteNonNegative(item.unitPrice) || !isFiniteNonNegative(item.total)) {
+        return { ok: false, error: `كمية أو سعر غير صالح للصنف "${item.productName}" في الفاتورة #${inv.number}.` };
+      }
+    }
+  }
+
+  for (const vId of impactedVoucherIds) {
+    const v = (nextDb.vouchers || []).find(item => item.id === vId);
+    if (!v) {
+      return { ok: false, error: `السند (${vId}) مفقود بعد الترحيل.` };
+    }
+    if (!isFinitePositive(v.amount)) {
+      return { ok: false, error: `مبلغ السند #${v.number} غير صالح.` };
+    }
+  }
+
+  return { ok: true };
+}
+
+/**
  * 1. Process & Post Invoice (Sales or Purchases) Atomically
  * - Posts/updates invoice
  * - Deterministic stock movements (increases for purchases, decreases for sales)
@@ -114,6 +188,87 @@ export function postInvoiceTransaction(
   invoice: Invoice,
   operatorName: string = 'مدير النظام'
 ): AccountingEngineResult {
+  if (!invoice || !invoice.id || !invoice.number) {
+    return { success: false, db, message: '⚠️ بيانات الفاتورة الأساسية (الرقم أو المعرف) غير مكتملة.' };
+  }
+
+  // Deep-clone invoice so caller's state object is NEVER mutated if validation fails
+  const workingInvoice = JSON.parse(JSON.stringify(invoice)) as Invoice;
+
+  if (!workingInvoice.items || workingInvoice.items.length === 0) {
+    return { success: false, db, message: '⚠️ لا يمكن ترحيل فاتورة بدون أصناف.' };
+  }
+
+  // Validate numeric fields & normalize decimal precision on items & header BEFORE mutating DB
+  for (const it of workingInvoice.items) {
+    const rawQty = Number(it.qty);
+    const rawPrice = Number(it.unitPrice);
+    const rawDisc = Number(it.discount ?? 0);
+    if (!isFinitePositive(rawQty)) {
+      return { success: false, db, message: `⚠️ الكمية غير صالحة للصنف "${it.productName || 'غير معروف'}". يجب أن تكون أكبر من صفر.` };
+    }
+    if (!isFiniteNonNegative(rawPrice)) {
+      return { success: false, db, message: `⚠️ السعر غير صالح للصنف "${it.productName || 'غير معروف'}".` };
+    }
+    if (!isFiniteNonNegative(rawDisc)) {
+      return { success: false, db, message: `⚠️ الخصم غير صالح للصنف "${it.productName || 'غير معروف'}".` };
+    }
+    it.qty = roundQty(rawQty);
+    it.unitPrice = roundMoney(rawPrice);
+    it.discount = roundMoney(rawDisc);
+    const lineGross = roundMoney(it.qty * it.unitPrice);
+    if (toCents(it.discount) > toCents(lineGross)) {
+      return { success: false, db, message: `⚠️ خصم الصنف "${it.productName}" يتجاوز إجمالي السطر.` };
+    }
+    it.total = roundMoney(lineGross - it.discount);
+  }
+
+  workingInvoice.subtotal = roundMoney(Number(workingInvoice.subtotal ?? workingInvoice.items.reduce((s, x) => s + x.total, 0)));
+  workingInvoice.discount = roundMoney(Number(workingInvoice.discount ?? 0));
+  workingInvoice.tax = roundMoney(Number(workingInvoice.tax ?? 0));
+  workingInvoice.extraIncomeVal = roundMoney(Number(workingInvoice.extraIncomeVal ?? 0));
+  workingInvoice.total = roundMoney(Number(workingInvoice.total ?? 0));
+
+  if (
+    !isFiniteNonNegative(workingInvoice.subtotal) ||
+    !isFiniteNonNegative(workingInvoice.discount) ||
+    !isFiniteNonNegative(workingInvoice.tax) ||
+    !isFiniteNonNegative(workingInvoice.extraIncomeVal) ||
+    !isFiniteNonNegative(workingInvoice.total)
+  ) {
+    return { success: false, db, message: '⚠️ توجد قيم مالية غير صالحة أو سالبة في إجماليات الفاتورة.' };
+  }
+
+  if (toCents(workingInvoice.discount) > toCents(workingInvoice.subtotal)) {
+    return { success: false, db, message: '⚠️ قيمة الخصم العام لا يمكن أن تتجاوز المجموع الفرعي للأصناف.' };
+  }
+
+  if (workingInvoice.paymentMethod === 'آجل') {
+    workingInvoice.paid = 0;
+    workingInvoice.remaining = workingInvoice.total;
+    workingInvoice.payments = [];
+  } else {
+    const rawPaid = Number(workingInvoice.paid ?? 0);
+    if (!isFiniteNonNegative(rawPaid)) {
+      return { success: false, db, message: '⚠️ المبلغ المدفوع غير صالح.' };
+    }
+    if (toCents(rawPaid) > toCents(workingInvoice.total) + 1) {
+      return {
+        success: false,
+        db,
+        message: `⚠️ المبلغ المدفوع (${rawPaid.toFixed(2)}) يتجاوز إجمالي الفاتورة (${workingInvoice.total.toFixed(2)}).`
+      };
+    }
+    workingInvoice.paid = roundMoney(Math.min(workingInvoice.total, rawPaid));
+    workingInvoice.remaining = roundMoney(Math.max(0, workingInvoice.total - workingInvoice.paid));
+    if (Array.isArray(workingInvoice.payments)) {
+      workingInvoice.payments = workingInvoice.payments
+        .filter(p => p && p.method !== 'آجل' && isFinitePositive(Number(p.amount)))
+        .map(p => ({ ...p, amount: roundMoney(Number(p.amount)) }));
+    }
+  }
+  workingInvoice.status = workingInvoice.paid <= 0 ? 'آجل' : workingInvoice.remaining <= 0 ? 'مدفوع' : 'جزئي';
+
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
   if (!updated.invoices) updated.invoices = [];
   if (!updated.vouchers) updated.vouchers = [];
@@ -122,14 +277,14 @@ export function postInvoiceTransaction(
   if (!updated.journals) updated.journals = [];
   if (!updated.products) updated.products = [];
 
-  const invoiceId = invoice.id;
-  const invoiceNumber = invoice.number;
-  const isPurchase = invoice.type === 'purchase' || invoice.invoiceKind === 'purchase';
-  const isSale = invoice.type === 'sale' || invoice.invoiceKind === 'sale' || invoice.invoiceKind === 'wholesale';
-  const isSaleReturn = invoice.invoiceKind === 'sale_return';
-  const isPurchaseReturn = invoice.invoiceKind === 'purchase_return';
-  const branchId = invoice.branchId || 'br_mawan';
-  const warehouseId = invoice.warehouseId || updated.warehouses[0]?.id || 'wh_mawan';
+  const invoiceId = workingInvoice.id;
+  const invoiceNumber = workingInvoice.number;
+  const isPurchase = workingInvoice.type === 'purchase' || workingInvoice.invoiceKind === 'purchase';
+  const isSale = workingInvoice.type === 'sale' || workingInvoice.invoiceKind === 'sale' || workingInvoice.invoiceKind === 'wholesale';
+  const isSaleReturn = workingInvoice.invoiceKind === 'sale_return';
+  const isPurchaseReturn = workingInvoice.invoiceKind === 'purchase_return';
+  const branchId = workingInvoice.branchId || 'br_mawan';
+  const warehouseId = workingInvoice.warehouseId || updated.warehouses[0]?.id || 'wh_mawan';
 
   const expectedSmType = isSaleReturn
     ? 'sale_return'
@@ -143,19 +298,19 @@ export function postInvoiceTransaction(
     : `فاتورة مبيعات رقم ${invoiceNumber}`;
 
   // Guarantee strictly monotonic createdAt on same-date operations so FIFO preserves exact event order
-  if (!invoice.createdAt) {
+  if (!workingInvoice.createdAt) {
     const maxExistingMs = updated.invoices.reduce((mx, i) => {
       const t = i.createdAt ? Date.parse(i.createdAt) : 0;
       return Number.isFinite(t) && t > mx ? t : mx;
     }, 0);
     const nextMs = Math.max(Date.now(), maxExistingMs + 1);
-    invoice.createdAt = new Date(nextMs).toISOString();
+    workingInvoice.createdAt = new Date(nextMs).toISOString();
   }
 
   // 1. Remove previous linked items if updating an existing invoice to prevent stale orphaned records
   const previousInvIdx = (() => {
     const byId = updated.invoices.findIndex(i => i.id === invoiceId);
-    return byId > -1 ? byId : updated.invoices.findIndex(i => i.number === invoiceNumber && i.type === invoice.type);
+    return byId > -1 ? byId : updated.invoices.findIndex(i => i.number === invoiceNumber && i.type === workingInvoice.type);
   })();
   if (previousInvIdx > -1) {
     const prev = updated.invoices[previousInvIdx];
@@ -164,10 +319,10 @@ export function postInvoiceTransaction(
       if (prod) {
         const bp = getProductForBranch(prod, prev.branchId || branchId);
         let revertedQty = bp.currentQty;
-        if (isSale) revertedQty += oldItem.qty;
-        else if (isPurchase) revertedQty -= oldItem.qty;
-        else if (isSaleReturn) revertedQty -= oldItem.qty;
-        else if (isPurchaseReturn) revertedQty += oldItem.qty;
+        if (isSale) revertedQty = roundQty(revertedQty + oldItem.qty);
+        else if (isPurchase) revertedQty = roundQty(revertedQty - oldItem.qty);
+        else if (isSaleReturn) revertedQty = roundQty(revertedQty - oldItem.qty);
+        else if (isPurchaseReturn) revertedQty = roundQty(revertedQty + oldItem.qty);
 
         const updatedProd = updateProductBranchData(prod, prev.branchId || branchId, { currentQty: revertedQty });
         const pIdx = updated.products.findIndex(p => p.id === prod.id);
@@ -187,9 +342,9 @@ export function postInvoiceTransaction(
     });
 
     updated.journals = updated.journals.filter(j => j.sourceId !== invoiceId && j.id !== prev.journalEntryId);
-    updated.invoices[previousInvIdx] = invoice;
+    updated.invoices[previousInvIdx] = workingInvoice;
   } else {
-    updated.invoices.unshift(invoice);
+    updated.invoices.unshift(workingInvoice);
   }
 
   // Pre-build FIFO ledger EXCLUDING this invoice so sales pull exact FIFO batch layers chronologically
@@ -197,7 +352,7 @@ export function postInvoiceTransaction(
 
   // 2. Validate & process stock movements + catalog updates
   const wh = updated.warehouses.find(w => w.id === warehouseId) || updated.warehouses[0];
-  for (const item of invoice.items || []) {
+  for (const item of workingInvoice.items || []) {
     const matchRes = matchProductStrictly(updated, {
       id: item.productId,
       code: item.productCode,
@@ -207,7 +362,7 @@ export function postInvoiceTransaction(
     let prod = matchRes.exactMatch;
 
     // Rule: Sales & Sale Returns MUST use existing catalog items — block phantom creation
-    if (!prod && (isSale || isSaleReturn || invoice.invoiceKind === 'quote')) {
+    if (!prod && (isSale || isSaleReturn || workingInvoice.invoiceKind === 'quote')) {
       return {
         success: false,
         db,
@@ -218,7 +373,7 @@ export function postInvoiceTransaction(
     // Purchases: create new catalog item ONLY when strictly new (no auto-generated selling markups)
     if (!prod && item.productName && item.productName.trim()) {
       const newCode = item.productCode || `P-${100 + updated.products.length + 1}`;
-      const unitBuy = isPurchase ? (Number(item.unitPrice) || 0) : 0;
+      const unitBuy = isPurchase ? roundMoney(Number(item.unitPrice) || 0) : 0;
       prod = {
         id: (item.productId && item.productId.startsWith('prod_')) ? item.productId : `prod_${cleanIdPart(item.productName)}_${Date.now().toString(36)}`,
         name: item.productName.trim(),
@@ -259,7 +414,7 @@ export function postInvoiceTransaction(
 
       if (isSale) {
         qtyChange = -item.qty;
-        newQty -= item.qty;
+        newQty = roundQty(newQty - item.qty);
         const sim = priorFifoLedger!.simulateSaleFifoCost(prod.id, prod.name, item.qty);
         if (sim.hasVerifiedCost && sim.effectiveUnitCost !== undefined) {
           item.costPrice = Number(sim.effectiveUnitCost.toFixed(4));
@@ -272,17 +427,17 @@ export function postInvoiceTransaction(
         }
       } else if (isPurchase) {
         qtyChange = item.qty;
-        newBuyPrice = Number(item.unitPrice) || 0;
-        newQty += item.qty;
+        newBuyPrice = roundMoney(Number(item.unitPrice) || 0);
+        newQty = roundQty(newQty + item.qty);
         item.costPrice = newBuyPrice;
         item.hasVerifiedCost = newBuyPrice > 0;
         item.uncoveredQty = 0;
       } else if (isSaleReturn) {
         qtyChange = item.qty;
-        newQty += item.qty;
+        newQty = roundQty(newQty + item.qty);
       } else if (isPurchaseReturn) {
         qtyChange = -item.qty;
-        newQty -= item.qty;
+        newQty = roundQty(newQty - item.qty);
       }
 
       const updatedProd = updateProductBranchData(prod, branchId, {
@@ -296,7 +451,7 @@ export function postInvoiceTransaction(
       const deterministicSmId = getDeterministicStockMovementId(invoiceId, prod.id);
       const smPayload: StockMovement = {
         id: deterministicSmId,
-        date: invoice.date,
+        date: workingInvoice.date,
         productId: prod.id,
         productName: prod.name,
         warehouseId,
@@ -305,10 +460,10 @@ export function postInvoiceTransaction(
         balanceAfter: newQty,
         unitCost: isSale ? (item.hasVerifiedCost ? item.costPrice : 0) : (item.costPrice || item.unitPrice),
         type: (isSale ? 'sale' : isPurchase ? 'purchase' : isSaleReturn ? 'sale_return' : 'purchase_return') as any,
-        refNumber: invoice.number,
+        refNumber: workingInvoice.number,
         sourceId: invoiceId,
         branchId,
-        branchName: invoice.branchName || 'الفرع الرئيسي'
+        branchName: workingInvoice.branchName || 'الفرع الرئيسي'
       };
 
       const existingSmIdx = updated.stockMovements.findIndex(sm => sm.id === deterministicSmId);
@@ -321,40 +476,41 @@ export function postInvoiceTransaction(
   }
 
   // 3. Process Treasury Entries & Linked Vouchers (IDEMPOTENT & DETERMINISTIC)
-  const finalPaid = Number(invoice.paid) || 0;
+  const finalPaid = roundMoney(Number(workingInvoice.paid) || 0);
   const voucherType: 'receipt' | 'payment' = (isSale || isPurchaseReturn) ? 'receipt' : 'payment';
   const trDirection: 'in' | 'out' = (isPurchase || isSaleReturn) ? 'out' : 'in';
 
   if (finalPaid > 0) {
-    const paymentRows = (invoice.payments && invoice.payments.length > 0)
-      ? invoice.payments
-      : [{ method: invoice.paymentMethod || 'نقدي', amount: finalPaid }];
+    const paymentRows = (workingInvoice.payments && workingInvoice.payments.length > 0)
+      ? workingInvoice.payments
+      : [{ method: workingInvoice.paymentMethod || 'نقدي', amount: finalPaid }];
 
     paymentRows.forEach((pLine, idx) => {
-      if (pLine.amount > 0 && pLine.method !== 'آجل') {
+      const lineAmt = roundMoney(Number(pLine.amount) || 0);
+      if (lineAmt > 0 && pLine.method !== 'آجل') {
         // 3.1 Single deterministic treasury entry
         const deterministicTrId = getDeterministicTreasuryId(
-          isPurchase ? 'purchase' : 'sale',
+          expectedSmType,
           invoiceId,
           idx,
           trDirection
         );
 
         const trDescription = isPurchase
-          ? `سداد فاتورة مشتريات رقم ${invoiceNumber} (${invoice.partyName}) عبر ${pLine.method}`
-          : `تحصيل فاتورة مبيعات رقم ${invoiceNumber} (${invoice.partyName}) عبر ${pLine.method}`;
+          ? `سداد فاتورة مشتريات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`
+          : `تحصيل فاتورة مبيعات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`;
 
         const trEntry: TreasuryEntry = {
           id: deterministicTrId,
-          date: invoice.date,
+          date: workingInvoice.date,
           direction: trDirection,
-          amount: pLine.amount,
+          amount: lineAmt,
           method: pLine.method,
           description: trDescription,
-          sourceType: isPurchase ? 'purchase' : 'sale',
+          sourceType: expectedSmType,
           sourceId: invoiceId,
           branchId,
-          branchName: invoice.branchName || 'الفرع الرئيسي'
+          branchName: workingInvoice.branchName || 'الفرع الرئيسي'
         };
 
         const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId);
@@ -371,7 +527,7 @@ export function postInvoiceTransaction(
     const manualInstallmentsPaid = updated.vouchers
       .filter(v => v.invoiceId === invoiceId && !isAutoV(v))
       .reduce((s, v) => s + (Number(v.amount) || 0), 0);
-    const autoPaidPortion = Math.max(0, Number((finalPaid - manualInstallmentsPaid).toFixed(2)));
+    const autoPaidPortion = roundMoney(Math.max(0, finalPaid - manualInstallmentsPaid));
 
     const deterministicVoucherId = getDeterministicVoucherId(invoiceId, 0, voucherType);
     if (autoPaidPortion > 0) {
@@ -384,20 +540,20 @@ export function postInvoiceTransaction(
       );
 
       const voucherDesc = voucherType === 'receipt'
-        ? `سند قبض مقابل فاتورة مبيعات رقم ${invoiceNumber} (${invoice.partyName})`
-        : `سند صرف مقابل فاتورة مشتريات رقم ${invoiceNumber} (${invoice.partyName})`;
+        ? `سند قبض مقابل فاتورة مبيعات رقم ${invoiceNumber} (${workingInvoice.partyName})`
+        : `سند صرف مقابل فاتورة مشتريات رقم ${invoiceNumber} (${workingInvoice.partyName})`;
 
       if (linkedVoucher) {
         linkedVoucher.id = deterministicVoucherId;
         linkedVoucher.type = voucherType;
         linkedVoucher.amount = autoPaidPortion;
-        linkedVoucher.date = invoice.date;
-        linkedVoucher.partyId = invoice.partyId;
-        linkedVoucher.partyName = invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
-        linkedVoucher.paymentMethod = invoice.paymentMethod || 'نقدي';
+        linkedVoucher.date = workingInvoice.date;
+        linkedVoucher.partyId = workingInvoice.partyId;
+        linkedVoucher.partyName = workingInvoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
+        linkedVoucher.paymentMethod = workingInvoice.paymentMethod || 'نقدي';
         linkedVoucher.description = voucherDesc;
         linkedVoucher.branchId = branchId;
-        linkedVoucher.branchName = invoice.branchName || 'الفرع الرئيسي';
+        linkedVoucher.branchName = workingInvoice.branchName || 'الفرع الرئيسي';
         linkedVoucher.invoiceId = invoiceId;
         linkedVoucher.referenceNumber = invoiceNumber;
         linkedVoucher.isAutoFromInvoice = true;
@@ -412,19 +568,19 @@ export function postInvoiceTransaction(
           id: deterministicVoucherId,
           number: vNum,
           type: voucherType,
-          date: invoice.date,
-          partyId: invoice.partyId,
-          partyName: invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام'),
+          date: workingInvoice.date,
+          partyId: workingInvoice.partyId,
+          partyName: workingInvoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام'),
           amount: autoPaidPortion,
-          paymentMethod: invoice.paymentMethod || 'نقدي',
+          paymentMethod: workingInvoice.paymentMethod || 'نقدي',
           description: voucherDesc,
           referenceNumber: invoiceNumber,
           invoiceId,
           isAutoFromInvoice: true,
           branchId,
-          branchName: invoice.branchName || 'الفرع الرئيسي',
-          createdAt: invoice.createdAt || new Date().toISOString(),
-          createdBy: invoice.createdBy || operatorName
+          branchName: workingInvoice.branchName || 'الفرع الرئيسي',
+          createdAt: workingInvoice.createdAt || new Date().toISOString(),
+          createdBy: workingInvoice.createdBy || operatorName
         };
         updated.vouchers.unshift(linkedVoucher);
       }
@@ -445,10 +601,10 @@ export function postInvoiceTransaction(
 
   // 4. Create/update balanced double-entry journal entry
   const deterministicJournalId = getDeterministicJournalId(isPurchase ? 'purchase' : 'sale', invoiceId);
-  const freshJournal = createInvoiceJournal(updated, invoice);
+  const freshJournal = createInvoiceJournal(updated, workingInvoice);
   freshJournal.id = deterministicJournalId;
   freshJournal.sourceId = invoiceId;
-  invoice.journalEntryId = deterministicJournalId;
+  workingInvoice.journalEntryId = deterministicJournalId;
 
   const existingJournalIdx = updated.journals.findIndex(j => j.id === deterministicJournalId || j.sourceId === invoiceId);
   if (existingJournalIdx > -1) {
@@ -457,21 +613,35 @@ export function postInvoiceTransaction(
     updated.journals.unshift(freshJournal);
   }
 
+  // Keep synced copy of workingInvoice in updated.invoices
+  const targetInvIdx = updated.invoices.findIndex(i => i.id === invoiceId);
+  if (targetInvIdx > -1) updated.invoices[targetInvIdx] = workingInvoice;
+
   // 5. Update party balance
-  if (invoice.partyId) {
+  if (workingInvoice.partyId) {
     if (isSale) {
-      const cust = updated.customers.find(c => c.id === invoice.partyId);
+      const cust = updated.customers.find(c => c.id === workingInvoice.partyId);
       if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
     } else {
-      const supp = updated.suppliers.find(s => s.id === invoice.partyId);
+      const supp = updated.suppliers.find(s => s.id === workingInvoice.partyId);
       if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
     }
+  }
+
+  // 6. Atomic Pre-Commit Verification & Rollback Guard
+  const integrity = validateDbTransactionIntegrity(updated, [deterministicJournalId], [invoiceId]);
+  if (!integrity.ok) {
+    return {
+      success: false,
+      db,
+      message: `⚠️ تم إلغاء الترحيل تلقائياً (Rollback) لحماية توازن الحسابات: ${integrity.error}`
+    };
   }
 
   logAudit(
     updated,
     previousInvIdx > -1 ? 'تعديل وترحيل فاتورة' : 'إنشاء وترحيل فاتورة',
-    `فاتورة ${isPurchase ? 'مشتريات' : 'مبيعات'} رقم ${invoiceNumber} بمبلغ ${formatMoney(invoice.total, updated.settings.currency)} (مدفوع: ${finalPaid})`
+    `فاتورة ${isPurchase ? 'مشتريات' : 'مبيعات'} رقم ${invoiceNumber} بمبلغ ${formatMoney(workingInvoice.total, updated.settings.currency)} (مدفوع: ${finalPaid})`
   );
 
   return {
@@ -490,6 +660,20 @@ export function postManualVoucherTransaction(
   voucher: Voucher,
   operatorName: string = 'مدير النظام'
 ): AccountingEngineResult {
+  if (!voucher || !voucher.id || !voucher.number) {
+    return { success: false, db, message: '⚠️ بيانات السند الأساسية غير مكتملة.' };
+  }
+  const cleanAmount = roundMoney(Number(voucher.amount));
+  if (!isFinitePositive(cleanAmount)) {
+    return { success: false, db, message: '⚠️ مبلغ السند يجب أن يكون رقماً موجباً أكبر من صفر.' };
+  }
+  if (!voucher.partyId && !voucher.partyName?.trim()) {
+    return { success: false, db, message: '⚠️ يرجى تحديد العميل أو المورد المرتبط بالسند.' };
+  }
+  if (voucher.paymentMethod === 'آجل') {
+    return { success: false, db, message: '⚠️ سندات القبض والصرف النقدي/البنكي تتطلب وسيلة دفع فعلية (نقدي/تحويل/محفظة).' };
+  }
+
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
   if (!updated.vouchers) updated.vouchers = [];
   if (!updated.treasury) updated.treasury = [];
@@ -504,7 +688,8 @@ export function postManualVoucherTransaction(
   const prevVoucher = existingVIdx > -1 ? { ...updated.vouchers[existingVIdx] } : null;
 
   const voucherToSave: Voucher = {
-    ...voucher,
+    ...(JSON.parse(JSON.stringify(voucher)) as Voucher),
+    amount: cleanAmount,
     isManualInstallment: voucher.isAutoFromInvoice ? false : true,
     updatedAt: new Date().toISOString(),
     updatedBy: voucher.updatedBy || operatorName
@@ -521,14 +706,16 @@ export function postManualVoucherTransaction(
     if (targetInv) {
       voucherToSave.invoiceId = targetInv.id;
       voucherToSave.referenceNumber = targetInv.number;
-      const otherPaid = updated.vouchers
-        .filter(v =>
-          v.id !== voucherId &&
-          (v.invoiceId === targetInv.id || ((v as any).referenceNumber === targetInv.number && v.type === (targetInv.type === 'sale' ? 'receipt' : 'payment')))
-        )
-        .reduce((s, v) => s + (Number(v.amount) || 0), 0);
-      const maxAllowable = Math.max(0, Number((targetInv.total - otherPaid).toFixed(2)));
-      if (voucherToSave.amount > maxAllowable + 0.01) {
+      const otherPaid = roundMoney(
+        updated.vouchers
+          .filter(v =>
+            v.id !== voucherId &&
+            (v.invoiceId === targetInv.id || ((v as any).referenceNumber === targetInv.number && v.type === (targetInv.type === 'sale' ? 'receipt' : 'payment')))
+          )
+          .reduce((s, v) => s + (Number(v.amount) || 0), 0)
+      );
+      const maxAllowable = roundMoney(Math.max(0, targetInv.total - otherPaid));
+      if (toCents(voucherToSave.amount) > toCents(maxAllowable) + 1) {
         return {
           success: false,
           db,
@@ -590,9 +777,9 @@ export function postManualVoucherTransaction(
       (v as any).invoiceId === inv.id ||
       ((v as any).referenceNumber === inv.number && v.type === (inv.type === 'sale' ? 'receipt' : 'payment'))
     );
-    const totalPaidOnVouchers = Number(allVouchersForInv.reduce((s, v) => s + (Number(v.amount) || 0), 0).toFixed(2));
-    inv.paid = totalPaidOnVouchers;
-    inv.remaining = Math.max(0, Number((inv.total - totalPaidOnVouchers).toFixed(2)));
+    const totalPaidOnVouchers = roundMoney(allVouchersForInv.reduce((s, v) => s + (Number(v.amount) || 0), 0));
+    inv.paid = Math.min(roundMoney(inv.total), totalPaidOnVouchers);
+    inv.remaining = roundMoney(Math.max(0, inv.total - inv.paid));
     inv.status = inv.paid <= 0 ? 'آجل' : inv.remaining <= 0 ? 'مدفوع' : 'جزئي';
   };
 
@@ -617,6 +804,16 @@ export function postManualVoucherTransaction(
     recomputePartyBalance(prevVoucher.partyId, prevVoucher.type === 'receipt');
   }
   recomputePartyBalance(voucherToSave.partyId, isReceipt);
+
+  // 6. Atomic Pre-Commit Verification & Rollback Guard
+  const integrity = validateDbTransactionIntegrity(updated, [deterministicJournalId], [], [voucherId]);
+  if (!integrity.ok) {
+    return {
+      success: false,
+      db,
+      message: `⚠️ تم إلغاء حفظ السند (Rollback): ${integrity.error}`
+    };
+  }
 
   logAudit(
     updated,
@@ -816,8 +1013,8 @@ export function cancelOrDeleteVoucherTransaction(
           ((v as any).referenceNumber === linkedInv.number && v.type === expectedVoucherType)
         )
         .reduce((s, v) => s + (Number(v.amount) || 0), 0);
-      linkedInv.paid = Number(remainingVouchersPaid.toFixed(2));
-      linkedInv.remaining = Math.max(0, Number((linkedInv.total - linkedInv.paid).toFixed(2)));
+      linkedInv.paid = roundMoney(remainingVouchersPaid);
+      linkedInv.remaining = roundMoney(Math.max(0, linkedInv.total - linkedInv.paid));
       linkedInv.status = linkedInv.paid <= 0 ? 'آجل' : linkedInv.remaining <= 0 ? 'مدفوع' : 'جزئي';
     }
   }
@@ -949,8 +1146,23 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
         updated.treasury = updated.treasury.filter(t => !removeIds.has(t.id));
       }
     } else {
-      // Should have exactly ONE treasury entry for the direct invoice payment portion
-      if (linkedTreasury.length > 1) {
+      // Check if linkedTreasury consists of valid distinct split-payment rows (_p0, _p1, ...)
+      // whose sum matches autoExpectedPaid cleanly
+      const hasSplitIndices = linkedTreasury.every(t => /_p\d+/.test(t.id));
+      const uniqueSplitIds = new Set(linkedTreasury.map(t => t.id)).size === linkedTreasury.length;
+      const splitSumCents = linkedTreasury.reduce((s, t) => s + toCents(t.amount), 0);
+      const isLegitimateSplit =
+        linkedTreasury.length > 1 &&
+        hasSplitIndices &&
+        uniqueSplitIds &&
+        Math.abs(splitSumCents - toCents(autoExpectedPaid)) <= 1;
+
+      if (isLegitimateSplit) {
+        linkedTreasury.forEach(t => {
+          t.direction = expectedTrDirection;
+          t.sourceId = inv.id;
+        });
+      } else if (linkedTreasury.length > 1) {
         const primaryTr = linkedTreasury[0];
         primaryTr.amount = autoExpectedPaid;
         primaryTr.direction = expectedTrDirection;
@@ -972,14 +1184,13 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
     }
   });
 
-  // 2. Global deduplication of treasury entries:
-  // If multiple treasury entries share the exact same id or exact same (sourceType + sourceId + direction), keep only one!
+  // 2. Global deduplication of treasury entries (preserving legitimate split-payment entries indexed by _pN):
   const seenTreasuryKeys = new Set<string>();
   const cleanTreasury: TreasuryEntry[] = [];
   (updated.treasury || []).forEach(tr => {
     let key = tr.id;
-    if (tr.sourceId && tr.sourceType) {
-      key = `${tr.sourceType}_${tr.sourceId}_${tr.direction}`;
+    if (tr.sourceId && tr.sourceType && !tr.id.includes('_p')) {
+      key = `${tr.sourceType}_${tr.sourceId}_${tr.direction}_${tr.method || 'cash'}`;
     }
     if (!seenTreasuryKeys.has(key)) {
       seenTreasuryKeys.add(key);

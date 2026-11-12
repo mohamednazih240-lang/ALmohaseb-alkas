@@ -106,10 +106,15 @@ function openIndexedDB(): Promise<IDBDatabase> {
 export async function saveToIndexedDB(db: AccountingDB, customKey?: string): Promise<void> {
   try {
     const idb = await openIndexedDB();
-    const tx = idb.transaction(IDB_STORE, 'readwrite');
-    const store = tx.objectStore(IDB_STORE);
-    const key = customKey || (getActiveTenantId() ? getTenantIdbKey(getActiveTenantId()!) : IDB_KEY);
-    store.put(db, key);
+    await new Promise<void>((resolve, reject) => {
+      const tx = idb.transaction(IDB_STORE, 'readwrite');
+      const store = tx.objectStore(IDB_STORE);
+      const key = customKey || (getActiveTenantId() ? getTenantIdbKey(getActiveTenantId()!) : IDB_KEY);
+      store.put(db, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('IndexedDB transaction error'));
+      tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+    });
   } catch (e) {
     console.warn('IndexedDB write notice:', e);
   }
@@ -167,9 +172,162 @@ export function getTodayDate(): string {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * Exact 2-decimal monetary rounding (avoids IEEE-754 drift like 0.1 + 0.2 = 0.30000000000000004)
+ */
+export function roundMoney(val: number): number {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return 0;
+  const rounded = Math.round((num + (num >= 0 ? Number.EPSILON : -Number.EPSILON)) * 100) / 100;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+/**
+ * Exact 4-decimal quantity rounding for fractional unit sales/purchases (kg, meters, etc.)
+ */
+export function roundQty(val: number): number {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return 0;
+  const rounded = Math.round((num + (num >= 0 ? Number.EPSILON : -Number.EPSILON)) * 10000) / 10000;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+export function toCents(val: number): number {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return 0;
+  return Math.round((num + (num >= 0 ? Number.EPSILON : -Number.EPSILON)) * 100);
+}
+
+export function fromCents(cents: number): number {
+  if (!Number.isFinite(cents)) return 0;
+  const res = Math.round(cents) / 100;
+  return Object.is(res, -0) ? 0 : res;
+}
+
+export function sumMoney(...vals: number[]): number {
+  const totalCents = vals.reduce((acc, v) => acc + toCents(v), 0);
+  return fromCents(totalCents);
+}
+
+export function isFiniteNonNegative(val: unknown): val is number {
+  return typeof val === 'number' && Number.isFinite(val) && val >= 0;
+}
+
+export function isFinitePositive(val: unknown): val is number {
+  return typeof val === 'number' && Number.isFinite(val) && val > 0;
+}
+
 export function formatMoney(amount: number, currency: string = 'ج.م'): string {
-  const num = Number.isFinite(amount) ? amount : 0;
+  const num = Number.isFinite(amount) ? roundMoney(amount) : 0;
   return `${num.toLocaleString('ar-EG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+}
+
+export interface JournalBalanceResult {
+  balanced: boolean;
+  totalDebit: number;
+  totalCredit: number;
+  diffCents: number;
+  reason?: string;
+}
+
+/**
+ * Verifies strict double-entry balance (sum(debit) === sum(credit) in exact cents)
+ * and ensures no NaN / negative amounts exist on any line.
+ */
+export function assertJournalBalanced(journal: JournalEntry): JournalBalanceResult {
+  if (!journal || !Array.isArray(journal.lines) || journal.lines.length === 0) {
+    return { balanced: false, totalDebit: 0, totalCredit: 0, diffCents: 0, reason: 'القيد المحاسبي لا يحتوي على أي بنود.' };
+  }
+
+  let debitCents = 0;
+  let creditCents = 0;
+
+  for (const line of journal.lines) {
+    if (!Number.isFinite(line.debit) || !Number.isFinite(line.credit) || line.debit < 0 || line.credit < 0) {
+      return {
+        balanced: false,
+        totalDebit: 0,
+        totalCredit: 0,
+        diffCents: 0,
+        reason: `قيمة غير صالحة أو سالبة في سطر الحساب (${line.accountName || line.accountId}).`
+      };
+    }
+    debitCents += toCents(line.debit);
+    creditCents += toCents(line.credit);
+  }
+
+  const diffCents = Math.abs(debitCents - creditCents);
+  const totalDebit = fromCents(debitCents);
+  const totalCredit = fromCents(creditCents);
+
+  if (diffCents !== 0) {
+    return {
+      balanced: false,
+      totalDebit,
+      totalCredit,
+      diffCents,
+      reason: `عدم توازن القيد: إجمالي المدين (${totalDebit.toFixed(2)}) لا يساوي إجمالي الدائن (${totalCredit.toFixed(2)}).`
+    };
+  }
+
+  return { balanced: true, totalDebit, totalCredit, diffCents: 0 };
+}
+
+/**
+ * Normalizes every line in a JournalEntry to 2-decimal precision and resolves tiny sub-cent/cent rounding
+ * drift (<= maxAutoCents, default 5 cents) on the largest line of the smaller side so debit === credit strictly.
+ */
+export function rebalanceJournalPrecision(journal: JournalEntry, maxAutoCents: number = 5): JournalEntry {
+  const cleanLines = (journal.lines || [])
+    .map(l => ({
+      ...l,
+      debit: roundMoney(Math.max(0, Number(l.debit) || 0)),
+      credit: roundMoney(Math.max(0, Number(l.credit) || 0))
+    }))
+    .filter(l => l.debit > 0 || l.credit > 0);
+
+  if (cleanLines.length === 0) {
+    return { ...journal, lines: cleanLines };
+  }
+
+  const debitCents = cleanLines.reduce((s, l) => s + toCents(l.debit), 0);
+  const creditCents = cleanLines.reduce((s, l) => s + toCents(l.credit), 0);
+  const diffCents = debitCents - creditCents;
+
+  if (diffCents !== 0 && Math.abs(diffCents) <= maxAutoCents) {
+    if (diffCents > 0) {
+      // Credits slightly smaller -> bump largest credit line by diffCents
+      let bestIdx = -1;
+      let maxVal = -1;
+      cleanLines.forEach((l, i) => {
+        if (l.credit > maxVal) {
+          maxVal = l.credit;
+          bestIdx = i;
+        }
+      });
+      if (bestIdx >= 0) {
+        cleanLines[bestIdx].credit = fromCents(toCents(cleanLines[bestIdx].credit) + diffCents);
+      }
+    } else {
+      // Debits slightly smaller -> bump largest debit line by |diffCents|
+      let bestIdx = -1;
+      let maxVal = -1;
+      cleanLines.forEach((l, i) => {
+        if (l.debit > maxVal) {
+          maxVal = l.debit;
+          bestIdx = i;
+        }
+      });
+      if (bestIdx >= 0) {
+        cleanLines[bestIdx].debit = fromCents(toCents(cleanLines[bestIdx].debit) + Math.abs(diffCents));
+      }
+    }
+  }
+
+  return {
+    ...journal,
+    lines: cleanLines
+  };
 }
 
 export function defaultAccounts(): Account[] {
@@ -1365,8 +1523,9 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
 
       // ثالثاً: إدراج الصنف في الكتالوج عند الاستعادة من فواتير المشتريات المسجلة (بدون تسعير بيع تلقائي أو نسب وهمية)
       if (!prod && item.productName.trim()) {
-        maxCodeNum++;
-        const newCode = `P-${maxCodeNum}`;
+        const newCode = (item.productCode && item.productCode.trim() && !seenCodes.has(item.productCode.trim()))
+          ? item.productCode.trim()
+          : generateUniqueProductCode(db);
         const unitBuy = isPurchase
           ? (Number(item.unitPrice || item.costPrice || (item as any).price) || 0)
           : 0;
@@ -2336,7 +2495,7 @@ export function calculateCustomerBalance(db: AccountingDB, customerId: string, b
     }
   });
 
-  return balance;
+  return roundMoney(balance);
 }
 
 /**
@@ -2381,20 +2540,21 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string, b
     }
   });
 
-  return balance;
+  return roundMoney(balance);
 }
 
 /**
  * Calculate total treasury balance for a specific payment method or all methods, optionally filtered by branch
  */
 export function calculateTreasuryBalance(db: AccountingDB, method?: PaymentMethod, branchId?: string): number {
-  return db.treasury
+  const totalCents = db.treasury
     .filter(entry => !method || entry.method === method)
     .filter(entry => isBranchMatch(entry.branchId, branchId))
-    .reduce((sum, entry) => {
-      const amt = Number(entry.amount) || 0;
-      return sum + (entry.direction === 'in' ? amt : -amt);
+    .reduce((sumCents, entry) => {
+      const c = toCents(Number(entry.amount) || 0);
+      return sumCents + (entry.direction === 'in' ? c : -c);
     }, 0);
+  return fromCents(totalCents);
 }
 
 /**
@@ -2418,40 +2578,50 @@ export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
   const branchExpenses = db.expenses.filter(e => isTargetBranch(e.branchId));
   const branchRevenues = db.revenues.filter(r => isTargetBranch(r.branchId));
 
-  const totalSalesAll = branchInvoices
-    .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote')
-    .reduce((acc, i) => acc + i.total, 0);
+  const totalSalesAll = roundMoney(
+    branchInvoices
+      .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote')
+      .reduce((acc, i) => acc + (Number(i.total) || 0), 0)
+  );
 
-  const salesToday = branchInvoices
-    .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote' && i.date === today)
-    .reduce((acc, i) => acc + i.total, 0);
+  const salesToday = roundMoney(
+    branchInvoices
+      .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote' && i.date === today)
+      .reduce((acc, i) => acc + (Number(i.total) || 0), 0)
+  );
 
-  const totalPurchasesAll = branchInvoices
-    .filter(i => i.type === 'purchase')
-    .reduce((acc, i) => acc + i.total, 0);
+  const totalPurchasesAll = roundMoney(
+    branchInvoices
+      .filter(i => i.type === 'purchase')
+      .reduce((acc, i) => acc + (Number(i.total) || 0), 0)
+  );
 
-  const purchasesToday = branchInvoices
-    .filter(i => i.type === 'purchase' && i.date === today)
-    .reduce((acc, i) => acc + i.total, 0);
+  const purchasesToday = roundMoney(
+    branchInvoices
+      .filter(i => i.type === 'purchase' && i.date === today)
+      .reduce((acc, i) => acc + (Number(i.total) || 0), 0)
+  );
 
-  const totalCOGS = branchInvoices
-    .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote' && i.invoiceKind !== 'sale_return')
-    .reduce((acc, i) => {
-      const invoiceCogs = i.items.reduce((s, it, idx) => {
-        const alloc = fifoLedger.getSaleAllocation(i.id, it.productId, it.productName, idx);
-        if (alloc && alloc.hasVerifiedCost) {
-          return s + alloc.verifiedCostTotal;
-        }
-        return s;
-      }, 0);
-      return acc + invoiceCogs;
-    }, 0);
+  const totalCOGS = roundMoney(
+    branchInvoices
+      .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote' && i.invoiceKind !== 'sale_return')
+      .reduce((acc, i) => {
+        const invoiceCogs = i.items.reduce((s, it, idx) => {
+          const alloc = fifoLedger.getSaleAllocation(i.id, it.productId, it.productName, idx);
+          if (alloc && alloc.hasVerifiedCost) {
+            return s + alloc.verifiedCostTotal;
+          }
+          return s;
+        }, 0);
+        return acc + invoiceCogs;
+      }, 0)
+  );
 
-  const totalExpenses = branchExpenses.reduce((acc, e) => acc + e.amount, 0);
-  const totalOtherRevenues = branchRevenues.reduce((acc, r) => acc + r.amount, 0);
+  const totalExpenses = roundMoney(branchExpenses.reduce((acc, e) => acc + (Number(e.amount) || 0), 0));
+  const totalOtherRevenues = roundMoney(branchRevenues.reduce((acc, r) => acc + (Number(r.amount) || 0), 0));
 
-  const grossProfit = totalSalesAll - totalCOGS;
-  const netProfit = grossProfit + totalOtherRevenues - totalExpenses;
+  const grossProfit = roundMoney(totalSalesAll - totalCOGS);
+  const netProfit = roundMoney(grossProfit + totalOtherRevenues - totalExpenses);
 
   const totalCustomerReceivables = db.customers.reduce((acc, c) => acc + Math.max(0, calculateCustomerBalance(db, c.id, branchId)), 0);
   const totalSupplierPayables = db.suppliers.reduce((acc, s) => acc + Math.max(0, calculateSupplierBalance(db, s.id, branchId)), 0);
@@ -2493,85 +2663,88 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
   const lines: JournalLine[] = [];
   const jNum = `J-${Date.now().toString().slice(-6)}`;
 
-  if (isSale && !isReturn) {
-    // 1. Debit Cash/Bank accounts or AR for payments
-    if (invoice.payments && invoice.payments.length > 0) {
-      invoice.payments.forEach(p => {
-        if (p.amount > 0) {
-          const methodAccId = getMethodAccountId(p.method);
-          const methodAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
-          lines.push({
-            accountId: methodAcc.id,
-            accountCode: methodAcc.code,
-            accountName: methodAcc.name,
-            debit: p.amount,
-            credit: 0,
-            notes: `تحصيل عبر: ${p.method}`
-          });
+  const totalRounded = roundMoney(Math.max(0, Number(invoice.total) || 0));
+  const validNonCreditPayments = (invoice.payments || [])
+    .filter(p => p && p.method !== 'آجل' && roundMoney(Number(p.amount) || 0) > 0)
+    .map(p => ({ ...p, amount: roundMoney(Number(p.amount) || 0) }));
+
+  const resolveSettlementSplits = (): { cashParts: { method: PaymentMethod; amount: number }[]; creditPart: number } => {
+    const totalCents = toCents(totalRounded);
+    if (validNonCreditPayments.length > 0) {
+      let paidCents = 0;
+      const cappedParts: { method: PaymentMethod; amount: number }[] = [];
+      for (const p of validNonCreditPayments) {
+        const pCents = Math.min(toCents(p.amount), Math.max(0, totalCents - paidCents));
+        if (pCents > 0) {
+          cappedParts.push({ method: p.method, amount: fromCents(pCents) });
+          paidCents += pCents;
         }
-      });
-      if (invoice.remaining > 0) {
-        const arAcc = db.accounts.find(a => a.id === 'acc_ar')!;
-        lines.push({
-          accountId: arAcc.id,
-          accountCode: arAcc.code,
-          accountName: arAcc.name,
-          debit: invoice.remaining,
-          credit: 0,
-          notes: `المتبقي آجل على العميل: ${invoice.partyName}`
-        });
       }
-    } else if (invoice.paymentMethod === 'آجل') {
+      const creditPart = fromCents(Math.max(0, totalCents - paidCents));
+      return { cashParts: cappedParts, creditPart };
+    }
+
+    if (invoice.paymentMethod === 'آجل') {
+      return { cashParts: [], creditPart: totalRounded };
+    }
+
+    const paidCents = Math.min(totalCents, Math.max(0, toCents(Number(invoice.paid) || 0)));
+    const remCents = Math.max(0, totalCents - paidCents);
+    return {
+      cashParts: paidCents > 0 ? [{ method: invoice.paymentMethod, amount: fromCents(paidCents) }] : [],
+      creditPart: fromCents(remCents)
+    };
+  };
+
+  if (isSale && !isReturn) {
+    const { cashParts, creditPart } = resolveSettlementSplits();
+
+    cashParts.forEach(p => {
+      const methodAccId = getMethodAccountId(p.method);
+      const methodAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
+      lines.push({
+        accountId: methodAcc.id,
+        accountCode: methodAcc.code,
+        accountName: methodAcc.name,
+        debit: p.amount,
+        credit: 0,
+        notes: `تحصيل عبر: ${p.method}`
+      });
+    });
+
+    if (creditPart > 0) {
       const arAcc = db.accounts.find(a => a.id === 'acc_ar')!;
       lines.push({
         accountId: arAcc.id,
         accountCode: arAcc.code,
         accountName: arAcc.name,
-        debit: invoice.total,
+        debit: creditPart,
         credit: 0,
-        notes: `استحقاق على العميل: ${invoice.partyName}`
+        notes: `المتبقي آجل على العميل: ${invoice.partyName}`
       });
-    } else {
-      const methodAccId = getMethodAccountId(invoice.paymentMethod);
-      const methodAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
-      if (invoice.paid > 0) {
-        lines.push({
-          accountId: methodAcc.id,
-          accountCode: methodAcc.code,
-          accountName: methodAcc.name,
-          debit: invoice.paid,
-          credit: 0,
-          notes: `تحصيل نقدي/إلكتروني: ${invoice.paymentMethod}`
-        });
-      }
-      if (invoice.remaining > 0) {
-        const arAcc = db.accounts.find(a => a.id === 'acc_ar')!;
-        lines.push({
-          accountId: arAcc.id,
-          accountCode: arAcc.code,
-          accountName: arAcc.name,
-          debit: invoice.remaining,
-          credit: 0,
-          notes: `المتبقي آجل على العميل: ${invoice.partyName}`
-        });
-      }
     }
 
-    // 2. Credit Sales Revenue, VAT & Extra Revenue
-    const extra = Number(invoice.extraIncomeVal) || 0;
-    const taxAmt = Number(invoice.tax) || 0;
-    const baseSalesCredit = Math.max(0, Number((invoice.total - extra - taxAmt).toFixed(2)));
-    const salesAcc = db.accounts.find(a => a.id === 'acc_sales')!;
-    lines.push({
-      accountId: salesAcc.id,
-      accountCode: salesAcc.code,
-      accountName: salesAcc.name,
-      debit: 0,
-      credit: baseSalesCredit,
-      notes: `إيراد مبيعات فاتورة ${invoice.number}`
-    });
+    // 2. Credit Sales Revenue, VAT & Extra Revenue (exact cent partition summing strictly to totalRounded)
+    const totalCents = toCents(totalRounded);
+    const rawTaxCents = Math.max(0, toCents(Number(invoice.tax) || 0));
+    const taxCents = Math.min(totalCents, rawTaxCents);
+    const rawExtraCents = Math.max(0, toCents(Number(invoice.extraIncomeVal) || 0));
+    const extraCents = Math.min(Math.max(0, totalCents - taxCents), rawExtraCents);
+    const baseSalesCents = Math.max(0, totalCents - taxCents - extraCents);
 
-    if (taxAmt > 0) {
+    const salesAcc = db.accounts.find(a => a.id === 'acc_sales')!;
+    if (baseSalesCents > 0 || (taxCents === 0 && extraCents === 0 && totalCents > 0)) {
+      lines.push({
+        accountId: salesAcc.id,
+        accountCode: salesAcc.code,
+        accountName: salesAcc.name,
+        debit: 0,
+        credit: fromCents(baseSalesCents),
+        notes: `إيراد مبيعات فاتورة ${invoice.number}`
+      });
+    }
+
+    if (taxCents > 0) {
       const vatAcc = db.accounts.find(a => a.id === 'acc_vat');
       if (vatAcc) {
         lines.push({
@@ -2579,30 +2752,44 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
           accountCode: vatAcc.code,
           accountName: vatAcc.name,
           debit: 0,
-          credit: taxAmt,
+          credit: fromCents(taxCents),
           notes: `ضريبة مبيعات فاتورة ${invoice.number}`
         });
       } else {
-        lines[lines.length - 1].credit = Number((lines[lines.length - 1].credit + taxAmt).toFixed(2));
+        const salesLine = lines.find(l => l.accountId === salesAcc.id);
+        if (salesLine) {
+          salesLine.credit = fromCents(toCents(salesLine.credit) + taxCents);
+        } else {
+          lines.push({
+            accountId: salesAcc.id,
+            accountCode: salesAcc.code,
+            accountName: salesAcc.name,
+            debit: 0,
+            credit: fromCents(taxCents),
+            notes: `إيراد وضريبة مبيعات فاتورة ${invoice.number}`
+          });
+        }
       }
     }
 
-    if (extra > 0) {
+    if (extraCents > 0) {
       const revAcc = db.accounts.find(a => a.id === 'acc_other_rev')!;
       lines.push({
         accountId: revAcc.id,
         accountCode: revAcc.code,
         accountName: revAcc.name,
         debit: 0,
-        credit: extra,
+        credit: fromCents(extraCents),
         notes: `إيراد إضافي: ${invoice.extraIncomeName || 'خدمات/نقل'}`
       });
     }
 
     // 3. COGS & Inventory entry (only for items with verified FIFO purchase batch cost)
-    const cogsAmount = invoice.items.reduce(
-      (s, it) => s + (it.hasVerifiedCost === false ? 0 : it.qty * (it.costPrice || 0)),
-      0
+    const cogsAmount = roundMoney(
+      invoice.items.reduce(
+        (s, it) => s + (it.hasVerifiedCost === false ? 0 : (Number(it.qty) || 0) * (Number(it.costPrice) || 0)),
+        0
+      )
     );
     if (cogsAmount > 0) {
       const cogsAcc = db.accounts.find(a => a.id === 'acc_cogs')!;
@@ -2626,119 +2813,140 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
     }
   } else if (!isSale && !isReturn) {
     // PURCHASE INVOICE
-    const taxAmt = Number(invoice.tax) || 0;
-    const invDebit = Math.max(0, Number((invoice.total - taxAmt).toFixed(2)));
+    const totalCents = toCents(totalRounded);
+    const taxCents = Math.min(totalCents, Math.max(0, toCents(Number(invoice.tax) || 0)));
+    const invCents = Math.max(0, totalCents - taxCents);
     const invAcc = db.accounts.find(a => a.id === 'acc_inv')!;
-    lines.push({
-      accountId: invAcc.id,
-      accountCode: invAcc.code,
-      accountName: invAcc.name,
-      debit: invDebit,
-      credit: 0,
-      notes: `شراء بضاعة وإضافتها للمخزون - فاتورة ${invoice.number}`
-    });
-    if (taxAmt > 0) {
+
+    if (invCents > 0 || (taxCents === 0 && totalCents > 0)) {
+      lines.push({
+        accountId: invAcc.id,
+        accountCode: invAcc.code,
+        accountName: invAcc.name,
+        debit: fromCents(invCents),
+        credit: 0,
+        notes: `شراء بضاعة وإضافتها للمخزون - فاتورة ${invoice.number}`
+      });
+    }
+    if (taxCents > 0) {
       const vatAcc = db.accounts.find(a => a.id === 'acc_vat');
       if (vatAcc) {
         lines.push({
           accountId: vatAcc.id,
           accountCode: vatAcc.code,
           accountName: vatAcc.name,
-          debit: taxAmt,
+          debit: fromCents(taxCents),
           credit: 0,
           notes: `ضريبة مشتريات فاتورة ${invoice.number}`
         });
       } else {
-        lines[lines.length - 1].debit = Number((lines[lines.length - 1].debit + taxAmt).toFixed(2));
+        const invLine = lines.find(l => l.accountId === invAcc.id);
+        if (invLine) {
+          invLine.debit = fromCents(toCents(invLine.debit) + taxCents);
+        } else {
+          lines.push({
+            accountId: invAcc.id,
+            accountCode: invAcc.code,
+            accountName: invAcc.name,
+            debit: fromCents(taxCents),
+            credit: 0,
+            notes: `شراء بضاعة وضريبة فاتورة ${invoice.number}`
+          });
+        }
       }
     }
 
-    if (invoice.payments && invoice.payments.length > 0) {
-      invoice.payments.forEach(p => {
-        if (p.amount > 0) {
-          const methodAccId = getMethodAccountId(p.method);
-          const methodAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
-          lines.push({
-            accountId: methodAcc.id,
-            accountCode: methodAcc.code,
-            accountName: methodAcc.name,
-            debit: 0,
-            credit: p.amount,
-            notes: `سداد للمورد عبر: ${p.method}`
-          });
-        }
+    const { cashParts, creditPart } = resolveSettlementSplits();
+
+    cashParts.forEach(p => {
+      const methodAccId = getMethodAccountId(p.method);
+      const methodAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
+      lines.push({
+        accountId: methodAcc.id,
+        accountCode: methodAcc.code,
+        accountName: methodAcc.name,
+        debit: 0,
+        credit: p.amount,
+        notes: `سداد للمورد عبر: ${p.method}`
       });
-      if (invoice.remaining > 0) {
-        const apAcc = db.accounts.find(a => a.id === 'acc_ap')!;
-        lines.push({
-          accountId: apAcc.id,
-          accountCode: apAcc.code,
-          accountName: apAcc.name,
-          debit: 0,
-          credit: invoice.remaining,
-          notes: `المتبقي آجل للمورد: ${invoice.partyName}`
-        });
-      }
-    } else if (invoice.paymentMethod === 'آجل') {
+    });
+
+    if (creditPart > 0) {
       const apAcc = db.accounts.find(a => a.id === 'acc_ap')!;
       lines.push({
         accountId: apAcc.id,
         accountCode: apAcc.code,
         accountName: apAcc.name,
         debit: 0,
-        credit: invoice.total,
-        notes: `استحقاق للمورد: ${invoice.partyName}`
+        credit: creditPart,
+        notes: `المتبقي آجل للمورد: ${invoice.partyName}`
       });
-    } else {
-      const methodAccId = getMethodAccountId(invoice.paymentMethod);
-      const methodAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
-      if (invoice.paid > 0) {
-        lines.push({
-          accountId: methodAcc.id,
-          accountCode: methodAcc.code,
-          accountName: methodAcc.name,
-          debit: 0,
-          credit: invoice.paid,
-          notes: `سداد للمورد بطريقة: ${invoice.paymentMethod}`
-        });
-      }
-      if (invoice.remaining > 0) {
-        const apAcc = db.accounts.find(a => a.id === 'acc_ap')!;
-        lines.push({
-          accountId: apAcc.id,
-          accountCode: apAcc.code,
-          accountName: apAcc.name,
-          debit: 0,
-          credit: invoice.remaining,
-          notes: `المتبقي آجل للمورد: ${invoice.partyName}`
-        });
-      }
     }
   } else if (invoice.invoiceKind === 'sale_return') {
-    // SALE RETURN
-    const salesAcc = db.accounts.find(a => a.id === 'acc_sales')!;
-    lines.push({
-      accountId: salesAcc.id,
-      accountCode: salesAcc.code,
-      accountName: salesAcc.name,
-      debit: invoice.total,
-      credit: 0,
-      notes: `مردودات مبيعات مرتجع ${invoice.number}`
-    });
-    const methodAccId = getMethodAccountId(invoice.paymentMethod);
-    const creditAcc = invoice.paymentMethod === 'آجل'
-      ? db.accounts.find(a => a.id === 'acc_ar')!
-      : db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
-    lines.push({
-      accountId: creditAcc.id,
-      accountCode: creditAcc.code,
-      accountName: creditAcc.name,
-      debit: 0,
-      credit: invoice.total,
-      notes: `تسوية حساب العميل مرتجع ${invoice.number}`
-    });
+    // SALE RETURN (Debit Sales Revenue + VAT if any; Credit Cash/Bank/AR)
+    const totalCents = toCents(totalRounded);
+    const taxCents = Math.min(totalCents, Math.max(0, toCents(Number(invoice.tax) || 0)));
+    const netSalesCents = Math.max(0, totalCents - taxCents);
 
-    const cogsAmount = invoice.items.reduce((s, it) => s + (it.qty * (it.costPrice || 0)), 0);
+    const salesAcc = db.accounts.find(a => a.id === 'acc_sales')!;
+    if (netSalesCents > 0 || (taxCents === 0 && totalCents > 0)) {
+      lines.push({
+        accountId: salesAcc.id,
+        accountCode: salesAcc.code,
+        accountName: salesAcc.name,
+        debit: fromCents(netSalesCents),
+        credit: 0,
+        notes: `مردودات مبيعات مرتجع ${invoice.number}`
+      });
+    }
+    if (taxCents > 0) {
+      const vatAcc = db.accounts.find(a => a.id === 'acc_vat');
+      if (vatAcc) {
+        lines.push({
+          accountId: vatAcc.id,
+          accountCode: vatAcc.code,
+          accountName: vatAcc.name,
+          debit: fromCents(taxCents),
+          credit: 0,
+          notes: `عكس ضريبة مبيعات مرتجع ${invoice.number}`
+        });
+      } else {
+        const sLine = lines.find(l => l.accountId === salesAcc.id);
+        if (sLine) sLine.debit = fromCents(toCents(sLine.debit) + taxCents);
+      }
+    }
+
+    const { cashParts, creditPart } = resolveSettlementSplits();
+    cashParts.forEach(p => {
+      const methodAccId = getMethodAccountId(p.method);
+      const creditAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
+      lines.push({
+        accountId: creditAcc.id,
+        accountCode: creditAcc.code,
+        accountName: creditAcc.name,
+        debit: 0,
+        credit: p.amount,
+        notes: `رد نقدي/إلكتروني للعميل مرتجع ${invoice.number}`
+      });
+    });
+    if (creditPart > 0) {
+      const arAcc = db.accounts.find(a => a.id === 'acc_ar')!;
+      lines.push({
+        accountId: arAcc.id,
+        accountCode: arAcc.code,
+        accountName: arAcc.name,
+        debit: 0,
+        credit: creditPart,
+        notes: `تخفيض حساب العميل مرتجع ${invoice.number}`
+      });
+    }
+
+    const cogsAmount = roundMoney(
+      invoice.items.reduce(
+        (s, it) => s + (it.hasVerifiedCost === false ? 0 : (Number(it.qty) || 0) * (Number(it.costPrice) || 0)),
+        0
+      )
+    );
     if (cogsAmount > 0) {
       const invAcc = db.accounts.find(a => a.id === 'acc_inv')!;
       const cogsAcc = db.accounts.find(a => a.id === 'acc_cogs')!;
@@ -2761,30 +2969,65 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
     }
   } else if (invoice.invoiceKind === 'purchase_return') {
     // PURCHASE RETURN
-    const methodAccId = getMethodAccountId(invoice.paymentMethod);
-    const debitAcc = invoice.paymentMethod === 'آجل'
-      ? db.accounts.find(a => a.id === 'acc_ap')!
-      : db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
-    lines.push({
-      accountId: debitAcc.id,
-      accountCode: debitAcc.code,
-      accountName: debitAcc.name,
-      debit: invoice.total,
-      credit: 0,
-      notes: `استرداد من المورد مرتجع ${invoice.number}`
+    const totalCents = toCents(totalRounded);
+    const taxCents = Math.min(totalCents, Math.max(0, toCents(Number(invoice.tax) || 0)));
+    const netInvCents = Math.max(0, totalCents - taxCents);
+
+    const { cashParts, creditPart } = resolveSettlementSplits();
+    cashParts.forEach(p => {
+      const methodAccId = getMethodAccountId(p.method);
+      const debitAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
+      lines.push({
+        accountId: debitAcc.id,
+        accountCode: debitAcc.code,
+        accountName: debitAcc.name,
+        debit: p.amount,
+        credit: 0,
+        notes: `استرداد نقدي/إلكتروني من المورد مرتجع ${invoice.number}`
+      });
     });
+    if (creditPart > 0) {
+      const apAcc = db.accounts.find(a => a.id === 'acc_ap')!;
+      lines.push({
+        accountId: apAcc.id,
+        accountCode: apAcc.code,
+        accountName: apAcc.name,
+        debit: creditPart,
+        credit: 0,
+        notes: `تخفيض مستحقات المورد مرتجع ${invoice.number}`
+      });
+    }
+
     const invAcc = db.accounts.find(a => a.id === 'acc_inv')!;
-    lines.push({
-      accountId: invAcc.id,
-      accountCode: invAcc.code,
-      accountName: invAcc.name,
-      debit: 0,
-      credit: invoice.total,
-      notes: `خروج بضاعة مرتجعة للمورد`
-    });
+    if (netInvCents > 0 || (taxCents === 0 && totalCents > 0)) {
+      lines.push({
+        accountId: invAcc.id,
+        accountCode: invAcc.code,
+        accountName: invAcc.name,
+        debit: 0,
+        credit: fromCents(netInvCents),
+        notes: `خروج بضاعة مرتجعة للمورد`
+      });
+    }
+    if (taxCents > 0) {
+      const vatAcc = db.accounts.find(a => a.id === 'acc_vat');
+      if (vatAcc) {
+        lines.push({
+          accountId: vatAcc.id,
+          accountCode: vatAcc.code,
+          accountName: vatAcc.name,
+          debit: 0,
+          credit: fromCents(taxCents),
+          notes: `عكس ضريبة مشتريات مرتجع ${invoice.number}`
+        });
+      } else {
+        const iLine = lines.find(l => l.accountId === invAcc.id);
+        if (iLine) iLine.credit = fromCents(toCents(iLine.credit) + taxCents);
+      }
+    }
   }
 
-  return {
+  return rebalanceJournalPrecision({
     id: generateId('j'),
     number: jNum,
     date: invoice.date,
@@ -2793,7 +3036,7 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
     sourceId: invoice.id,
     lines,
     createdAt: new Date().toISOString()
-  };
+  });
 }
 
 /**
@@ -2803,6 +3046,7 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
   const isReceipt = voucher.type === 'receipt';
   const jNum = `J-${Date.now().toString().slice(-6)}`;
   const lines: JournalLine[] = [];
+  const amt = roundMoney(Math.max(0, Number(voucher.amount) || 0));
 
   const methodAccId = getMethodAccountId(voucher.paymentMethod);
   const methodAcc = db.accounts.find(a => a.id === methodAccId) || db.accounts.find(a => a.id === 'acc_cash')!;
@@ -2814,7 +3058,7 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
       accountId: methodAcc.id,
       accountCode: methodAcc.code,
       accountName: methodAcc.name,
-      debit: voucher.amount,
+      debit: amt,
       credit: 0,
       notes: `قبض من العميل: ${voucher.partyName}`
     });
@@ -2823,7 +3067,7 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
       accountCode: arAcc.code,
       accountName: arAcc.name,
       debit: 0,
-      credit: voucher.amount,
+      credit: amt,
       notes: `سداد حساب العميل: ${voucher.partyName}`
     });
   } else {
@@ -2833,7 +3077,7 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
       accountId: apAcc.id,
       accountCode: apAcc.code,
       accountName: apAcc.name,
-      debit: voucher.amount,
+      debit: amt,
       credit: 0,
       notes: `صرف للمورد: ${voucher.partyName}`
     });
@@ -2842,12 +3086,12 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
       accountCode: methodAcc.code,
       accountName: methodAcc.name,
       debit: 0,
-      credit: voucher.amount,
+      credit: amt,
       notes: `سداد من الخزينة/البنك للمورد: ${voucher.partyName}`
     });
   }
 
-  return {
+  return rebalanceJournalPrecision({
     id: generateId('j'),
     number: jNum,
     date: voucher.date,
@@ -2856,7 +3100,7 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
     sourceId: voucher.id,
     lines,
     createdAt: new Date().toISOString()
-  };
+  });
 }
 
 /**
@@ -3202,26 +3446,26 @@ export function getBranchFinancialSummary(db: AccountingDB, branchId: string) {
 
   // 1. Sales for this branch
   const branchSales = db.invoices.filter(inv => inv.type === 'sale' && (inv.branchId === targetBranch || (!inv.branchId && targetBranch === 'br_main')));
-  const totalSales = branchSales.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
-  const paidSales = branchSales.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
-  const unpaidSales = branchSales.reduce((sum, inv) => sum + (Number(inv.remaining) || 0), 0);
+  const totalSales = roundMoney(branchSales.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0));
+  const paidSales = roundMoney(branchSales.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0));
+  const unpaidSales = roundMoney(branchSales.reduce((sum, inv) => sum + (Number(inv.remaining) || 0), 0));
 
   // 2. Purchases for this branch
   const branchPurchases = db.invoices.filter(inv => inv.type === 'purchase' && (inv.branchId === targetBranch || (!inv.branchId && targetBranch === 'br_main')));
-  const totalPurchases = branchPurchases.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
-  const paidPurchases = branchPurchases.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
+  const totalPurchases = roundMoney(branchPurchases.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0));
+  const paidPurchases = roundMoney(branchPurchases.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0));
 
   // 3. Vouchers for this branch
   const branchVouchers = db.vouchers.filter(v => v.branchId === targetBranch || (!v.branchId && targetBranch === 'br_main'));
-  const receiptsTotal = branchVouchers.filter(v => v.type === 'receipt').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
-  const paymentsTotal = branchVouchers.filter(v => v.type === 'payment').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
+  const receiptsTotal = roundMoney(branchVouchers.filter(v => v.type === 'receipt').reduce((sum, v) => sum + (Number(v.amount) || 0), 0));
+  const paymentsTotal = roundMoney(branchVouchers.filter(v => v.type === 'payment').reduce((sum, v) => sum + (Number(v.amount) || 0), 0));
 
   // 4. Expenses & Revenues for this branch
   const branchExpenses = db.expenses.filter(e => e.branchId === targetBranch || (!e.branchId && targetBranch === 'br_main'));
-  const totalExpenses = branchExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const totalExpenses = roundMoney(branchExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0));
 
   const branchRevenues = db.revenues.filter(r => r.branchId === targetBranch || (!r.branchId && targetBranch === 'br_main'));
-  const totalRevenues = branchRevenues.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const totalRevenues = roundMoney(branchRevenues.reduce((sum, r) => sum + (Number(r.amount) || 0), 0));
 
   // 5. Cash balance in this branch:
   // (Paid cash sales + receipts + revenues) - (Paid cash purchases + payments + expenses)
@@ -3232,7 +3476,7 @@ export function getBranchFinancialSummary(db: AccountingDB, branchId: string) {
   const cashExpenses = branchExpenses.filter(e => e.method === 'نقدي').reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
   const cashRevenues = branchRevenues.filter(r => r.method === 'نقدي').reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
 
-  const cashBalance = (cashSalesPaid + cashReceipts + cashRevenues) - (cashPurchasesPaid + cashPayments + cashExpenses);
+  const cashBalance = roundMoney((cashSalesPaid + cashReceipts + cashRevenues) - (cashPurchasesPaid + cashPayments + cashExpenses));
 
   // 6. Branch Inventory (Strict FIFO Batch Valuation)
   let inStockCount = 0;
@@ -3440,8 +3684,8 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
         ? updated.invoices.find(i => i.number === (voucher as any).referenceNumber && i.type === expectedInvType)
         : undefined);
     if (linkedInv) {
-      linkedInv.paid = Math.max(0, (linkedInv.paid || 0) - voucher.amount);
-      linkedInv.remaining = Math.max(0, (linkedInv.total || 0) - linkedInv.paid);
+      linkedInv.paid = roundMoney(Math.max(0, (linkedInv.paid || 0) - voucher.amount));
+      linkedInv.remaining = roundMoney(Math.max(0, (linkedInv.total || 0) - linkedInv.paid));
       linkedInv.status = linkedInv.paid <= 0 ? 'آجل' : linkedInv.remaining <= 0 ? 'مدفوع' : 'جزئي';
     }
   }
@@ -3555,8 +3799,8 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
     );
 
   if (linkedInvoice) {
-    linkedInvoice.paid = Math.max(0, (linkedInvoice.paid || 0) - tr.amount);
-    linkedInvoice.remaining = Math.max(0, (linkedInvoice.total || 0) - linkedInvoice.paid);
+    linkedInvoice.paid = roundMoney(Math.max(0, (linkedInvoice.paid || 0) - tr.amount));
+    linkedInvoice.remaining = roundMoney(Math.max(0, (linkedInvoice.total || 0) - linkedInvoice.paid));
     linkedInvoice.status = linkedInvoice.paid <= 0 ? 'آجل' : linkedInvoice.remaining <= 0 ? 'مدفوع' : 'جزئي';
 
     if (linkedInvoice.partyId) {
@@ -3781,6 +4025,40 @@ export function isDuplicateProduct(
   }
 
   return { isDuplicate: false };
+}
+
+/**
+ * توليد كود صنف فريد تماماً وغير مكرر
+ * يفحص كافة الأكواد الحالية بالنظام ويستخرج أعلى رقم تسلسلي ويضمن عدم وجود أي تشابه أو تكرار
+ */
+export function generateUniqueProductCode(db: AccountingDB, prefix: string = 'PRD-'): string {
+  const existingCodes = new Set<string>();
+  let maxNumeric = 0;
+
+  for (const p of db?.products || []) {
+    if (!p || !p.code) continue;
+    const clean = p.code.trim();
+    existingCodes.add(clean.toLowerCase());
+
+    const match = clean.match(/(\d+)/g);
+    if (match) {
+      for (const m of match) {
+        const val = parseInt(m, 10);
+        if (!isNaN(val) && val > maxNumeric && val < 10000000) {
+          maxNumeric = val;
+        }
+      }
+    }
+  }
+
+  let nextNum = Math.max(maxNumeric + 1, (db?.products?.length || 0) + 1, 1002);
+  let candidate = `${prefix}${String(nextNum).padStart(4, '0')}`;
+  while (existingCodes.has(candidate.toLowerCase())) {
+    nextNum++;
+    candidate = `${prefix}${String(nextNum).padStart(4, '0')}`;
+  }
+
+  return candidate;
 }
 
 /**

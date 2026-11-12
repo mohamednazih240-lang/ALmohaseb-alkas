@@ -24,7 +24,9 @@ import {
   PAYMENT_METHODS,
   generateId,
   getTodayDate,
-  getNextUniqueVoucherNumber
+  getNextUniqueVoucherNumber,
+  roundMoney,
+  isFinitePositive
 } from '../services/accountingStorage';
 import {
   postManualVoucherTransaction,
@@ -35,6 +37,7 @@ import { VoucherPrintModal } from './VoucherPrintModal';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 import { tafqeetCurrency } from '../services/tafqeetService';
 
 interface VouchersViewProps {
@@ -57,6 +60,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
   const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
   const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   const [showModal, setShowModal] = useState(false);
   const [editingVoucher, setEditingVoucher] = useState<Voucher | null>(null);
@@ -126,91 +130,97 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
   const handleSaveVoucher = (e: React.FormEvent) => {
     e.preventDefault();
-    if (amount <= 0) return alert('المبلغ يجب أن يكون أكبر من صفر');
+    runWithLock(() => {
+      const cleanAmt = roundMoney(amount);
+      if (!isFinitePositive(cleanAmt)) return alert('المبلغ يجب أن يكون أكبر من صفر');
+      if (paymentMethod === 'آجل') return alert('يرجى اختيار وسيلة سداد/تحصيل نقدية أو بنكية للسند.');
 
-    const list = isReceipt ? db.customers : db.suppliers;
-    const party = list.find(p => p.id === partyId);
-    const partyName = party ? party.name : (isReceipt ? 'عميل نقدي' : 'مورد عام');
-    const operatorName = db.currentUser?.name || 'مدير النظام';
+      const list = isReceipt ? db.customers : db.suppliers;
+      const party = list.find(p => p.id === partyId);
+      const partyName = party ? party.name : (isReceipt ? 'عميل نقدي' : 'مورد عام');
+      const operatorName = db.currentUser?.name || 'مدير النظام';
 
-    let voucherPayload: Voucher;
-    let workingDb = db;
+      let voucherPayload: Voucher;
+      let workingDb = db;
 
-    if (editingVoucher) {
-      voucherPayload = {
-        ...editingVoucher,
-        date: voucherDate,
-        partyId: partyId || undefined,
-        partyName,
-        amount,
-        paymentMethod,
-        description,
-        invoiceId: linkedInvoiceId || undefined,
-        referenceNumber: selectedLinkedInvoice ? selectedLinkedInvoice.number : undefined,
-        updatedAt: new Date().toISOString(),
-        updatedBy: operatorName
-      };
-    } else {
-      const nextSettingKey = isReceipt ? 'nextReceipt' : 'nextPayment';
-      const { number: vNumber, nextSeq } = getNextUniqueVoucherNumber(db, type);
-      workingDb = {
-        ...db,
-        settings: {
-          ...db.settings,
-          [nextSettingKey]: nextSeq + 1
-        }
-      };
+      if (editingVoucher) {
+        voucherPayload = {
+          ...editingVoucher,
+          date: voucherDate,
+          partyId: partyId || undefined,
+          partyName,
+          amount: cleanAmt,
+          paymentMethod,
+          description: description.trim(),
+          invoiceId: linkedInvoiceId || undefined,
+          referenceNumber: selectedLinkedInvoice ? selectedLinkedInvoice.number : undefined,
+          updatedAt: new Date().toISOString(),
+          updatedBy: operatorName
+        };
+      } else {
+        const nextSettingKey = isReceipt ? 'nextReceipt' : 'nextPayment';
+        const { number: vNumber, nextSeq } = getNextUniqueVoucherNumber(db, type);
+        workingDb = {
+          ...db,
+          settings: {
+            ...db.settings,
+            [nextSettingKey]: nextSeq + 1
+          }
+        };
 
-      const vId = generateId(isReceipt ? 'rec' : 'pay');
-      voucherPayload = {
-        id: vId,
-        number: vNumber,
-        type,
-        date: voucherDate,
-        partyId: partyId || undefined,
-        partyName,
-        amount,
-        paymentMethod,
-        description,
-        invoiceId: linkedInvoiceId || undefined,
-        referenceNumber: selectedLinkedInvoice ? selectedLinkedInvoice.number : undefined,
-        isManualInstallment: true,
-        isAutoFromInvoice: false,
-        branchId: targetBranchId,
-        branchName: currentBranch.name,
-        createdAt: new Date().toISOString(),
-        createdBy: operatorName
-      };
-    }
+        const vId = generateId(isReceipt ? 'rec' : 'pay');
+        voucherPayload = {
+          id: vId,
+          number: vNumber,
+          type,
+          date: voucherDate,
+          partyId: partyId || undefined,
+          partyName,
+          amount: cleanAmt,
+          paymentMethod,
+          description: description.trim(),
+          invoiceId: linkedInvoiceId || undefined,
+          referenceNumber: selectedLinkedInvoice ? selectedLinkedInvoice.number : undefined,
+          isManualInstallment: true,
+          isAutoFromInvoice: false,
+          branchId: targetBranchId,
+          branchName: currentBranch.name,
+          createdAt: new Date().toISOString(),
+          createdBy: operatorName
+        };
+      }
 
-    const result = postManualVoucherTransaction(workingDb, voucherPayload, operatorName);
-    if (!result.success) {
-      alert(result.message);
-      return;
-    }
+      const result = postManualVoucherTransaction(workingDb, voucherPayload, operatorName);
+      if (!result.success) {
+        alert(result.message);
+        return;
+      }
 
-    onUpdateDb(result.db);
-    setShowModal(false);
-    setEditingVoucher(null);
+      onUpdateDb(result.db);
+      setShowModal(false);
+      setEditingVoucher(null);
+    });
   };
 
   const handleDeleteVoucher = (v: Voucher) => {
-    const isManager = db.currentUser?.role === 'مدير';
-    if (!isManager) {
-      alert('عذراً، لا يمكن حذف أي سند مالي إلا من قِبل المدير العام فقط.');
-      return;
-    }
+    runWithLock(() => {
+      const isManager = db.currentUser?.role === 'مدير';
+      if (!isManager) {
+        alert('عذراً، لا يمكن حذف أي سند مالي إلا من قِبل المدير العام فقط.');
+        return;
+      }
 
-    if (!confirm(`هل أنت متأكد من حذف ${isReceipt ? 'سند القبض' : 'سند الصرف'} "${v.number}" وعكس القيود والأرصدة المالية بالكامل؟`)) {
-      return;
-    }
+      if (!confirm(`هل أنت متأكد من حذف ${isReceipt ? 'سند القبض' : 'سند الصرف'} "${v.number}" وعكس القيود والأرصدة المالية بالكامل؟`)) {
+        return;
+      }
 
-    const res = cancelOrDeleteVoucherTransaction(db, v.id, db.currentUser?.name || 'المدير العام', 'حذف السند من إدارة السندات');
-    if (!res.success) {
-      alert(res.message);
-      return;
-    }
-    onUpdateDb(res.db);
+      const res = cancelOrDeleteVoucherTransaction(db, v.id, db.currentUser?.name || 'المدير العام', 'حذف السند من إدارة السندات');
+      if (!res.success) {
+        alert(res.message);
+        return;
+      }
+      onUpdateDb(res.db);
+    });
   };
 
   const handleBatchExportExcel = () => {
@@ -660,9 +670,10 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-black text-white rounded-lg text-xs font-bold"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-black disabled:opacity-50 text-white rounded-lg text-xs font-bold"
                 >
-                  حفظ وترحيل السند
+                  {isSubmitting ? 'جارٍ الترحيل...' : 'حفظ وترحيل السند'}
                 </button>
               </div>
             </form>

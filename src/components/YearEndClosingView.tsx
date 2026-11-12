@@ -18,9 +18,18 @@ import {
   Building2
 } from 'lucide-react';
 import { AccountingDB, FiscalPeriod, JournalEntry, JournalLine } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit } from '../services/accountingStorage';
+import {
+  formatMoney,
+  roundMoney,
+  rebalanceJournalPrecision,
+  assertJournalBalanced,
+  generateId,
+  getTodayDate,
+  logAudit
+} from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface YearEndClosingViewProps {
   db: AccountingDB;
@@ -28,6 +37,7 @@ interface YearEndClosingViewProps {
 }
 
 export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUpdateDb }) => {
+  const { isSubmitting, runWithLock } = useSubmitLock();
   const [selectedPeriodId, setSelectedPeriodId] = useState<string>(
     db.periods[0]?.id || ''
   );
@@ -41,63 +51,26 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
 
   const selectedPeriod = db.periods.find(p => p.id === selectedPeriodId) || db.periods[0];
 
-  // Calculate Revenues & Expenses within selected period
+  // Calculate Revenues & Expenses strictly from posted P&L journals (plus fallback ONLY for legacy unjournaled records, NEVER double-counting or treating purchases as revenue)
   const calculatePeriodFinancials = (period?: FiscalPeriod) => {
     if (!period) return { revenues: 0, expenses: 0, netProfit: 0, revenueAccounts: [], expenseAccounts: [] };
 
     const fromDate = period.from;
     const toDate = period.to;
 
-    // Filter journal entries within period date range, excluding previous closing entries
-    const periodJournals = db.journals.filter(j => 
-      j.date >= fromDate && 
+    const periodJournals = db.journals.filter(j =>
+      j.date >= fromDate &&
       j.date <= toDate &&
       !j.description.includes('قيد الإقفال السنوي')
     );
 
-    // Sum balances by account
+    const journaledSourceIds = new Set<string>(
+      periodJournals.map(j => j.sourceId).filter((id): id is string => Boolean(id))
+    );
+
     const accBalances: Record<string, { name: string; code: string; type: string; debit: number; credit: number }> = {};
-    
-    // Also include sales invoices
-    db.invoices.forEach(inv => {
-      if (inv.date >= fromDate && inv.date <= toDate) {
-        if (!accBalances['acc_sales']) {
-          accBalances['acc_sales'] = { name: 'إيراد المبيعات', code: '4101', type: 'revenue', debit: 0, credit: 0 };
-        }
-        accBalances['acc_sales'].credit += Number(inv.subtotal || inv.total || 0);
 
-        // COGS
-        const cogsTotal = inv.items.reduce((s, it) => s + (Number(it.costPrice || 0) * Number(it.qty || 0)), 0);
-        if (cogsTotal > 0) {
-          if (!accBalances['acc_cogs']) {
-            accBalances['acc_cogs'] = { name: 'تكلفة البضاعة المباعة (COGS)', code: '5101', type: 'expense', debit: 0, credit: 0 };
-          }
-          accBalances['acc_cogs'].debit += cogsTotal;
-        }
-      }
-    });
-
-    // Include operational expenses
-    db.expenses.forEach(exp => {
-      if (exp.date >= fromDate && exp.date <= toDate) {
-        if (!accBalances['acc_exp']) {
-          accBalances['acc_exp'] = { name: 'المصروفات العمومية والتشغيلية', code: '5201', type: 'expense', debit: 0, credit: 0 };
-        }
-        accBalances['acc_exp'].debit += Number(exp.amount || 0);
-      }
-    });
-
-    // Include other revenues
-    db.revenues.forEach(rev => {
-      if (rev.date >= fromDate && rev.date <= toDate) {
-        if (!accBalances['acc_other_rev']) {
-          accBalances['acc_other_rev'] = { name: 'إيرادات تشغيلية وأخرى', code: '4201', type: 'revenue', debit: 0, credit: 0 };
-        }
-        accBalances['acc_other_rev'].credit += Number(rev.amount || 0);
-      }
-    });
-
-    // Include journal entries lines
+    // 1. Primary Authoritative Source: All posted revenue & expense journal lines in the period
     periodJournals.forEach(j => {
       j.lines.forEach(l => {
         const acc = db.accounts.find(a => a.id === l.accountId);
@@ -105,10 +78,50 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
           if (!accBalances[acc.id]) {
             accBalances[acc.id] = { name: acc.name, code: acc.code, type: acc.type, debit: 0, credit: 0 };
           }
-          accBalances[acc.id].debit += Number(l.debit || 0);
-          accBalances[acc.id].credit += Number(l.credit || 0);
+          accBalances[acc.id].debit = roundMoney(accBalances[acc.id].debit + (Number(l.debit) || 0));
+          accBalances[acc.id].credit = roundMoney(accBalances[acc.id].credit + (Number(l.credit) || 0));
         }
       });
+    });
+
+    // 2. Fallback ONLY for legacy unjournaled SALES invoices (strictly filter type === 'sale' & non-quote, never purchases!)
+    db.invoices.forEach(inv => {
+      if (
+        inv.date >= fromDate &&
+        inv.date <= toDate &&
+        inv.type === 'sale' &&
+        inv.invoiceKind !== 'quote' &&
+        !journaledSourceIds.has(inv.id)
+      ) {
+        const salesVal = roundMoney(Number(inv.total || 0) - Number(inv.tax || 0) - Number(inv.extraIncomeVal || 0));
+        if (!accBalances['acc_sales']) {
+          accBalances['acc_sales'] = { name: 'إيراد المبيعات', code: '4101', type: 'revenue', debit: 0, credit: 0 };
+        }
+        if (inv.invoiceKind === 'sale_return') {
+          accBalances['acc_sales'].debit = roundMoney(accBalances['acc_sales'].debit + Math.max(0, salesVal));
+        } else {
+          accBalances['acc_sales'].credit = roundMoney(accBalances['acc_sales'].credit + Math.max(0, salesVal));
+        }
+      }
+    });
+
+    // 3. Fallback ONLY for legacy unjournaled expenses & other revenues
+    db.expenses.forEach(exp => {
+      if (exp.date >= fromDate && exp.date <= toDate && !journaledSourceIds.has(exp.id)) {
+        if (!accBalances['acc_exp']) {
+          accBalances['acc_exp'] = { name: 'المصروفات العمومية والتشغيلية', code: '5201', type: 'expense', debit: 0, credit: 0 };
+        }
+        accBalances['acc_exp'].debit = roundMoney(accBalances['acc_exp'].debit + (Number(exp.amount) || 0));
+      }
+    });
+
+    db.revenues.forEach(rev => {
+      if (rev.date >= fromDate && rev.date <= toDate && !journaledSourceIds.has(rev.id)) {
+        if (!accBalances['acc_other_rev']) {
+          accBalances['acc_other_rev'] = { name: 'إيرادات تشغيلية وأخرى', code: '4201', type: 'revenue', debit: 0, credit: 0 };
+        }
+        accBalances['acc_other_rev'].credit = roundMoney(accBalances['acc_other_rev'].credit + (Number(rev.amount) || 0));
+      }
     });
 
     const revenueAccounts: { id: string; name: string; code: string; netCredit: number }[] = [];
@@ -119,21 +132,30 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
 
     Object.entries(accBalances).forEach(([accId, data]) => {
       if (data.type === 'revenue') {
-        const netCredit = data.credit - data.debit;
+        const netCredit = roundMoney(data.credit - data.debit);
         if (netCredit > 0) {
           revenueAccounts.push({ id: accId, name: data.name, code: data.code, netCredit });
-          totalRevenues += netCredit;
+          totalRevenues = roundMoney(totalRevenues + netCredit);
+        } else if (netCredit < 0) {
+          // Debit net balance in a revenue account (e.g. returns exceeding sales) treated as contra/expense
+          const absLoss = roundMoney(Math.abs(netCredit));
+          expenseAccounts.push({ id: accId, name: data.name, code: data.code, netDebit: absLoss });
+          totalExpenses = roundMoney(totalExpenses + absLoss);
         }
       } else if (data.type === 'expense') {
-        const netDebit = data.debit - data.credit;
+        const netDebit = roundMoney(data.debit - data.credit);
         if (netDebit > 0) {
           expenseAccounts.push({ id: accId, name: data.name, code: data.code, netDebit });
-          totalExpenses += netDebit;
+          totalExpenses = roundMoney(totalExpenses + netDebit);
+        } else if (netDebit < 0) {
+          const absGain = roundMoney(Math.abs(netDebit));
+          revenueAccounts.push({ id: accId, name: data.name, code: data.code, netCredit: absGain });
+          totalRevenues = roundMoney(totalRevenues + absGain);
         }
       }
     });
 
-    const netProfit = totalRevenues - totalExpenses;
+    const netProfit = roundMoney(totalRevenues - totalExpenses);
 
     return {
       revenues: totalRevenues,
@@ -149,169 +171,182 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
   // Execute Year-End Closing
   const handleExecuteClosing = () => {
     if (!selectedPeriod) return;
-    if (selectedPeriod.status === 'مغلق') {
-      alert('هذه الفترة مغلقة بالفعل ومرحلة مسبقاً.');
-      return;
-    }
+    runWithLock(() => {
+      if (selectedPeriod.status === 'مغلق') {
+        alert('هذه الفترة مغلقة بالفعل ومرحلة مسبقاً.');
+        return;
+      }
 
-    const confirmMsg = `تأكيد هام: هل ترغب في إقفال الفترة المالية (${selectedPeriod.name})؟\n\n` +
-      `إجمالي الإيرادات: ${formatMoney(financials.revenues, db.settings.currency)}\n` +
-      `إجمالي المصروفات: ${formatMoney(financials.expenses, db.settings.currency)}\n` +
-      `صافي الأرباح/الخسائر: ${formatMoney(financials.netProfit, db.settings.currency)}\n\n` +
-      `سيتم إنشاء قيد إقفال آلي وترحيل صافي النتيجة لحساب (الأرباح والخسائر المرحلة) وقفل الفترة لمنع التعديل.`;
+      const confirmMsg = `تأكيد هام: هل ترغب في إقفال الفترة المالية (${selectedPeriod.name})؟\n\n` +
+        `إجمالي الإيرادات: ${formatMoney(financials.revenues, db.settings.currency)}\n` +
+        `إجمالي المصروفات: ${formatMoney(financials.expenses, db.settings.currency)}\n` +
+        `صافي الأرباح/الخسائر: ${formatMoney(financials.netProfit, db.settings.currency)}\n\n` +
+        `سيتم إنشاء قيد إقفال آلي وترحيل صافي النتيجة لحساب (الأرباح والخسائر المرحلة) وقفل الفترة لمنع التعديل.`;
 
-    if (!confirm(confirmMsg)) return;
+      if (!confirm(confirmMsg)) return;
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const closingDate = selectedPeriod.to;
-    const closingEntryId = generateId('jrn_close');
-    const closingNumber = `CLOSE-${selectedPeriod.to.replace(/-/g, '').slice(0, 4)}`;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const closingDate = selectedPeriod.to;
+      const closingEntryId = generateId('jrn_close');
+      const closingNumber = `CLOSE-${selectedPeriod.to.replace(/-/g, '').slice(0, 4)}`;
 
-    const lines: JournalLine[] = [];
+      const lines: JournalLine[] = [];
 
-    // 1. Debit all revenue accounts to zero them out
-    financials.revenueAccounts.forEach(rev => {
-      lines.push({
-        accountId: rev.id,
-        accountName: rev.name,
-        accountCode: rev.code,
-        debit: rev.netCredit,
-        credit: 0,
-        notes: `إقفال حساب ${rev.name} السنوي`
+      // 1. Debit all revenue accounts to zero them out
+      financials.revenueAccounts.forEach(rev => {
+        lines.push({
+          accountId: rev.id,
+          accountName: rev.name,
+          accountCode: rev.code,
+          debit: roundMoney(rev.netCredit),
+          credit: 0,
+          notes: `إقفال حساب ${rev.name} السنوي`
+        });
       });
-    });
 
-    // 2. Credit all expense accounts to zero them out
-    financials.expenseAccounts.forEach(exp => {
-      lines.push({
-        accountId: exp.id,
-        accountName: exp.name,
-        accountCode: exp.code,
-        debit: 0,
-        credit: exp.netDebit,
-        notes: `إقفال حساب ${exp.name} السنوي`
+      // 2. Credit all expense accounts to zero them out
+      financials.expenseAccounts.forEach(exp => {
+        lines.push({
+          accountId: exp.id,
+          accountName: exp.name,
+          accountCode: exp.code,
+          debit: 0,
+          credit: roundMoney(exp.netDebit),
+          notes: `إقفال حساب ${exp.name} السنوي`
+        });
       });
-    });
 
-    // 3. Balance transfer to Retained Earnings
-    const retainedAcc = updated.accounts.find(a => a.id === 'acc_retained_earnings') || {
-      id: 'acc_retained_earnings',
-      name: 'الأرباح والخسائر المرحلة (السنوات السابقة)',
-      code: '3201',
-      type: 'equity'
-    };
-
-    if (financials.netProfit > 0) {
-      // Net Profit: Credit Retained Earnings
-      lines.push({
-        accountId: retainedAcc.id,
-        accountName: retainedAcc.name,
-        accountCode: retainedAcc.code,
-        debit: 0,
-        credit: financials.netProfit,
-        notes: `ترحيل صافي أرباح الفترة (${selectedPeriod.name}) للأرباح المرحلة`
-      });
-    } else if (financials.netProfit < 0) {
-      // Net Loss: Debit Retained Earnings
-      lines.push({
-        accountId: retainedAcc.id,
-        accountName: retainedAcc.name,
-        accountCode: retainedAcc.code,
-        debit: Math.abs(financials.netProfit),
-        credit: 0,
-        notes: `ترحيل صافي خسائر الفترة (${selectedPeriod.name}) للأرباح المرحلة`
-      });
-    }
-
-    if (lines.length > 0) {
-      const closingEntry: JournalEntry = {
-        id: closingEntryId,
-        number: closingNumber,
-        date: closingDate,
-        description: `قيد الإقفال السنوي وترحيل الأرصدة للفترة ${selectedPeriod.name}`,
-        sourceType: 'adjustment',
-        sourceId: selectedPeriod.id,
-        lines,
-        createdAt: new Date().toISOString()
+      // 3. Balance transfer to Retained Earnings
+      const retainedAcc = updated.accounts.find(a => a.id === 'acc_retained_earnings') || {
+        id: 'acc_retained_earnings',
+        name: 'الأرباح والخسائر المرحلة (السنوات السابقة)',
+        code: '3201',
+        type: 'equity'
       };
-      updated.journals.push(closingEntry);
-    }
 
-    // Update Period
-    const perIndex = updated.periods.findIndex(p => p.id === selectedPeriod.id);
-    if (perIndex !== -1) {
-      updated.periods[perIndex] = {
-        ...updated.periods[perIndex],
-        status: 'مغلق',
-        closedAt: new Date().toISOString(),
-        closingJournalId: closingEntryId,
-        netIncome: financials.netProfit,
-        retainedEarningsAccountId: retainedAcc.id
-      };
-    }
+      if (financials.netProfit > 0) {
+        lines.push({
+          accountId: retainedAcc.id,
+          accountName: retainedAcc.name,
+          accountCode: retainedAcc.code,
+          debit: 0,
+          credit: roundMoney(financials.netProfit),
+          notes: `ترحيل صافي أرباح الفترة (${selectedPeriod.name}) للأرباح المرحلة`
+        });
+      } else if (financials.netProfit < 0) {
+        lines.push({
+          accountId: retainedAcc.id,
+          accountName: retainedAcc.name,
+          accountCode: retainedAcc.code,
+          debit: roundMoney(Math.abs(financials.netProfit)),
+          credit: 0,
+          notes: `ترحيل صافي خسائر الفترة (${selectedPeriod.name}) للأرباح المرحلة`
+        });
+      }
 
-    logAudit(
-      updated,
-      'إقفال فترة مالية سنوية',
-      `تم إقفال الفترة ${selectedPeriod.name} بصافي نتيجة ${formatMoney(financials.netProfit, db.settings.currency)} وتوليد قيد الإقفال ${closingNumber}`
-    );
+      if (lines.length > 0) {
+        const closingEntry = rebalanceJournalPrecision({
+          id: closingEntryId,
+          number: closingNumber,
+          date: closingDate,
+          description: `قيد الإقفال السنوي وترحيل الأرصدة للفترة ${selectedPeriod.name}`,
+          sourceType: 'adjustment',
+          sourceId: selectedPeriod.id,
+          lines,
+          createdAt: new Date().toISOString()
+        });
+        const bal = assertJournalBalanced(closingEntry);
+        if (!bal.balanced) {
+          alert(`⚠️ تعذر تنفيذ الإقفال السنوي لعدم توازن القيد: ${bal.reason}`);
+          return;
+        }
+        updated.journals.push(closingEntry);
+      }
 
-    onUpdateDb(updated);
-    alert('تم إقفال الفترة المالية وترحيل الأرصدة بنجاح وقفل العمليات.');
+      // Update Period
+      const perIndex = updated.periods.findIndex(p => p.id === selectedPeriod.id);
+      if (perIndex !== -1) {
+        updated.periods[perIndex] = {
+          ...updated.periods[perIndex],
+          status: 'مغلق',
+          closedAt: new Date().toISOString(),
+          closingJournalId: closingEntryId,
+          netIncome: financials.netProfit,
+          retainedEarningsAccountId: retainedAcc.id
+        };
+      }
+
+      logAudit(
+        updated,
+        'إقفال فترة مالية سنوية',
+        `تم إقفال الفترة ${selectedPeriod.name} بصافي نتيجة ${formatMoney(financials.netProfit, db.settings.currency)} وتوليد قيد الإقفال ${closingNumber}`
+      );
+
+      onUpdateDb(updated);
+      alert('تم إقفال الفترة المالية وترحيل الأرصدة بنجاح وقفل العمليات.');
+    });
   };
 
   // Re-open period
   const handleReopenPeriod = () => {
     if (!selectedPeriod) return;
-    if (selectedPeriod.status !== 'مغلق') return;
+    runWithLock(() => {
+      if (selectedPeriod.status !== 'مغلق') return;
 
-    if (!confirm(`هل أنت متأكد من فتح الفترة المالية (${selectedPeriod.name}) مجدداً؟\nسيتم حذف قيد الإقفال السنوي التلقائي للسماح بإدخال تسويات إضافية.`)) {
-      return;
-    }
+      if (!confirm(`هل أنت متأكد من فتح الفترة المالية (${selectedPeriod.name}) مجدداً؟\nسيتم حذف قيد الإقفال السنوي التلقائي للسماح بإدخال تسويات إضافية.`)) {
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    if (selectedPeriod.closingJournalId) {
-      updated.journals = updated.journals.filter(j => j.id !== selectedPeriod.closingJournalId);
-    }
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (selectedPeriod.closingJournalId) {
+        updated.journals = updated.journals.filter(j => j.id !== selectedPeriod.closingJournalId);
+      }
 
-    const perIndex = updated.periods.findIndex(p => p.id === selectedPeriod.id);
-    if (perIndex !== -1) {
-      updated.periods[perIndex] = {
-        ...updated.periods[perIndex],
-        status: 'مفتوح',
-        closedAt: undefined,
-        closingJournalId: undefined
-      };
-    }
+      const perIndex = updated.periods.findIndex(p => p.id === selectedPeriod.id);
+      if (perIndex !== -1) {
+        updated.periods[perIndex] = {
+          ...updated.periods[perIndex],
+          status: 'مفتوح',
+          closedAt: undefined,
+          closingJournalId: undefined
+        };
+      }
 
-    logAudit(updated, 'إلغاء إقفال فترة مالية', `تم إعادة فتح الفترة ${selectedPeriod.name}`);
-    onUpdateDb(updated);
-    alert('تم فتح الفترة المالية بنجاح.');
+      logAudit(updated, 'إلغاء إقفال فترة مالية', `تم إعادة فتح الفترة ${selectedPeriod.name}`);
+      onUpdateDb(updated);
+      alert('تم فتح الفترة المالية بنجاح.');
+    });
   };
 
   // Create new period
   const handleCreatePeriod = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newPeriodName.trim() || !newPeriodFrom || !newPeriodTo) {
-      alert('يرجى استكمال جميع بيانات الفترة المالية.');
-      return;
-    }
+    runWithLock(() => {
+      if (!newPeriodName.trim() || !newPeriodFrom || !newPeriodTo) {
+        alert('يرجى استكمال جميع بيانات الفترة المالية.');
+        return;
+      }
+      if (newPeriodFrom > newPeriodTo) {
+        alert('تاريخ بداية الفترة يجب أن يسبق تاريخ نهايتها.');
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const newPer: FiscalPeriod = {
-      id: generateId('per'),
-      name: newPeriodName.trim(),
-      from: newPeriodFrom,
-      to: newPeriodTo,
-      status: 'مفتوح'
-    };
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const newPer: FiscalPeriod = {
+        id: generateId('per'),
+        name: newPeriodName.trim(),
+        from: newPeriodFrom,
+        to: newPeriodTo,
+        status: 'مفتوح'
+      };
 
-    updated.periods.push(newPer);
-    logAudit(updated, 'إنشاء فترة مالية جديدة', newPer.name);
-    onUpdateDb(updated);
-    setSelectedPeriodId(newPer.id);
-    setShowNewPeriodModal(false);
-    setNewPeriodName('');
+      updated.periods.push(newPer);
+      logAudit(updated, 'إنشاء فترة مالية جديدة', newPer.name);
+      onUpdateDb(updated);
+      setSelectedPeriodId(newPer.id);
+      setShowNewPeriodModal(false);
+      setNewPeriodName('');
+    });
   };
 
   const handleDownloadPdf = async () => {
@@ -562,10 +597,11 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
                   <div className="flex items-center gap-2 w-full sm:w-auto">
                     <button
                       onClick={handleExecuteClosing}
-                      className="w-full sm:w-auto px-6 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-black rounded-xl transition-all flex items-center justify-center gap-2 shadow-xs"
+                      disabled={isSubmitting}
+                      className="w-full sm:w-auto px-6 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-black rounded-xl transition-all flex items-center justify-center gap-2 shadow-xs"
                     >
                       <Lock className="w-4 h-4" />
-                      <span>تنفيذ الإقفال السنوي وترحيل الأرصدة وقفل العمليات</span>
+                      <span>{isSubmitting ? 'جارٍ الإقفال...' : 'تنفيذ الإقفال السنوي وترحيل الأرصدة وقفل العمليات'}</span>
                     </button>
                     <span className="text-[11px] text-slate-500">
                       يُمنع تعديل أي فاتورة أو سند داخل نطاق هذه الفترة بعد الإقفال.
@@ -579,10 +615,11 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
                     </div>
                     <button
                       onClick={handleReopenPeriod}
-                      className="px-4 py-2 border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5"
+                      disabled={isSubmitting}
+                      className="px-4 py-2 border border-slate-300 hover:bg-slate-100 disabled:opacity-50 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5"
                     >
                       <Unlock className="w-4 h-4" />
-                      <span>إلغاء الإقفال والفتح المؤقت</span>
+                      <span>{isSubmitting ? 'جارٍ التنفيذ...' : 'إلغاء الإقفال والفتح المؤقت'}</span>
                     </button>
                   </div>
                 )}
@@ -647,9 +684,10 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl"
                 >
-                  حفظ الفترة
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الفترة'}
                 </button>
               </div>
             </form>

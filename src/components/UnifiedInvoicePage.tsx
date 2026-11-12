@@ -70,8 +70,16 @@ import {
   normalizeArabicText,
   getLatestVerifiedPurchaseInfo,
   buildProductFifoLedger,
-  matchProductStrictly
+  matchProductStrictly,
+  generateUniqueProductCode,
+  roundMoney,
+  roundQty,
+  toCents,
+  isFiniteNonNegative,
+  isFinitePositive
 } from '../services/accountingStorage';
+import { validateDbTransactionIntegrity } from '../services/accountingEngine';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
   InvoicePriceValidationModal,
   BelowCostItem,
@@ -369,6 +377,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Protection against double submission & accidental exit
   const [isSavingInvoice, setIsSavingInvoice] = useState<boolean>(false);
+  const saveLockRef = useRef<boolean>(false);
+  const { isSubmitting: isModalSubmitting, runWithLock } = useSubmitLock();
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
   const [unsavedDraftData, setUnsavedDraftData] = useState<any>(null);
 
@@ -730,12 +740,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const tax = parseNum(opts?.overrideTax !== undefined ? opts.overrideTax : rapidItemTax);
     const taxType = opts?.overrideTaxType || rapidItemTaxType;
 
-    const baseTotal = qty * price;
-    const discVal = discType === 'percent' ? (baseTotal * disc / 100) : disc;
-    const taxVal = taxType === 'percent' ? (baseTotal * tax / 100) : tax;
+    const baseTotal = roundMoney(qty * price);
+    const discVal = discType === 'percent' ? roundMoney(baseTotal * disc / 100) : roundMoney(disc);
+    const taxVal = taxType === 'percent' ? roundMoney(baseTotal * tax / 100) : roundMoney(tax);
 
     if (direction === 'forward') {
-      const tot = Math.max(0, baseTotal - discVal + taxVal);
+      const tot = roundMoney(Math.max(0, baseTotal - discVal + taxVal));
       setRapidItemTotal(tot > 0 ? tot.toFixed(2) : '');
     } else if (direction === 'backward') {
       const targetTot = parseNum(opts?.overrideTotal !== undefined ? opts.overrideTotal : rapidItemTotal);
@@ -745,7 +755,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           const factor = 1 - (discType === 'percent' ? disc / 100 : 0) + (taxType === 'percent' ? tax / 100 : 0);
           effectiveSubtotal = factor > 0 ? targetTot / factor : targetTot;
         }
-        const newUnitPrice = effectiveSubtotal / qty;
+        const newUnitPrice = roundMoney(effectiveSubtotal / qty);
         setRapidItemPrice(Math.max(0, newUnitPrice).toFixed(2));
       }
     }
@@ -810,144 +820,137 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
 
   const saveRapidItemToInvoice = () => {
-    const name = rapidItemName.trim();
-    const qty = parseNum(rapidItemQty);
-    const price = parseNum(rapidItemPrice);
-    const total = parseNum(rapidItemTotal);
-    const discount = parseNum(rapidItemDiscount);
-    const tax = parseNum(rapidItemTax);
+    runWithLock(() => {
+      const name = rapidItemName.trim();
+      const qty = roundQty(parseNum(rapidItemQty));
+      const price = roundMoney(parseNum(rapidItemPrice));
+      const total = roundMoney(parseNum(rapidItemTotal));
+      const discount = roundMoney(parseNum(rapidItemDiscount));
+      const tax = roundMoney(parseNum(rapidItemTax));
 
-    if (!name) {
-      alert('يرجى إدخال اسم الصنف');
-      rapidNameRef.current?.focus();
-      return;
-    }
-    if (qty <= 0) {
-      alert('يرجى إدخال العدد الصحيح (أكبر من صفر)');
-      rapidQtyRef.current?.focus();
-      return;
-    }
-
-    const isStrictCatalogMode = mode === 'sale' || mode === 'wholesale' || mode === 'sale_return' || mode === 'quote';
-    const matchRes = matchProductStrictly(db, { name });
-    let matched: Product | undefined = matchRes.exactMatch;
-
-    if (!matched) {
-      if (isStrictCatalogMode) {
-        alert(`⛔ غير مسموح ببيع أو إرجاع صنف غير مسجل في دليل الأصناف ("${name}").\nيرجى اختيار الصنف من الكتالوج المعتمد أو تسجيله أولاً من المخزون/المشتريات.`);
+      if (!name) {
+        alert('يرجى إدخال اسم الصنف');
         rapidNameRef.current?.focus();
         return;
       }
-
-      if (matchRes.ambiguousCandidates.length > 0) {
-        const candidatesList = matchRes.ambiguousCandidates
-          .slice(0, 5)
-          .map(p => `• ${p.name} (كود: ${p.code})`)
-          .join('\n');
-        const linkFirst = confirm(
-          `⚠️ تم العثور على أصناف مشابهة في الدليل للاسم "${name}":\n${candidatesList}\n\n• اضغط «موافق» لربط البند بأول صنف مطابق (${matchRes.ambiguousCandidates[0].name}) ومنع التكرار.\n• اضغط «إلغاء» لتسجيله كصنف جديد مستقل.`
-        );
-        if (linkFirst) {
-          matched = matchRes.ambiguousCandidates[0];
-        }
+      if (!isFinitePositive(qty)) {
+        alert('يرجى إدخال العدد الصحيح (أكبر من صفر)');
+        rapidQtyRef.current?.focus();
+        return;
       }
+      if (!isFiniteNonNegative(price) || !isFiniteNonNegative(discount) || !isFiniteNonNegative(tax)) {
+        alert('القيم الرقمية للسعر أو الخصم أو الضريبة غير صالحة (لا يُسمح بقيم سالبة).');
+        return;
+      }
+
+      const isStrictCatalogMode = mode === 'sale' || mode === 'wholesale' || mode === 'sale_return' || mode === 'quote';
+      const matchRes = matchProductStrictly(db, { name });
+      let matched: Product | undefined = matchRes.exactMatch;
 
       if (!matched) {
-        const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-        const newProdCode = `P-${String(1000 + updated.products.length + 1)}`;
-        const newProdId = generateId('prod');
-        const newProduct: Product = {
-          id: newProdId,
-          code: newProdCode,
-          barcode: '',
-          name: name,
-          category: 'عامة',
-          unit: 'قطعة',
-          buyPrice: 0,
-          sellPrice: 0,
-          wholesalePrice: 0,
-          minStock: 5,
-          currentQty: 0,
-          branchesData: {
-            [invoiceBranchId]: {
-              currentQty: 0,
-              buyPrice: 0,
-              sellPrice: 0,
-              wholesalePrice: 0,
-              minStock: 5
-            }
-          }
-        };
-        updated.products.push(newProduct);
-        matched = newProduct;
-        onUpdateDb(updated);
-      }
-    }
-
-    const calculatedTotal = total > 0 ? total : Math.max(0, (qty * price) - discount + tax);
-    const fifoLedger = buildProductFifoLedger(db, invoiceBranchId, editingInvoice?.id);
-    const fifoSim = fifoLedger.simulateSaleFifoCost(matched.id, name, qty);
-    const resolvedSaleCost = (fifoSim.hasVerifiedCost && fifoSim.effectiveUnitCost !== undefined)
-      ? Number(fifoSim.effectiveUnitCost.toFixed(4))
-      : 0;
-
-    const itemObj: InvoiceItem = {
-      productId: matched.id,
-      productCode: matched.code,
-      productName: matched.name,
-      unit: matched.unit || 'قطعة',
-      spec: rapidItemDesc.trim() || undefined,
-      qty,
-      unitPrice: price,
-      costPrice: mode === 'purchase' ? price : resolvedSaleCost,
-      hasVerifiedCost: mode === 'purchase' ? price > 0 : fifoSim.hasFullVerifiedCost,
-      uncoveredQty: mode === 'purchase' ? 0 : fifoSim.uncoveredQty,
-      discount,
-      taxRate: tax,
-      total: calculatedTotal
-    };
-
-    if (rapidEditingIndex !== null && rapidEditingIndex >= 0) {
-      setInvoiceItems(prev => {
-        const copy = [...prev];
-        copy[rapidEditingIndex] = itemObj;
-        return copy;
-      });
-      setShowRapidItemModal(false);
-      setRapidEditingIndex(null);
-    } else {
-      setInvoiceItems(prev => {
-        const existingIdx = prev.findIndex(
-          it => (matched && it.productId === matched.id) ||
-                it.productName.trim().toLowerCase() === matched!.name.trim().toLowerCase()
-        );
-        if (existingIdx > -1) {
-          const copy = [...prev];
-          const newQty = copy[existingIdx].qty + qty;
-          const finalPrice = price > 0 ? price : copy[existingIdx].unitPrice;
-          copy[existingIdx] = {
-            ...copy[existingIdx],
-            qty: newQty,
-            unitPrice: finalPrice,
-            spec: rapidItemDesc.trim() || copy[existingIdx].spec,
-            total: (newQty * finalPrice) - (copy[existingIdx].discount || 0) + (copy[existingIdx].taxRate || 0)
-          };
-          showToast(`✓ تم زيادة كمية "${name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
-          return copy;
+        if (isStrictCatalogMode) {
+          alert(`⛔ غير مسموح ببيع أو إرجاع صنف غير مسجل في دليل الأصناف ("${name}").\nيرجى اختيار الصنف من الكتالوج المعتمد أو تسجيله أولاً من المخزون/المشتريات.`);
+          rapidNameRef.current?.focus();
+          return;
         }
-        return [...prev, itemObj];
-      });
-      // Reset for continuous rapid entry
-      setRapidItemName('');
-      setRapidItemDesc('');
-      setRapidItemQty('1');
-      setRapidItemPrice('');
-      setRapidItemDiscount('');
-      setRapidItemTax('');
-      setRapidItemTotal('');
-      rapidNameRef.current?.focus();
-      showToast(`✓ تمت إضافة الصنف "${name}" للفاتورة`);
-    }
+
+        if (!matched) {
+          const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+          const newProdCode = generateUniqueProductCode(updated);
+          const newProdId = generateId('prod');
+          const newProduct: Product = {
+            id: newProdId,
+            code: newProdCode,
+            barcode: '',
+            name: name,
+            category: 'عامة',
+            unit: 'قطعة',
+            buyPrice: 0,
+            sellPrice: 0,
+            wholesalePrice: 0,
+            minStock: 5,
+            currentQty: 0,
+            branchesData: {
+              [invoiceBranchId]: {
+                currentQty: 0,
+                buyPrice: 0,
+                sellPrice: 0,
+                wholesalePrice: 0,
+                minStock: 5
+              }
+            }
+          };
+          updated.products.push(newProduct);
+          matched = newProduct;
+          onUpdateDb(updated);
+        }
+      }
+
+      const calculatedTotal = total > 0 ? total : roundMoney(Math.max(0, roundMoney(qty * price) - discount + tax));
+      const fifoLedger = buildProductFifoLedger(db, invoiceBranchId, editingInvoice?.id);
+      const fifoSim = fifoLedger.simulateSaleFifoCost(matched.id, name, qty);
+      const resolvedSaleCost = (fifoSim.hasVerifiedCost && fifoSim.effectiveUnitCost !== undefined)
+        ? Number(fifoSim.effectiveUnitCost.toFixed(4))
+        : 0;
+
+      const itemObj: InvoiceItem = {
+        productId: matched.id,
+        productCode: matched.code,
+        productName: matched.name,
+        unit: matched.unit || 'قطعة',
+        spec: rapidItemDesc.trim() || undefined,
+        qty,
+        unitPrice: price,
+        costPrice: mode === 'purchase' ? price : resolvedSaleCost,
+        hasVerifiedCost: mode === 'purchase' ? price > 0 : fifoSim.hasFullVerifiedCost,
+        uncoveredQty: mode === 'purchase' ? 0 : fifoSim.uncoveredQty,
+        discount,
+        taxRate: tax,
+        total: calculatedTotal
+      };
+
+      if (rapidEditingIndex !== null && rapidEditingIndex >= 0) {
+        setInvoiceItems(prev => {
+          const copy = [...prev];
+          copy[rapidEditingIndex] = itemObj;
+          return copy;
+        });
+        setShowRapidItemModal(false);
+        setRapidEditingIndex(null);
+      } else {
+        setInvoiceItems(prev => {
+          const existingIdx = prev.findIndex(
+            it => (matched && it.productId === matched.id) ||
+                  it.productName.trim().toLowerCase() === matched!.name.trim().toLowerCase()
+          );
+          if (existingIdx > -1) {
+            const copy = [...prev];
+            const newQty = roundQty(copy[existingIdx].qty + qty);
+            const finalPrice = price > 0 ? price : copy[existingIdx].unitPrice;
+            copy[existingIdx] = {
+              ...copy[existingIdx],
+              qty: newQty,
+              unitPrice: finalPrice,
+              spec: rapidItemDesc.trim() || copy[existingIdx].spec,
+              total: roundMoney(Math.max(0, roundMoney(newQty * finalPrice) - (copy[existingIdx].discount || 0) + (copy[existingIdx].taxRate || 0)))
+            };
+            showToast(`✓ تم زيادة كمية "${name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
+            return copy;
+          }
+          return [...prev, itemObj];
+        });
+        // Reset for continuous rapid entry
+        setRapidItemName('');
+        setRapidItemDesc('');
+        setRapidItemQty('1');
+        setRapidItemPrice('');
+        setRapidItemDiscount('');
+        setRapidItemTax('');
+        setRapidItemTotal('');
+        rapidNameRef.current?.focus();
+        showToast(`✓ تمت إضافة الصنف "${name}" للفاتورة`);
+      }
+    });
   };
 
   const handleRapidKeyDown = (e: React.KeyboardEvent, nextRef: React.RefObject<HTMLInputElement | null> | 'save') => {
@@ -992,22 +995,24 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     );
   };
 
-  // Calculations
-  const totalQtySum = invoiceItems.reduce((s, it) => s + (Number(it.qty) || 0), 0);
-  const itemsSubTotal = invoiceItems.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  // Calculations (Exact decimal rounding to eliminate IEEE-754 drift)
+  const totalQtySum = roundQty(invoiceItems.reduce((s, it) => s + (Number(it.qty) || 0), 0));
+  const itemsSubTotal = roundMoney(invoiceItems.reduce((s, it) => s + (Number(it.total) || 0), 0));
 
-  const discNum = parseFloat(globalInvDisc) || 0;
-  const globalDiscCalculated = invDiscType === 'percent'
-    ? itemsSubTotal * (discNum / 100)
-    : discNum;
+  const discNum = Math.max(0, parseFloat(globalInvDisc) || 0);
+  const globalDiscCalculated = roundMoney(
+    invDiscType === 'percent' ? itemsSubTotal * (discNum / 100) : discNum
+  );
 
-  const taxNum = parseFloat(globalInvTax) || 0;
-  const globalTaxCalculated = invTaxType === 'percent'
-    ? Math.max(0, itemsSubTotal - globalDiscCalculated) * (taxNum / 100)
-    : taxNum;
+  const taxNum = Math.max(0, parseFloat(globalInvTax) || 0);
+  const globalTaxCalculated = roundMoney(
+    invTaxType === 'percent'
+      ? Math.max(0, itemsSubTotal - globalDiscCalculated) * (taxNum / 100)
+      : taxNum
+  );
 
-  const extraIncome = parseFloat(extraIncomeVal) || 0;
-  const netTotal = Math.max(0, itemsSubTotal - globalDiscCalculated + globalTaxCalculated + extraIncome);
+  const extraIncome = roundMoney(Math.max(0, parseFloat(extraIncomeVal) || 0));
+  const netTotal = roundMoney(Math.max(0, itemsSubTotal - globalDiscCalculated + globalTaxCalculated + extraIncome));
 
   let paidTotal = 0;
   if (settlementType === 'cash') {
@@ -1015,16 +1020,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   } else if (settlementType === 'credit') {
     paidTotal = 0;
   } else if (settlementType === 'partial') {
-    const p = parseFloat(partialPaidInput) || 0;
-    paidTotal = Math.min(netTotal, Math.max(0, p));
+    const p = roundMoney(parseFloat(partialPaidInput) || 0);
+    paidTotal = roundMoney(Math.min(netTotal, Math.max(0, p)));
   } else {
     if (paymentRows.length === 0) {
       paidTotal = netTotal;
     } else {
-      paidTotal = paymentRows.reduce((s, r) => s + Math.max(0, Number(r.amount) || 0), 0);
+      paidTotal = roundMoney(paymentRows.reduce((s, r) => s + Math.max(0, Number(r.amount) || 0), 0));
     }
   }
-  const remainTotal = Math.max(0, netTotal - paidTotal);
+  const remainTotal = roundMoney(Math.max(0, netTotal - paidTotal));
 
   // Quick add from lookup card
   const quickAddItem = (prod: Product) => {
@@ -1212,22 +1217,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
     let newProd: Product;
 
-    if (!existingProd && matchRes.ambiguousCandidates.length > 0) {
-      const candidates = matchRes.ambiguousCandidates.slice(0, 5).map(p => `• ${p.name} (كود: ${p.code})`).join('\n');
-      const useExisting = confirm(
-        `⚠️ تم العثور على أصناف مشابهة في الدليل للاسم "${name}":\n${candidates}\n\n• اضغط «موافق» لربطه بأول صنف مطابق (${matchRes.ambiguousCandidates[0].name}) ومنع التكرار.\n• اضغط «إلغاء» لتسجيله كصنف جديد مستقل.`
-      );
-      if (useExisting) {
-        existingProd = matchRes.ambiguousCandidates[0];
-      }
-    }
-
     if (existingProd) {
       // Reuse existing product WITHOUT mutating catalog buyPrice or selling prices before posting!
       newProd = existingProd;
       logAudit(updated, `ربط صنف مسجل مسبقاً بالفاتورة (${invoiceBranch.name})`, `${newProd.name} (كود: ${newProd.code})`);
     } else {
-      const newCode = `P-${String(1000 + updated.products.length + 1)}`;
+      const newCode = generateUniqueProductCode(updated);
       const newId = generateId('prod');
       const initialQty = 0;
 
@@ -1309,56 +1304,58 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Quick Register Party (عميل / مورد / شركة)
   const quickRegisterParty = (partyNameInput?: string) => {
-    const pName = (partyNameInput || custSearchInput).trim();
-    if (!pName) {
-      alert(`يرجى كتابة اسم ${theme.partyLabel} / الشركة أولاً`);
-      return;
-    }
-
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const isCust = theme.partyRole === 'customer';
-    const targetType = isCust ? 'customer' : 'supplier';
-    const list = isCust ? updated.customers : updated.suppliers;
-
-    // Duplicate check
-    const dupCheck = isDuplicateParty(updated, targetType, pName, custPhone.trim());
-    if (dupCheck.isDuplicate) {
-      if (dupCheck.existing) {
-        selectParty(dupCheck.existing);
-        showToast(`✓ الشركة مسجلة مسبقاً: "${dupCheck.existing.name}" (كود: ${dupCheck.existing.code || '—'}) تم اختيارها تلقائياً`);
-        setShowCustDropdown(false);
+    runWithLock(() => {
+      const pName = (partyNameInput || custSearchInput).trim();
+      if (!pName) {
+        alert(`يرجى كتابة اسم ${theme.partyLabel} / الشركة أولاً`);
         return;
       }
-      alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
-      return;
-    }
 
-    const newCode = getNextUniquePartyCode(updated, targetType);
-    const newId = generateId('party');
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const isCust = theme.partyRole === 'customer';
+      const targetType = isCust ? 'customer' : 'supplier';
+      const list = isCust ? updated.customers : updated.suppliers;
 
-    const newParty: Party = {
-      id: newId,
-      code: newCode,
-      name: pName,
-      company: pName,
-      phone: custPhone.trim() || '',
-      address: '',
-      type: targetType,
-      balance: 0,
-      openingBalance: 0,
-      creditLimit: 0,
-      notes: 'تم التسجيل والإثبات أثناء إنشاء الفاتورة'
-    };
+      // Duplicate check
+      const dupCheck = isDuplicateParty(updated, targetType, pName, custPhone.trim());
+      if (dupCheck.isDuplicate) {
+        if (dupCheck.existing) {
+          selectParty(dupCheck.existing);
+          showToast(`✓ الشركة مسجلة مسبقاً: "${dupCheck.existing.name}" (كود: ${dupCheck.existing.code || '—'}) تم اختيارها تلقائياً`);
+          setShowCustDropdown(false);
+          return;
+        }
+        alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+        return;
+      }
 
-    list.push(newParty);
-    logAudit(updated, `إثبات ${theme.partyLabel} / شركة جديدة`, `${newParty.name} (${newParty.code})`);
-    onUpdateDb(updated);
+      const newCode = getNextUniquePartyCode(updated, targetType);
+      const newId = generateId('party');
 
-    setSelectedParty(newParty);
-    setCustCode(newParty.code || '');
-    setCustSearchInput(newParty.name);
-    setShowCustDropdown(false);
-    showToast(`✓ تم إثبات وتسجيل شركة جديدة: "${newParty.name}" (كود: ${newParty.code})`);
+      const newParty: Party = {
+        id: newId,
+        code: newCode,
+        name: pName,
+        company: pName,
+        phone: custPhone.trim() || '',
+        address: '',
+        type: targetType,
+        balance: 0,
+        openingBalance: 0,
+        creditLimit: 0,
+        notes: 'تم التسجيل والإثبات أثناء إنشاء الفاتورة'
+      };
+
+      list.push(newParty);
+      logAudit(updated, `إثبات ${theme.partyLabel} / شركة جديدة`, `${newParty.name} (${newParty.code})`);
+      onUpdateDb(updated);
+
+      setSelectedParty(newParty);
+      setCustCode(newParty.code || '');
+      setCustSearchInput(newParty.name);
+      setShowCustDropdown(false);
+      showToast(`✓ تم إثبات وتسجيل شركة جديدة: "${newParty.name}" (كود: ${newParty.code})`);
+    });
   };
 
   // Modify row modal
@@ -1373,15 +1370,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
 
   const saveModifiedItem = () => {
-    if (modifyIndex < 0 || modifyQty <= 0) return alert('الكمية غير صحيحة');
+    const cleanQty = roundQty(modifyQty);
+    const cleanPrice = roundMoney(modifyPrice);
+    if (modifyIndex < 0 || !isFinitePositive(cleanQty) || !isFiniteNonNegative(cleanPrice)) {
+      return alert('الكمية أو السعر غير صحيح.');
+    }
     setInvoiceItems(prev => {
       const copy = [...prev];
+      const disc = roundMoney(copy[modifyIndex].discount || 0);
       copy[modifyIndex] = {
         ...copy[modifyIndex],
-        qty: modifyQty,
-        unitPrice: modifyPrice,
+        qty: cleanQty,
+        unitPrice: cleanPrice,
         spec: modifySpec,
-        total: modifyQty * modifyPrice - (copy[modifyIndex].discount || 0)
+        total: roundMoney(Math.max(0, roundMoney(cleanQty * cleanPrice) - disc))
       };
       return copy;
     });
@@ -1411,53 +1413,66 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Add new item into database (strict duplicate guard & NO artificial auto-markups)
   const saveNewItemToDB = () => {
-    const cleanName = newItemName.trim();
-    if (!cleanName) return alert('أدخل اسم الصنف');
+    runWithLock(() => {
+      const cleanName = newItemName.trim();
+      if (!cleanName) return alert('أدخل اسم الصنف');
 
-    const dupCheck = matchProductStrictly(db, { name: cleanName, code: newItemCode.trim() });
-    if (dupCheck.exactMatch) {
-      alert(`⚠️ الصنف "${dupCheck.exactMatch.name}" مسجل بالفعل بالكود (${dupCheck.exactMatch.code}) ولا يمكن تكراره.`);
-      setShowEditItemModal(false);
-      quickAddItem(dupCheck.exactMatch);
-      return;
-    }
+      const buy = roundMoney(parseFloat(newBuyPrice) || 0);
+      const cash = roundMoney(parseFloat(newCashPriceManual) || 0);
+      const wholesale = roundMoney(parseFloat(newWholesalePriceManual) || 0);
+      const stock = roundQty(parseFloat(newStockQty) || 0);
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const buy = parseFloat(newBuyPrice) || 0;
-    const cash = parseFloat(newCashPriceManual) || 0;
-    const wholesale = parseFloat(newWholesalePriceManual) || 0;
-    const stock = parseFloat(newStockQty) || 0;
-
-    const newProd: Product = {
-      id: generateId('prod'),
-      name: cleanName,
-      code: newItemCode.trim() || `PRD-${100 + updated.products.length + 1}`,
-      barcode: '',
-      category: newCategory || 'عامة',
-      unit: 'قطعة',
-      buyPrice: invoiceBranchId === 'br_main' ? buy : 0,
-      sellPrice: invoiceBranchId === 'br_main' ? cash : 0,
-      wholesalePrice: invoiceBranchId === 'br_main' ? wholesale : 0,
-      minStock: 5,
-      currentQty: invoiceBranchId === 'br_main' ? stock : 0,
-      branchesData: {
-        [invoiceBranchId]: {
-          currentQty: stock,
-          buyPrice: buy,
-          sellPrice: cash,
-          wholesalePrice: wholesale,
-          minStock: 5
-        }
+      if (
+        !isFiniteNonNegative(buy) ||
+        !isFiniteNonNegative(cash) ||
+        !isFiniteNonNegative(wholesale) ||
+        !isFiniteNonNegative(stock)
+      ) {
+        alert('الأسعار والكمية الافتتاحية يجب أن تكون قيماً غير سالبة.');
+        return;
       }
-    };
 
-    updated.products.push(newProd);
-    logAudit(updated, `إضافة صنف من شاشة الفاتورة بفرع (${invoiceBranch.name})`, newProd.name);
-    onUpdateDb(updated);
+      const dupCheck = matchProductStrictly(db, { name: cleanName, code: newItemCode.trim() });
+      if (dupCheck.exactMatch) {
+        alert(`⚠️ الصنف "${dupCheck.exactMatch.name}" مسجل بالفعل بالكود (${dupCheck.exactMatch.code}) ولا يمكن تكراره.`);
+        setShowEditItemModal(false);
+        quickAddItem(dupCheck.exactMatch);
+        return;
+      }
 
-    setShowEditItemModal(false);
-    setShowLookupModal(false);
-    quickAddItem(newProd);
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+
+      const newProd: Product = {
+        id: generateId('prod'),
+        name: cleanName,
+        code: newItemCode.trim() || `PRD-${100 + updated.products.length + 1}`,
+        barcode: '',
+        category: newCategory || 'عامة',
+        unit: 'قطعة',
+        buyPrice: invoiceBranchId === 'br_main' ? buy : 0,
+        sellPrice: invoiceBranchId === 'br_main' ? cash : 0,
+        wholesalePrice: invoiceBranchId === 'br_main' ? wholesale : 0,
+        minStock: 5,
+        currentQty: invoiceBranchId === 'br_main' ? stock : 0,
+        branchesData: {
+          [invoiceBranchId]: {
+            currentQty: stock,
+            buyPrice: buy,
+            sellPrice: cash,
+            wholesalePrice: wholesale,
+            minStock: 5
+          }
+        }
+      };
+
+      updated.products.push(newProd);
+      logAudit(updated, `إضافة صنف من شاشة الفاتورة بفرع (${invoiceBranch.name})`, newProd.name);
+      onUpdateDb(updated);
+
+      setShowEditItemModal(false);
+      setShowLookupModal(false);
+      quickAddItem(newProd);
+    });
   };
 
   // Explicit purchase price input (never overrides selling prices with arbitrary markups)
@@ -1467,10 +1482,45 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // SAVE INVOICE WITH COMPLETE ACCOUNTING IMPACT
   const handleSaveInvoice = (approvalNote?: string) => {
-    if (isSavingInvoice) return;
+    if (isSavingInvoice || saveLockRef.current) return;
 
     if (invoiceItems.length === 0) {
       alert('الفاتورة فارغة! أضف أصنافاً أولاً.');
+      return;
+    }
+
+    // Strict input & numeric validation before any modal warning or DB mutation
+    for (const it of invoiceItems) {
+      if (!isFinitePositive(Number(it.qty))) {
+        alert(`⚠️ كمية غير صالحة للصنف "${it.productName}". يجب أن تكون أكبر من صفر.`);
+        return;
+      }
+      if (!isFiniteNonNegative(Number(it.unitPrice)) || !isFiniteNonNegative(Number(it.discount || 0))) {
+        alert(`⚠️ سعر أو خصم غير صالح للصنف "${it.productName}".`);
+        return;
+      }
+    }
+
+    const rawDiscInput = parseFloat(globalInvDisc) || 0;
+    const rawTaxInput = parseFloat(globalInvTax) || 0;
+    const rawExtraInput = parseFloat(extraIncomeVal) || 0;
+    if (rawDiscInput < 0 || rawTaxInput < 0 || rawExtraInput < 0) {
+      alert('⚠️ لا يُسمح بإدخال قيم سالبة للخصم أو الضريبة أو الإيرادات الإضافية.');
+      return;
+    }
+    if (toCents(globalDiscCalculated) > toCents(itemsSubTotal)) {
+      alert('⚠️ قيمة الخصم العام لا يمكن أن تتجاوز المجموع الفرعي للأصناف.');
+      return;
+    }
+    if (settlementType === 'partial') {
+      const pVal = parseFloat(partialPaidInput) || 0;
+      if (pVal < 0 || toCents(pVal) > toCents(netTotal)) {
+        alert('⚠️ المبلغ المدفوع جزئياً لا يمكن أن يكون سالباً أو يتجاوز صافي الفاتورة.');
+        return;
+      }
+    }
+    if (settlementType !== 'credit' && toCents(paidTotal) > toCents(netTotal)) {
+      alert(`⚠️ مجموع الدفعات (${paidTotal.toFixed(2)}) يتجاوز صافي الفاتورة (${netTotal.toFixed(2)}).`);
       return;
     }
 
@@ -1576,90 +1626,105 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
     }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-
-    // Strict duplicate check for invoice number within the current section
-    if (isDuplicateInvoiceNumber(updated, invNum, editingInvoice?.id, mode)) {
-      alert(`⚠️ منع التكرار: رقم الفاتورة (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`);
-      return;
-    }
-
+    saveLockRef.current = true;
     setIsSavingInvoice(true);
+    try {
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
-    // Check Party and auto-register if new
-    const isCust = theme.partyRole === 'customer';
-    const targetType = isCust ? 'customer' : 'supplier';
-    const targetPartyList = isCust ? updated.customers : updated.suppliers;
+      // Strict duplicate check for invoice number within the current section
+      if (isDuplicateInvoiceNumber(updated, invNum, editingInvoice?.id, mode)) {
+        alert(`⚠️ منع التكرار: رقم الفاتورة (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`);
+        return;
+      }
 
-    const trimmedInput = custSearchInput.trim();
-    const isCash = !trimmedInput ||
-                   trimmedInput === 'نقدي' ||
-                   trimmedInput === 'عميل نقدي' ||
-                   trimmedInput === 'مورد نقدي';
+      // Check Party and auto-register if new
+      const isCust = theme.partyRole === 'customer';
+      const targetType = isCust ? 'customer' : 'supplier';
+      const targetPartyList = isCust ? updated.customers : updated.suppliers;
 
-    let partyName = isCash ? (isCust ? 'عميل نقدي' : 'مورد نقدي') : trimmedInput;
-    let activePartyId = selectedParty?.id;
-    let activePartyCode = custCode;
+      const trimmedInput = custSearchInput.trim();
+      const isCash = !trimmedInput ||
+                     trimmedInput === 'نقدي' ||
+                     trimmedInput === 'عميل نقدي' ||
+                     trimmedInput === 'مورد نقدي';
 
-    if (!isCash && !activePartyId && trimmedInput) {
-      const existing = targetPartyList.find(p => p.name.trim().toLowerCase() === trimmedInput.toLowerCase());
-      if (existing) {
-        activePartyId = existing.id;
-        activePartyCode = existing.code || '';
-        partyName = existing.name;
-      } else {
-        const dupCheck = isDuplicateParty(updated, targetType, trimmedInput, custPhone.trim());
-        if (dupCheck.isDuplicate && dupCheck.existing) {
-          activePartyId = dupCheck.existing.id;
-          activePartyCode = dupCheck.existing.code || '';
-          partyName = dupCheck.existing.name;
+      let partyName = isCash ? (isCust ? 'عميل نقدي' : 'مورد نقدي') : trimmedInput;
+      let activePartyId = selectedParty?.id;
+      let activePartyCode = custCode;
+
+      if (!isCash && !activePartyId && trimmedInput) {
+        const existing = targetPartyList.find(p => p.name.trim().toLowerCase() === trimmedInput.toLowerCase());
+        if (existing) {
+          activePartyId = existing.id;
+          activePartyCode = existing.code || '';
+          partyName = existing.name;
         } else {
-          const newCode = getNextUniquePartyCode(updated, targetType);
-          const newPartyId = generateId('party');
-          const newlyCreated: Party = {
-            id: newPartyId,
-            code: newCode,
-            name: trimmedInput,
-            company: trimmedInput,
-            phone: custPhone.trim() || '',
-            address: '',
-            type: targetType,
-            balance: 0,
-            openingBalance: 0,
-            creditLimit: 0,
-            notes: 'تم الإثبات والتسجيل أثناء حفظ الفاتورة'
-          };
-          targetPartyList.push(newlyCreated);
-          activePartyId = newPartyId;
-          activePartyCode = newCode;
+          const dupCheck = isDuplicateParty(updated, targetType, trimmedInput, custPhone.trim());
+          if (dupCheck.isDuplicate && dupCheck.existing) {
+            activePartyId = dupCheck.existing.id;
+            activePartyCode = dupCheck.existing.code || '';
+            partyName = dupCheck.existing.name;
+          } else {
+            const newCode = getNextUniquePartyCode(updated, targetType);
+            const newPartyId = generateId('party');
+            const newlyCreated: Party = {
+              id: newPartyId,
+              code: newCode,
+              name: trimmedInput,
+              company: trimmedInput,
+              phone: custPhone.trim() || '',
+              address: '',
+              type: targetType,
+              balance: 0,
+              openingBalance: 0,
+              creditLimit: 0,
+              notes: 'تم الإثبات والتسجيل أثناء حفظ الفاتورة'
+            };
+            targetPartyList.push(newlyCreated);
+            activePartyId = newPartyId;
+            activePartyCode = newCode;
+          }
         }
       }
-    }
 
-    // Determine final status & payment method based on settlementType
-    let finalPaid = paidTotal;
-    let finalRemaining = remainTotal;
-    let mainPaymentMethod: PaymentMethod = 'نقدي';
+      // Determine final status & payment method cleanly based on settlementType
+      let finalPaid = roundMoney(paidTotal);
+      let finalRemaining = roundMoney(remainTotal);
+      let mainPaymentMethod: PaymentMethod = 'نقدي';
+      let normalizedPayments: InvoicePaymentLine[] = [];
 
-    if (settlementType === 'credit') {
-      mainPaymentMethod = 'آجل';
-      finalPaid = 0;
-      finalRemaining = netTotal;
-    } else if (settlementType === 'cash') {
-      mainPaymentMethod = 'نقدي';
-      finalPaid = netTotal;
-      finalRemaining = 0;
-    } else {
-      mainPaymentMethod = finalPaid > 0 ? 'نقدي' : 'آجل';
-    }
+      if (settlementType === 'credit') {
+        mainPaymentMethod = 'آجل';
+        finalPaid = 0;
+        finalRemaining = netTotal;
+        normalizedPayments = [];
+      } else if (settlementType === 'cash') {
+        mainPaymentMethod = 'نقدي';
+        finalPaid = netTotal;
+        finalRemaining = 0;
+        normalizedPayments = netTotal > 0 ? [{ method: 'نقدي', amount: netTotal }] : [];
+      } else if (settlementType === 'partial') {
+        mainPaymentMethod = finalPaid > 0 ? 'نقدي' : 'آجل';
+        finalRemaining = roundMoney(Math.max(0, netTotal - finalPaid));
+        normalizedPayments = finalPaid > 0 ? [{ method: 'نقدي', amount: finalPaid }] : [];
+      } else {
+        const cleanRows = paymentRows
+          .filter(r => r.method !== 'آجل' && roundMoney(r.amount) > 0)
+          .map(r => ({ method: r.method, amount: roundMoney(r.amount) }));
+        if (cleanRows.length > 0) {
+          normalizedPayments = cleanRows;
+          finalPaid = roundMoney(Math.min(netTotal, cleanRows.reduce((s, r) => s + r.amount, 0)));
+          finalRemaining = roundMoney(Math.max(0, netTotal - finalPaid));
+          mainPaymentMethod = cleanRows[0].method;
+        } else {
+          mainPaymentMethod = finalPaid > 0 ? 'نقدي' : 'آجل';
+          normalizedPayments = finalPaid > 0 ? [{ method: 'نقدي', amount: finalPaid }] : [];
+        }
+      }
 
-    if (paymentRows.length > 0) {
-      mainPaymentMethod = paymentRows[0].method;
-    }
-
-    let status: 'مدفوع' | 'جزئي' | 'آجل' = 'مدفوع';
-    if (finalPaid <= 0) status = 'آجل';
-    else if (finalRemaining > 0) status = 'جزئي';
+      let status: 'مدفوع' | 'جزئي' | 'آجل' = 'مدفوع';
+      if (finalPaid <= 0) status = 'آجل';
+      else if (finalRemaining > 0) status = 'جزئي';
 
     // Reverse previous effects if editing
     if (editingInvoice) {
@@ -1841,9 +1906,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       partyPhone: custPhone,
       warehouseId: updated.warehouses[0]?.id || 'wh_main',
       paymentMethod: mainPaymentMethod,
-      payments: settlementType === 'cash'
-        ? [{ method: mainPaymentMethod, amount: netTotal }]
-        : (paymentRows.length > 0 ? paymentRows : [{ method: mainPaymentMethod, amount: finalPaid }]),
+      payments: normalizedPayments,
       subtotal: itemsSubTotal,
       discount: globalDiscCalculated,
       discountType: invDiscType,
@@ -1865,7 +1928,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       auditLog: invoiceAuditLog,
       branchId: invoiceBranchId,
       branchName: invoiceBranch.name,
-      items: JSON.parse(JSON.stringify(invoiceItems))
+      items: JSON.parse(JSON.stringify(invoiceItems)).map((it: InvoiceItem) => ({
+        ...it,
+        qty: roundQty(it.qty),
+        unitPrice: roundMoney(it.unitPrice),
+        discount: roundMoney(it.discount || 0),
+        total: roundMoney(it.total)
+      }))
     };
 
     // 1. Stock movements & strict FIFO inventory valuation specifically for this branch
@@ -2135,48 +2204,58 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       });
     }
 
-    // 6. Audit
-    logAudit(
-      updated,
-      editingInvoice ? `تعديل ${theme.title}` : `إنشاء ${theme.title}`,
-      `فاتورة رقم ${savedInvoice.number} بواسطة [${currentUserName}] (${currentUserRole}) - بقيمة ${formatMoney(savedInvoice.total, updated.settings.currency)} للطرف ${partyName}${approvalNote ? ` • ${approvalNote}` : ''}`
-    );
-
-    onUpdateDb(updated);
-
-    // Clear saved drafts from localStorage
-    localStorage.removeItem(`hesabaty_draft_${mode}`);
-    localStorage.removeItem('hesabaty_last_uncommitted_invoice');
-    setHasUnsavedDraft(false);
-    setUnsavedDraftData(null);
-    setIsSavingInvoice(false);
-
-    const wantsPrint = confirm(`✓ تم حفظ الفاتورة رقم ${savedInvoice.number} بنجاح وترحيل جميع الحركات المحاسبية للمخزن والخزينة!\n\nهل ترغب في طباعة الفاتورة الآن؟`);
-    if (wantsPrint) {
-      onPreviewInvoice(savedInvoice);
-    }
-
-    if (onCloseEdit) {
-      onCloseEdit();
-    } else {
-      // Reset for next invoice
-      setInvoiceItems([]);
-      setPaymentRows([]);
-      setJobSite('');
-      setGlobalInvDisc('');
-      setGlobalInvTax('');
-      setExtraIncomeVal('');
-      setCustSearchInput('نقدي');
-      setCustCode('1');
-      setCustPhone('');
-      const cashParty = (isCust ? updated.customers : updated.suppliers).find(
-        p => p.name.trim() === 'نقدي' ||
-             p.name.trim() === (isCust ? 'عميل نقدي' : 'مورد نقدي') ||
-             p.code === 'CASH'
+      // 6. Audit
+      logAudit(
+        updated,
+        editingInvoice ? `تعديل ${theme.title}` : `إنشاء ${theme.title}`,
+        `فاتورة رقم ${savedInvoice.number} بواسطة [${currentUserName}] (${currentUserRole}) - بقيمة ${formatMoney(savedInvoice.total, updated.settings.currency)} للطرف ${partyName}${approvalNote ? ` • ${approvalNote}` : ''}`
       );
-      setSelectedParty(cashParty || null);
-      const { number: nextUniqueNum } = getNextUniqueInvoiceNumber(updated, mode);
-      setInvNum(nextUniqueNum);
+
+      // 7. Atomic pre-commit transaction integrity validation (rollback safely before state commit if violated)
+      const integrity = validateDbTransactionIntegrity(updated, [journal.id], [savedInvoice.id]);
+      if (!integrity.ok) {
+        alert(`⛔ تم إلغاء الترحيل تلقائياً (Rollback) لحماية توازن الحسابات:\n${integrity.error || 'خطأ في التحقق المحاسبي'}`);
+        return;
+      }
+
+      onUpdateDb(updated);
+
+      // Clear saved drafts from localStorage
+      localStorage.removeItem(`hesabaty_draft_${mode}`);
+      localStorage.removeItem('hesabaty_last_uncommitted_invoice');
+      setHasUnsavedDraft(false);
+      setUnsavedDraftData(null);
+
+      const wantsPrint = confirm(`✓ تم حفظ الفاتورة رقم ${savedInvoice.number} بنجاح وترحيل جميع الحركات المحاسبية للمخزن والخزينة!\n\nهل ترغب في طباعة الفاتورة الآن؟`);
+      if (wantsPrint) {
+        onPreviewInvoice(savedInvoice);
+      }
+
+      if (onCloseEdit) {
+        onCloseEdit();
+      } else {
+        // Reset for next invoice
+        setInvoiceItems([]);
+        setPaymentRows([]);
+        setJobSite('');
+        setGlobalInvDisc('');
+        setGlobalInvTax('');
+        setExtraIncomeVal('');
+        setCustSearchInput('نقدي');
+        setCustCode('1');
+        setCustPhone('');
+        const cashParty = (isCust ? updated.customers : updated.suppliers).find(
+          p => p.name.trim() === 'نقدي' ||
+               p.name.trim() === (isCust ? 'عميل نقدي' : 'مورد نقدي') ||
+               p.code === 'CASH'
+        );
+        setSelectedParty(cashParty || null);
+        const { number: nextUniqueNum } = getNextUniqueInvoiceNumber(updated, mode);
+        setInvNum(nextUniqueNum);
+      }
+    } finally {
+      saveLockRef.current = false;
+      setIsSavingInvoice(false);
     }
   };
 
@@ -2423,8 +2502,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 {custSearchInput.trim().length > 0 && custSearchInput.trim() !== 'نقدي' && (
                   <button
                     type="button"
+                    disabled={isModalSubmitting}
                     onClick={() => quickRegisterParty(custSearchInput)}
-                    className="text-[7.5px] font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-0.5 bg-emerald-50 px-1 py-0.2 rounded border border-emerald-300"
+                    className="text-[7.5px] font-bold text-emerald-700 hover:text-emerald-900 disabled:opacity-50 flex items-center gap-0.5 bg-emerald-50 px-1 py-0.2 rounded border border-emerald-300"
                     title="تسجيل هذه الشركة في الدليل"
                   >
                     <Plus className="w-2.5 h-2.5" />
@@ -2578,8 +2658,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         </div>
                         <button
                           type="button"
+                          disabled={isModalSubmitting}
                           onClick={() => quickRegisterParty(custSearchInput)}
-                          className="w-full sm:w-auto px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-black text-[9.5px] shadow-xs cursor-pointer flex items-center justify-center gap-1 transition-all whitespace-nowrap"
+                          className="w-full sm:w-auto px-3 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg font-black text-[9.5px] shadow-xs cursor-pointer flex items-center justify-center gap-1 transition-all whitespace-nowrap"
                         >
                           <Check className="w-3 h-3" />
                           <span>+ حفظ وتسجيل الشركة بالدليل فوراً</span>
@@ -2676,8 +2757,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         <span>لا توجد شركة أو مورد مسجل بهذا الاسم: «{custSearchInput}»</span>
                         <button
                           type="button"
+                          disabled={isModalSubmitting}
                           onClick={() => quickRegisterParty(custSearchInput)}
-                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white rounded-lg font-black text-xs shadow-md cursor-pointer flex items-center gap-1.5 transition-all"
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:scale-95 disabled:opacity-50 text-white rounded-lg font-black text-xs shadow-md cursor-pointer flex items-center gap-1.5 transition-all"
                         >
                           <Plus className="w-3.5 h-3.5" />
                           <span>إضافة «{custSearchInput}» كشركة جديدة وحفظها فوراً</span>
@@ -3165,14 +3247,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             {editingInvoice && db.currentUser?.role === 'مدير' && (
               <button
                 type="button"
+                disabled={isModalSubmitting || isSavingInvoice}
                 onClick={() => {
-                  if (!confirm(`هل أنت متأكد من حذف فاتورة "${editingInvoice.number}" نهائياً؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) return;
-                  const updated = deleteInvoiceAndRevert(db, editingInvoice);
-                  onUpdateDb(updated);
-                  if (onCloseEdit) onCloseEdit();
-                  else if (onClose) onClose();
+                  runWithLock(() => {
+                    if (!confirm(`هل أنت متأكد من حذف فاتورة "${editingInvoice.number}" نهائياً؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) return;
+                    const updated = deleteInvoiceAndRevert(db, editingInvoice);
+                    onUpdateDb(updated);
+                    if (onCloseEdit) onCloseEdit();
+                    else if (onClose) onClose();
+                  });
                 }}
-                className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded font-bold text-[10px] flex items-center justify-center gap-1 transition-colors cursor-pointer shadow-2xs"
+                className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded font-bold text-[10px] flex items-center justify-center gap-1 transition-colors cursor-pointer shadow-2xs"
                 title="حذف الفاتورة وعكس آثارها بالكامل"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -3744,10 +3829,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
               <button
                 type="button"
+                disabled={isModalSubmitting}
                 onClick={saveNewItemToDB}
-                className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[10px] mt-2"
+                className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded font-bold text-[10px] mt-2"
               >
-                ✓ حفظ والرجوع للفاتورة
+                {isModalSubmitting ? 'جارٍ الحفظ...' : '✓ حفظ والرجوع للفاتورة'}
               </button>
             </div>
           </div>
@@ -4689,8 +4775,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               {/* Action Button */}
               <button
                 type="button"
+                disabled={isModalSubmitting}
                 onClick={saveRapidItemToInvoice}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 active:scale-[0.99] text-white rounded-lg font-bold text-xs shadow transition-all cursor-pointer flex items-center justify-center gap-1.5 mt-1"
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 active:scale-[0.99] text-white rounded-lg font-bold text-xs shadow transition-all cursor-pointer flex items-center justify-center gap-1.5 mt-1"
               >
                 <Check className="w-4 h-4" />
                 <span>

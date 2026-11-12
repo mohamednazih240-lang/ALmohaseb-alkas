@@ -50,7 +50,12 @@ import {
   updateProductBranchData,
   isBranchMatch,
   normalizeArabicText,
-  buildProductFifoLedger
+  buildProductFifoLedger,
+  roundMoney,
+  roundQty,
+  isFiniteNonNegative,
+  isFinitePositive,
+  assertJournalBalanced
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import {
@@ -59,6 +64,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
   UniversalPrintModal,
   MovementPrintBlock,
@@ -96,6 +102,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   }, [activeBranchId]);
 
   const [searchTerm, setSearchTerm] = useState('');
+  const { isSubmitting, runWithLock } = useSubmitLock();
   const [selectedProductForMovement, setSelectedProductForMovement] = useState<Product | null>(null);
   const [stockSearchQuery, setStockSearchQuery] = useState('');
   const [stockMovementTypeFilter, setStockMovementTypeFilter] = useState<'all' | 'sale' | 'purchase' | 'returns'>('all');
@@ -232,248 +239,275 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   };
 
   const handleBulkDeleteProducts = () => {
-    const isManager = db.currentUser?.role === 'مدير';
-    if (!isManager) {
-      alert('عذراً، لا يمكن حذف الأصناف إلا من قِبل المدير العام فقط.');
-      return;
-    }
-    const count = selectedProductIds.size;
-    if (count === 0) return;
-    if (!confirm(`هل أنت متأكد تماماً من حذف (${count}) صنف محدد نهائياً من دليل الأصناف؟`)) return;
+    runWithLock(() => {
+      const isManager = db.currentUser?.role === 'مدير';
+      if (!isManager) {
+        alert('عذراً، لا يمكن حذف الأصناف إلا من قِبل المدير العام فقط.');
+        return;
+      }
+      const count = selectedProductIds.size;
+      if (count === 0) return;
+      if (!confirm(`هل أنت متأكد تماماً من حذف (${count}) صنف محدد نهائياً من دليل الأصناف؟`)) return;
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.products = updated.products.filter(p => !selectedProductIds.has(p.id));
-    updated.stockMovements = (updated.stockMovements || []).filter(sm => !selectedProductIds.has(sm.productId));
-    logAudit(updated, 'حذف مجموعة أصناف', `تم حذف (${count}) صنف دفعة واحدة بواسطة ${db.currentUser?.name || 'المدير'}`);
-    onUpdateDb(updated);
-    setSelectedProductIds(new Set());
-    setToastMsg(`✓ تم حذف (${count}) صنف بنجاح من النظام.`);
-    setTimeout(() => setToastMsg(null), 4000);
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.products = updated.products.filter(p => !selectedProductIds.has(p.id));
+      updated.stockMovements = (updated.stockMovements || []).filter(sm => !selectedProductIds.has(sm.productId));
+      logAudit(updated, 'حذف مجموعة أصناف', `تم حذف (${count}) صنف دفعة واحدة بواسطة ${db.currentUser?.name || 'المدير'}`);
+      onUpdateDb(updated);
+      setSelectedProductIds(new Set());
+      setToastMsg(`✓ تم حذف (${count}) صنف بنجاح من النظام.`);
+      setTimeout(() => setToastMsg(null), 4000);
+    });
   };
 
   // Save new Warehouse
   const handleSaveWarehouse = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!whName.trim()) return alert('اكتب اسم المخزن');
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const newWh: WarehouseType = {
-      id: generateId('wh'),
-      name: whName.trim(),
-      location: whLocation.trim()
-    };
-    updated.warehouses.push(newWh);
-    logAudit(updated, 'إضافة مخزن جديد', whName);
-    onUpdateDb(updated);
-    setWhName('');
-    setWhLocation('');
-    setShowWhModal(false);
+    runWithLock(() => {
+      if (!whName.trim()) return alert('اكتب اسم المخزن');
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const newWh: WarehouseType = {
+        id: generateId('wh'),
+        name: whName.trim(),
+        location: whLocation.trim()
+      };
+      updated.warehouses.push(newWh);
+      logAudit(updated, 'إضافة مخزن جديد', whName.trim());
+      onUpdateDb(updated);
+      setWhName('');
+      setWhLocation('');
+      setShowWhModal(false);
+    });
   };
 
   // Stock Transfer between Warehouses
   const handleSaveTransfer = (e: React.FormEvent) => {
     e.preventDefault();
-    if (fromWhId === toWhId) return alert('اختر مخزنين مختلفين للتحويل');
-    if (transferQty <= 0) return alert('الكمية يجب أن تكون أكبر من صفر');
+    runWithLock(() => {
+      if (fromWhId === toWhId) return alert('اختر مخزنين مختلفين للتحويل');
+      const cleanQty = roundQty(transferQty);
+      if (!isFinitePositive(cleanQty)) return alert('الكمية يجب أن تكون أكبر من صفر');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const prod = updated.products.find(p => p.id === transferProductId);
-    if (!prod) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const prod = updated.products.find(p => p.id === transferProductId);
+      if (!prod) return;
 
-    if (prod.currentQty < transferQty) {
-      alert('الرصيد الإجمالي للصنف لا يكفي لإتمام هذا التحويل');
-      return;
-    }
+      if (prod.currentQty < cleanQty) {
+        alert('الرصيد الإجمالي للصنف لا يكفي لإتمام هذا التحويل');
+        return;
+      }
 
-    const fromWh = updated.warehouses.find(w => w.id === fromWhId);
-    const toWh = updated.warehouses.find(w => w.id === toWhId);
-    const tId = generateId('trf');
+      const fromWh = updated.warehouses.find(w => w.id === fromWhId);
+      const toWh = updated.warehouses.find(w => w.id === toWhId);
+      const tId = generateId('trf');
 
-    const transferRecord: StockTransfer = {
-      id: tId,
-      date: getTodayDate(),
-      productId: prod.id,
-      productName: prod.name,
-      fromWarehouseId: fromWhId,
-      toWarehouseId: toWhId,
-      qty: transferQty,
-      notes: transferNotes
-    };
+      const transferRecord: StockTransfer = {
+        id: tId,
+        date: getTodayDate(),
+        productId: prod.id,
+        productName: prod.name,
+        fromWarehouseId: fromWhId,
+        toWarehouseId: toWhId,
+        qty: cleanQty,
+        notes: transferNotes
+      };
 
-    updated.transfers.unshift(transferRecord);
+      updated.transfers.unshift(transferRecord);
 
-    // Stock movements (out from source, in to destination)
-    updated.stockMovements.unshift({
-      id: generateId('sm'),
-      date: getTodayDate(),
-      productId: prod.id,
-      productName: prod.name,
-      warehouseId: fromWhId,
-      warehouseName: fromWh ? fromWh.name : 'مخزن المصدر',
-      qtyChange: -transferQty,
-      balanceAfter: prod.currentQty,
-      unitCost: fifoLedger.getProductSummary(prod.id, prod.name).latestBuyPrice || 0,
-      type: 'transfer_out',
-      refNumber: `TRF-${tId.slice(-4)}`,
-      sourceId: tId
+      const unitCost = roundMoney(fifoLedger.getProductSummary(prod.id, prod.name).latestBuyPrice || 0);
+
+      // Stock movements (out from source, in to destination)
+      updated.stockMovements.unshift({
+        id: generateId('sm'),
+        date: getTodayDate(),
+        productId: prod.id,
+        productName: prod.name,
+        warehouseId: fromWhId,
+        warehouseName: fromWh ? fromWh.name : 'مخزن المصدر',
+        qtyChange: -cleanQty,
+        balanceAfter: prod.currentQty,
+        unitCost,
+        type: 'transfer_out',
+        refNumber: `TRF-${tId.slice(-4)}`,
+        sourceId: tId
+      });
+
+      updated.stockMovements.unshift({
+        id: generateId('sm'),
+        date: getTodayDate(),
+        productId: prod.id,
+        productName: prod.name,
+        warehouseId: toWhId,
+        warehouseName: toWh ? toWh.name : 'مخزن الوجهة',
+        qtyChange: cleanQty,
+        balanceAfter: prod.currentQty,
+        unitCost,
+        type: 'transfer_in',
+        refNumber: `TRF-${tId.slice(-4)}`,
+        sourceId: tId
+      });
+
+      logAudit(updated, 'تحويل مخزون بين مستودعين', `${prod.name} كمية ${cleanQty} من ${fromWh?.name} إلى ${toWh?.name}`);
+      onUpdateDb(updated);
+      setShowTransferModal(false);
     });
-
-    updated.stockMovements.unshift({
-      id: generateId('sm'),
-      date: getTodayDate(),
-      productId: prod.id,
-      productName: prod.name,
-      warehouseId: toWhId,
-      warehouseName: toWh ? toWh.name : 'مخزن الوجهة',
-      qtyChange: transferQty,
-      balanceAfter: prod.currentQty,
-      unitCost: fifoLedger.getProductSummary(prod.id, prod.name).latestBuyPrice || 0,
-      type: 'transfer_in',
-      refNumber: `TRF-${tId.slice(-4)}`,
-      sourceId: tId
-    });
-
-    logAudit(updated, 'تحويل مخزون بين مستودعين', `${prod.name} كمية ${transferQty} من ${fromWh?.name} إلى ${toWh?.name}`);
-    onUpdateDb(updated);
-    setShowTransferModal(false);
   };
 
   // Stock Adjustment (الجرد والتسويات)
   const handleSaveAdjustment = (e: React.FormEvent) => {
     e.preventDefault();
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const prod = updated.products.find(p => p.id === adjustProductId);
-    if (!prod) return;
+    runWithLock(() => {
+      const cleanActualQty = roundQty(actualQty);
+      if (!isFiniteNonNegative(cleanActualQty)) {
+        return alert('الرصيد الفعلي يجب أن يكون رقماً غير سالب.');
+      }
 
-    const bp = getProductForBranch(prod, selectedBranchId);
-    const systemQty = bp.currentQty;
-    const diff = actualQty - systemQty;
-    if (diff === 0) return alert(`الرصيد الفعلي مطابق للرصيد الدفتري بفرع (${currentBranch.name})، لا يوجد فرق تسوية`);
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const prod = updated.products.find(p => p.id === adjustProductId);
+      if (!prod) return;
 
-    const adjId = generateId('adj');
-    const fifoProd = fifoLedger.getProductSummary(prod.id, prod.name);
-    const unitCost = fifoProd.hasVerifiedPurchase ? fifoProd.latestBuyPrice : 0;
-    const diffValue = Math.abs(diff) * unitCost;
+      const bp = getProductForBranch(prod, selectedBranchId);
+      const systemQty = roundQty(bp.currentQty);
+      const diff = roundQty(cleanActualQty - systemQty);
+      if (Math.abs(diff) <= 0.0001) {
+        return alert(`الرصيد الفعلي مطابق للرصيد الدفتري بفرع (${currentBranch.name})، لا يوجد فرق تسوية`);
+      }
 
-    const adjustmentRecord: StockAdjustment = {
-      id: adjId,
-      date: getTodayDate(),
-      productId: prod.id,
-      productName: prod.name,
-      systemQty,
-      actualQty,
-      diffQty: diff,
-      unitCost,
-      reason: adjustReason,
-      branchId: selectedBranchId,
-      branchName: currentBranch.name
-    };
+      const adjId = generateId('adj');
+      const fifoProd = fifoLedger.getProductSummary(prod.id, prod.name);
+      const unitCost = fifoProd.hasVerifiedPurchase ? roundMoney(fifoProd.latestBuyPrice) : 0;
+      const diffValue = roundMoney(Math.abs(diff) * unitCost);
 
-    // Update physical product qty specifically for this branch
-    const updatedProd = updateProductBranchData(prod, selectedBranchId, { currentQty: actualQty });
-    const pIdx = updated.products.findIndex(p => p.id === prod.id);
-    if (pIdx > -1) updated.products[pIdx] = updatedProd;
+      const adjustmentRecord: StockAdjustment = {
+        id: adjId,
+        date: getTodayDate(),
+        productId: prod.id,
+        productName: prod.name,
+        systemQty,
+        actualQty: cleanActualQty,
+        diffQty: diff,
+        unitCost,
+        reason: adjustReason.trim(),
+        branchId: selectedBranchId,
+        branchName: currentBranch.name
+      };
 
-    updated.adjustments.unshift(adjustmentRecord);
+      // Update physical product qty specifically for this branch
+      const updatedProd = updateProductBranchData(prod, selectedBranchId, { currentQty: cleanActualQty });
+      const pIdx = updated.products.findIndex(p => p.id === prod.id);
+      if (pIdx > -1) updated.products[pIdx] = updatedProd;
 
-    // Stock Movement
-    updated.stockMovements.unshift({
-      id: generateId('sm'),
-      date: getTodayDate(),
-      productId: prod.id,
-      productName: prod.name,
-      warehouseId: updated.warehouses[0]?.id || 'wh_main',
-      warehouseName: 'المخزن الرئيسي',
-      qtyChange: diff,
-      balanceAfter: actualQty,
-      unitCost,
-      type: 'adjustment',
-      refNumber: `ADJ-${adjId.slice(-4)}`,
-      sourceId: adjId,
-      branchId: selectedBranchId,
-      branchName: currentBranch.name
+      updated.adjustments.unshift(adjustmentRecord);
+
+      // Stock Movement
+      updated.stockMovements.unshift({
+        id: generateId('sm'),
+        date: getTodayDate(),
+        productId: prod.id,
+        productName: prod.name,
+        warehouseId: updated.warehouses[0]?.id || 'wh_main',
+        warehouseName: 'المخزن الرئيسي',
+        qtyChange: diff,
+        balanceAfter: cleanActualQty,
+        unitCost,
+        type: 'adjustment',
+        refNumber: `ADJ-${adjId.slice(-4)}`,
+        sourceId: adjId,
+        branchId: selectedBranchId,
+        branchName: currentBranch.name
+      });
+
+      // Accounting Journal Entry (only when inventory valuation variance > 0):
+      if (diffValue > 0) {
+        const invAcc = updated.accounts.find(a => a.id === 'acc_inv')!;
+        const adjAcc = updated.accounts.find(a => a.id === 'acc_adj') || updated.accounts.find(a => a.id === 'acc_exp')!;
+        const revAcc = updated.accounts.find(a => a.id === 'acc_other_rev')!;
+
+        const lines = [];
+        if (diff < 0) {
+          lines.push({
+            accountId: adjAcc.id,
+            accountCode: adjAcc.code,
+            accountName: adjAcc.name,
+            debit: diffValue,
+            credit: 0,
+            notes: `عجز تسوية جرد للصنف ${prod.name}`
+          });
+          lines.push({
+            accountId: invAcc.id,
+            accountCode: invAcc.code,
+            accountName: invAcc.name,
+            debit: 0,
+            credit: diffValue,
+            notes: `تخفيض قيمة المخزون الدفتري`
+          });
+        } else {
+          lines.push({
+            accountId: invAcc.id,
+            accountCode: invAcc.code,
+            accountName: invAcc.name,
+            debit: diffValue,
+            credit: 0,
+            notes: `زيادة وفائض جرد للصنف ${prod.name}`
+          });
+          lines.push({
+            accountId: revAcc.id,
+            accountCode: revAcc.code,
+            accountName: revAcc.name,
+            debit: 0,
+            credit: diffValue,
+            notes: `أرباح فروق جرد`
+          });
+        }
+
+        const adjJournal = {
+          id: generateId('j'),
+          number: `J-${Date.now().toString().slice(-6)}`,
+          date: getTodayDate(),
+          description: `قيد تسوية جرد للصنف ${prod.name} (${diff > 0 ? 'زيادة' : 'عجز'} ${Math.abs(diff)} ${prod.unit})`,
+          sourceType: 'adjustment' as const,
+          sourceId: adjId,
+          lines,
+          createdAt: new Date().toISOString()
+        };
+
+        const balCheck = assertJournalBalanced(adjJournal);
+        if (!balCheck.balanced) {
+          alert(balCheck.reason || 'القيد المحاسبي لتسوية الجرد غير متوازن.');
+          return;
+        }
+        updated.journals.unshift(adjJournal);
+      }
+
+      logAudit(updated, 'تسوية جرد مخزني', `${prod.name}: الرصيد السابق ${systemQty} -> الرصيد الفعلي ${cleanActualQty} (فرق: ${diff})`);
+      onUpdateDb(updated);
+      setShowAdjustModal(false);
     });
-
-    // Accounting Journal Entry:
-    // If deficit (diff < 0): Debit Inventory Variance / Loss (5301), Credit Inventory (1301)
-    // If surplus (diff > 0): Debit Inventory (1301), Credit Other Revenue (4201)
-    const invAcc = updated.accounts.find(a => a.id === 'acc_inv')!;
-    const adjAcc = updated.accounts.find(a => a.id === 'acc_adj') || updated.accounts.find(a => a.id === 'acc_exp')!;
-    const revAcc = updated.accounts.find(a => a.id === 'acc_other_rev')!;
-
-    const lines = [];
-    if (diff < 0) {
-      lines.push({
-        accountId: adjAcc.id,
-        accountCode: adjAcc.code,
-        accountName: adjAcc.name,
-        debit: diffValue,
-        credit: 0,
-        notes: `عجز تسوية جرد للصنف ${prod.name}`
-      });
-      lines.push({
-        accountId: invAcc.id,
-        accountCode: invAcc.code,
-        accountName: invAcc.name,
-        debit: 0,
-        credit: diffValue,
-        notes: `تخفيض قيمة المخزون الدفتري`
-      });
-    } else {
-      lines.push({
-        accountId: invAcc.id,
-        accountCode: invAcc.code,
-        accountName: invAcc.name,
-        debit: diffValue,
-        credit: 0,
-        notes: `زيادة وفائض جرد للصنف ${prod.name}`
-      });
-      lines.push({
-        accountId: revAcc.id,
-        accountCode: revAcc.code,
-        accountName: revAcc.name,
-        debit: 0,
-        credit: diffValue,
-        notes: `أرباح فروق جرد`
-      });
-    }
-
-    updated.journals.unshift({
-      id: generateId('j'),
-      number: `J-${Date.now().toString().slice(-6)}`,
-      date: getTodayDate(),
-      description: `قيد تسوية جرد للصنف ${prod.name} (${diff > 0 ? 'زيادة' : 'عجز'} ${Math.abs(diff)} ${prod.unit})`,
-      sourceType: 'adjustment',
-      sourceId: adjId,
-      lines,
-      createdAt: new Date().toISOString()
-    });
-
-    logAudit(updated, 'تسوية جرد مخزني', `${prod.name}: الرصيد السابق ${systemQty} -> الرصيد الفعلي ${actualQty} (فرق: ${diff})`);
-    onUpdateDb(updated);
-    setShowAdjustModal(false);
   };
 
   const handleDeleteProduct = (p: Product) => {
-    const isManager = db.currentUser?.role === 'مدير';
-    if (!isManager) {
-      alert('عذراً، لا يمكن حذف أي صنف من المخزون إلا من قِبل المدير العام فقط.');
-      return;
-    }
+    runWithLock(() => {
+      const isManager = db.currentUser?.role === 'مدير';
+      if (!isManager) {
+        alert('عذراً، لا يمكن حذف أي صنف من المخزون إلا من قِبل المدير العام فقط.');
+        return;
+      }
 
-    if (!confirm(`هل أنت متأكد تماماً من حذف الصنف "${p.name}" (كود: ${p.code}) نهائياً؟`)) return;
+      if (!confirm(`هل أنت متأكد تماماً من حذف الصنف "${p.name}" (كود: ${p.code}) نهائياً؟`)) return;
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.products = updated.products.filter(item => item.id !== p.id);
-    updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.productId !== p.id);
-    logAudit(updated, 'حذف صنف من المخزون', `${p.name} (${p.code}) بواسطة ${db.currentUser?.name || 'المدير'}`);
-    onUpdateDb(updated);
-    setSelectedProductIds(prev => {
-      const next = new Set(prev);
-      next.delete(p.id);
-      return next;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.products = updated.products.filter(item => item.id !== p.id);
+      updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.productId !== p.id);
+      logAudit(updated, 'حذف صنف من المخزون', `${p.name} (${p.code}) بواسطة ${db.currentUser?.name || 'المدير'}`);
+      onUpdateDb(updated);
+      setSelectedProductIds(prev => {
+        const next = new Set(prev);
+        next.delete(p.id);
+        return next;
+      });
+      setToastMsg(`✓ تم حذف الصنف "${p.name}" بنجاح.`);
+      setTimeout(() => setToastMsg(null), 4000);
     });
-    setToastMsg(`✓ تم حذف الصنف "${p.name}" بنجاح.`);
-    setTimeout(() => setToastMsg(null), 4000);
   };
 
   // Export Products to CSV / Excel
@@ -2201,7 +2235,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowWhModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">حفظ</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ'}
+                </button>
               </div>
             </form>
           </div>
@@ -2267,7 +2303,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowTransferModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">تنفيذ التحويل</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
+                  {isSubmitting ? 'جارٍ التنفيذ...' : 'تنفيذ التحويل'}
+                </button>
               </div>
             </form>
           </div>
@@ -2320,7 +2358,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowAdjustModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">تسوية وإصدار قيد</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
+                  {isSubmitting ? 'جارٍ التسوية...' : 'تسوية وإصدار قيد'}
+                </button>
               </div>
             </form>
           </div>

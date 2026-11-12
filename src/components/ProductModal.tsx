@@ -24,8 +24,14 @@ import {
   getProductForBranch,
   updateProductBranchData,
   isDuplicateProduct,
-  matchProductStrictly
+  matchProductStrictly,
+  generateUniqueProductCode,
+  roundMoney,
+  roundQty,
+  isFiniteNonNegative,
+  assertJournalBalanced
 } from '../services/accountingStorage';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface ProductModalProps {
   isOpen: boolean;
@@ -70,6 +76,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   const [marginPercentage, setMarginPercentage] = useState('20');
 
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   // Sync selected branch if activeBranchId changes
   useEffect(() => {
@@ -95,7 +102,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       setInitialQty(branchProd.currentQty);
       setContinuousNotification(null);
     } else {
-      const nextCode = `PRD-${100 + db.products.length + 1}`;
+      const nextCode = generateUniqueProductCode(db);
       setName('');
       setCode(nextCode);
       setBarcode('');
@@ -141,20 +148,38 @@ export const ProductModal: React.FC<ProductModalProps> = ({
 
   const handleSave = (e?: React.FormEvent, shouldClose: boolean = false) => {
     if (e) e.preventDefault();
-    if (!name.trim()) {
-      alert('يرجى كتابة اسم الصنف');
-      nameInputRef.current?.focus();
-      return;
-    }
+    runWithLock(() => {
+      if (!name.trim()) {
+        alert('يرجى كتابة اسم الصنف');
+        nameInputRef.current?.focus();
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const cleanBuyPrice = roundMoney(buyPrice);
+      const cleanSellPrice = roundMoney(sellPrice);
+      const cleanWholesalePrice = roundMoney(wholesalePrice);
+      const cleanMinStock = roundQty(minStock);
+      const cleanInitialQty = roundQty(initialQty);
 
-    // Strict duplicate check for code, barcode, and normalized name + unit
-    const dupCheck = isDuplicateProduct(updated, code.trim(), barcode.trim(), product?.id);
-    if (dupCheck.isDuplicate) {
-      alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
-      return;
-    }
+      if (
+        !isFiniteNonNegative(cleanBuyPrice) ||
+        !isFiniteNonNegative(cleanSellPrice) ||
+        !isFiniteNonNegative(cleanWholesalePrice) ||
+        !isFiniteNonNegative(cleanMinStock) ||
+        !Number.isFinite(cleanInitialQty)
+      ) {
+        alert('يوجد حقل رقمي غير صالح. الأسعار والحد الأدنى يجب أن تكون قيماً غير سالبة.');
+        return;
+      }
+
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+
+      // Strict duplicate check for code, barcode, and normalized name + unit
+      const dupCheck = isDuplicateProduct(updated, code.trim(), barcode.trim(), product?.id);
+      if (dupCheck.isDuplicate) {
+        alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+        return;
+      }
 
     const strictMatch = matchProductStrictly(updated, {
       name: name.trim(),
@@ -162,17 +187,9 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       code: code.trim(),
       barcode: barcode.trim()
     });
-    if (!product && (strictMatch.exactMatch || strictMatch.ambiguousCandidates.length > 0)) {
-      const candidate = strictMatch.exactMatch || strictMatch.ambiguousCandidates[0];
-      const msg = strictMatch.exactMatch
-        ? `الصنف "${candidate.name}" موجود بالفعل بنفس الاسم والوحدة (${candidate.code}). لا يُسمح بتكرار الأصناف.`
-        : `يوجد صنف مشابه في الدليل: "${candidate.name}" (${candidate.code}). هل أنت متأكد أنك تريد إضافة صنف جديد مختلف؟`;
-      if (strictMatch.exactMatch) {
-        alert(`⚠️ منع التكرار: ${msg}`);
-        return;
-      } else if (!window.confirm(msg)) {
-        return;
-      }
+    if (!product && strictMatch.exactMatch) {
+      alert(`⚠️ منع التكرار: الصنف "${strictMatch.exactMatch.name}" مسجل بالفعل بنفس الاسم والوحدة (${strictMatch.exactMatch.code}).`);
+      return;
     }
 
     const branchName = currentBranch?.name || 'الفرع الرئيسي';
@@ -339,24 +356,30 @@ export const ProductModal: React.FC<ProductModalProps> = ({
         });
 
         // Journal: Debit Inventory (1301), Credit Capital / Opening Balance (3101)
-        const totalValue = initialQty * buyPrice;
+        const totalValue = roundMoney(cleanInitialQty * cleanBuyPrice);
         if (totalValue > 0) {
           const invAcc = updated.accounts.find(a => a.id === 'acc_inv')!;
           const eqAcc = updated.accounts.find(a => a.id === 'acc_equity')!;
 
-          updated.journals.push({
+          const openingJournal = {
             id: generateId('j'),
             number: `J-${Date.now().toString().slice(-6)}`,
             date: getTodayDate(),
             description: `إثبات رصيد بضاعة أول المدة للصنف ${newProduct.name} بفرع ${branchName}`,
-            sourceType: 'manual',
+            sourceType: 'manual' as const,
             sourceId: newProdId,
             lines: [
               { accountId: invAcc.id, accountCode: invAcc.code, accountName: invAcc.name, debit: totalValue, credit: 0, notes: `بضاعة أول المدة (${branchName})` },
               { accountId: eqAcc.id, accountCode: eqAcc.code, accountName: eqAcc.name, debit: 0, credit: totalValue, notes: `رأس مال بضاعة` }
             ],
             createdAt: new Date().toISOString()
-          });
+          };
+          const balCheck = assertJournalBalanced(openingJournal);
+          if (!balCheck.balanced) {
+            alert(balCheck.reason || 'القيد الافتتاحي غير متوازن.');
+            return;
+          }
+          updated.journals.push(openingJournal);
         }
       }
 
@@ -373,7 +396,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       // Continuous entry: Do NOT close the modal, clear fields completely and prepare for next item
       const savedItemName = name.trim();
       setName('');
-      const nextCode = `PRD-${100 + updated.products.length + 1}`;
+      const nextCode = generateUniqueProductCode(updated);
       setCode(nextCode);
       setBarcode('');
       setUnit('قطعة');
@@ -393,6 +416,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
         nameInputRef.current?.focus();
       }, 50);
     }
+    });
   };
 
   return (
@@ -827,26 +851,29 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                 <>
                   <button
                     type="button"
+                    disabled={isSubmitting}
                     onClick={e => handleSave(e, true)}
-                    className="px-3.5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                    className="px-3.5 py-2 bg-slate-200 hover:bg-slate-300 disabled:opacity-50 text-slate-800 rounded-lg text-xs font-bold transition-colors cursor-pointer"
                     title="حفظ هذا الصنف والخروج من النافذة"
                   >
                     حفظ وإغلاق
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
+                    disabled={isSubmitting}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
                   >
                     <Check className="w-4 h-4 shrink-0" />
-                    <span>حفظ وتفريغ لإدخال صنف جديد</span>
+                    <span>{isSubmitting ? 'جارٍ الحفظ...' : 'حفظ وتفريغ لإدخال صنف جديد'}</span>
                   </button>
                 </>
               ) : (
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-slate-900 hover:bg-black disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
                 >
-                  حفظ تعديل بيانات الصنف
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ تعديل بيانات الصنف'}
                 </button>
               )}
             </div>

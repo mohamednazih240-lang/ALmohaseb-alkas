@@ -38,13 +38,17 @@ import {
   calculateTreasuryBalance,
   logAudit,
   deleteTreasuryEntryAndRevert,
-  isBranchMatch
+  isBranchMatch,
+  roundMoney,
+  assertJournalBalanced,
+  isFinitePositive
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 import { tafqeetCurrency } from '../services/tafqeetService';
 
 interface TreasuryFinanceViewProps {
@@ -64,6 +68,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
   const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
   const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
+  const { isSubmitting, runWithLock } = useSubmitLock();
   // Modals
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -166,293 +171,375 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
     </div>
   );
 
-  // Save manual treasury in/out
+  // Save manual treasury in/out with balanced double-entry journal
   const handleSaveMove = (e: React.FormEvent) => {
     e.preventDefault();
-    if (moveAmount <= 0) return alert('المبلغ غير صالح');
+    runWithLock(() => {
+      const cleanAmt = roundMoney(moveAmount);
+      if (!isFinitePositive(cleanAmt)) return alert('المبلغ غير صالح. يجب أن يكون أكبر من صفر.');
+      if (moveMethod === 'آجل') return alert('يرجى اختيار خزينة أو قناة دفع نقدية صالحة.');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const entryId = generateId('tr');
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const entryId = generateId('tr');
+      const descText = moveDesc.trim() || (moveDir === 'in' ? 'إيداع نقدي مباشر' : 'سحب نقدي مباشر');
 
-    updated.treasury.unshift({
-      id: entryId,
-      date: getTodayDate(),
-      direction: moveDir,
-      amount: moveAmount,
-      method: moveMethod,
-      description: moveDesc || (moveDir === 'in' ? 'إيداع نقدي مباشر' : 'سحب نقدي مباشر'),
-      sourceType: 'manual',
-      sourceId: entryId,
-      branchId: targetBranchId,
-      branchName: currentBranch.name
+      const methodAccId = getMethodAccountId(moveMethod);
+      const methodAcc = updated.accounts.find(a => a.id === methodAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
+      const equityAcc = updated.accounts.find(a => a.id === 'acc_equity') || updated.accounts.find(a => a.id === 'acc_other_rev') || updated.accounts[0];
+
+      const jEntry: JournalEntry = {
+        id: generateId('jrn_trmove'),
+        number: `J-${Date.now().toString().slice(-6)}`,
+        date: getTodayDate(),
+        description: `قيد حركة خزينة مباشرة (${currentBranch.name}): ${descText}`,
+        sourceType: 'manual',
+        sourceId: entryId,
+        lines: moveDir === 'in'
+          ? [
+              { accountId: methodAcc.id, accountCode: methodAcc.code, accountName: methodAcc.name, debit: cleanAmt, credit: 0, notes: `إيداع في ${moveMethod}` },
+              { accountId: equityAcc.id, accountCode: equityAcc.code, accountName: equityAcc.name, debit: 0, credit: cleanAmt, notes: descText }
+            ]
+          : [
+              { accountId: equityAcc.id, accountCode: equityAcc.code, accountName: equityAcc.name, debit: cleanAmt, credit: 0, notes: descText },
+              { accountId: methodAcc.id, accountCode: methodAcc.code, accountName: methodAcc.name, debit: 0, credit: cleanAmt, notes: `سحب من ${moveMethod}` }
+            ],
+        createdAt: new Date().toISOString()
+      };
+
+      const balCheck = assertJournalBalanced(jEntry);
+      if (!balCheck.balanced) {
+        alert(balCheck.reason || 'القيد المحاسبي لحركة الخزينة غير متوازن.');
+        return;
+      }
+
+      updated.treasury.unshift({
+        id: entryId,
+        date: getTodayDate(),
+        direction: moveDir,
+        amount: cleanAmt,
+        method: moveMethod,
+        description: descText,
+        sourceType: 'manual',
+        sourceId: entryId,
+        branchId: targetBranchId,
+        branchName: currentBranch.name
+      });
+      updated.journals.unshift(jEntry);
+
+      logAudit(updated, `حركة خزينة يدوية (${currentBranch.name})`, `${moveDir === 'in' ? 'إيداع' : 'سحب'} ${formatMoney(cleanAmt, updated.settings.currency)} (${moveMethod})`);
+      onUpdateDb(updated);
+      setMoveAmount(0);
+      setMoveDesc('');
+      setShowMoveModal(false);
     });
-
-    logAudit(updated, `حركة خزينة يدوية (${currentBranch.name})`, `${moveDir === 'in' ? 'إيداع' : 'سحب'} ${formatMoney(moveAmount, updated.settings.currency)} (${moveMethod})`);
-    onUpdateDb(updated);
-    setMoveAmount(0);
-    setMoveDesc('');
-    setShowMoveModal(false);
   };
 
   // Transfer between payment methods (e.g. from Cash to InstaPay)
   const handleSaveTransfer = (e: React.FormEvent) => {
     e.preventDefault();
-    if (fromMethod === toMethod) return alert('اختر وسيلتين مختلفتين للتحويل');
-    if (transferAmount <= 0) return alert('المبلغ غير صالح');
+    runWithLock(() => {
+      if (fromMethod === toMethod) return alert('اختر وسيلتين مختلفتين للتحويل');
+      if (fromMethod === 'آجل' || toMethod === 'آجل') return alert('لا يمكن التحويل من أو إلى حساب آجل.');
+      const cleanAmt = roundMoney(transferAmount);
+      if (!isFinitePositive(cleanAmt)) return alert('المبلغ غير صالح');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const fromBal = calculateTreasuryBalance(updated, fromMethod, targetBranchId);
-    if (fromBal < transferAmount) {
-      alert(`رصيد ${fromMethod} الحالي بفرع (${currentBranch.name}) هو (${formatMoney(fromBal, updated.settings.currency)}) ولا يكفي لإتمام التحويل.`);
-      return;
-    }
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const fromBal = calculateTreasuryBalance(updated, fromMethod, targetBranchId);
+      if (fromBal < cleanAmt) {
+        alert(`رصيد ${fromMethod} الحالي بفرع (${currentBranch.name}) هو (${formatMoney(fromBal, updated.settings.currency)}) ولا يكفي لإتمام التحويل.`);
+        return;
+      }
 
-    const tId = generateId('tr');
-    // 1. Out from source method
-    updated.treasury.unshift({
-      id: generateId('tr'),
-      date: getTodayDate(),
-      direction: 'out',
-      amount: transferAmount,
-      method: fromMethod,
-      description: `تحويل صادر إلى ${toMethod}: ${transferNote}`,
-      sourceType: 'transfer',
-      sourceId: tId,
-      branchId: targetBranchId,
-      branchName: currentBranch.name
+      const tId = generateId('tr');
+      // 1. Out from source method
+      updated.treasury.unshift({
+        id: generateId('tr'),
+        date: getTodayDate(),
+        direction: 'out',
+        amount: cleanAmt,
+        method: fromMethod,
+        description: `تحويل صادر إلى ${toMethod}: ${transferNote}`,
+        sourceType: 'transfer',
+        sourceId: tId,
+        branchId: targetBranchId,
+        branchName: currentBranch.name
+      });
+
+      // 2. In to destination method
+      updated.treasury.unshift({
+        id: generateId('tr'),
+        date: getTodayDate(),
+        direction: 'in',
+        amount: cleanAmt,
+        method: toMethod,
+        description: `تحويل وارد من ${fromMethod}: ${transferNote}`,
+        sourceType: 'transfer',
+        sourceId: tId,
+        branchId: targetBranchId,
+        branchName: currentBranch.name
+      });
+
+      // 3. Double-entry journal between asset accounts
+      const fromAccId = getMethodAccountId(fromMethod);
+      const toAccId = getMethodAccountId(toMethod);
+      const fromAcc = updated.accounts.find(a => a.id === fromAccId) || updated.accounts[0];
+      const toAcc = updated.accounts.find(a => a.id === toAccId) || updated.accounts[1];
+
+      const transferJournal: JournalEntry = {
+        id: generateId('j'),
+        number: `J-${Date.now().toString().slice(-6)}`,
+        date: getTodayDate(),
+        description: `تحويل سيولة داخلية من ${fromMethod} إلى ${toMethod}`,
+        sourceType: 'manual',
+        sourceId: tId,
+        lines: [
+          { accountId: toAcc.id, accountCode: toAcc.code, accountName: toAcc.name, debit: cleanAmt, credit: 0, notes: `تغذية رصيد ${toMethod}` },
+          { accountId: fromAcc.id, accountCode: fromAcc.code, accountName: fromAcc.name, debit: 0, credit: cleanAmt, notes: `سحب من ${fromMethod}` }
+        ],
+        createdAt: new Date().toISOString()
+      };
+
+      const balCheck = assertJournalBalanced(transferJournal);
+      if (!balCheck.balanced) {
+        alert(balCheck.reason || 'القيد المحاسبي للتحويل غير متوازن.');
+        return;
+      }
+
+      updated.journals.unshift(transferJournal);
+
+      logAudit(updated, 'تحويل سيولة بين الخزائن', `تحويل ${formatMoney(cleanAmt, updated.settings.currency)} من ${fromMethod} إلى ${toMethod}`);
+      onUpdateDb(updated);
+      setTransferAmount(0);
+      setShowTransferModal(false);
     });
-
-    // 2. In to destination method
-    updated.treasury.unshift({
-      id: generateId('tr'),
-      date: getTodayDate(),
-      direction: 'in',
-      amount: transferAmount,
-      method: toMethod,
-      description: `تحويل وارد من ${fromMethod}: ${transferNote}`,
-      sourceType: 'transfer',
-      sourceId: tId,
-      branchId: targetBranchId,
-      branchName: currentBranch.name
-    });
-
-    // 3. Double-entry journal between asset accounts
-    const fromAccId = getMethodAccountId(fromMethod);
-    const toAccId = getMethodAccountId(toMethod);
-    const fromAcc = updated.accounts.find(a => a.id === fromAccId) || updated.accounts[0];
-    const toAcc = updated.accounts.find(a => a.id === toAccId) || updated.accounts[1];
-
-    updated.journals.unshift({
-      id: generateId('j'),
-      number: `J-${Date.now().toString().slice(-6)}`,
-      date: getTodayDate(),
-      description: `تحويل سيولة داخلية من ${fromMethod} إلى ${toMethod}`,
-      sourceType: 'manual',
-      sourceId: tId,
-      lines: [
-        { accountId: toAcc.id, accountCode: toAcc.code, accountName: toAcc.name, debit: transferAmount, credit: 0, notes: `تغذية رصيد ${toMethod}` },
-        { accountId: fromAcc.id, accountCode: fromAcc.code, accountName: fromAcc.name, debit: 0, credit: transferAmount, notes: `سحب من ${fromMethod}` }
-      ],
-      createdAt: new Date().toISOString()
-    });
-
-    logAudit(updated, 'تحويل سيولة بين الخزائن', `تحويل ${formatMoney(transferAmount, updated.settings.currency)} من ${fromMethod} إلى ${toMethod}`);
-    onUpdateDb(updated);
-    setShowTransferModal(false);
   };
 
   // Save Expense or Revenue
   const handleSaveSimple = (e: React.FormEvent) => {
     e.preventDefault();
-    if (simpleAmount <= 0) return alert('المبلغ غير صالح');
-    const isExpense = subPage === 'expenses';
+    runWithLock(() => {
+      const cleanAmt = roundMoney(simpleAmount);
+      if (!isFinitePositive(cleanAmt)) return alert('المبلغ غير صالح');
+      if (simpleMethod === 'آجل') return alert('يرجى اختيار وسيلة سداد/تحصيل نقدية.');
+      if (!simpleCategory.trim()) return alert('يرجى تحديد التصنيف والبند');
+      const isExpense = subPage === 'expenses';
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const recId = generateId(isExpense ? 'exp' : 'rev');
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const recId = generateId(isExpense ? 'exp' : 'rev');
+      const cashAccId = getMethodAccountId(simpleMethod);
+      const cashAcc = updated.accounts.find(a => a.id === cashAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
 
-    const record: SimpleRecord = {
-      id: recId,
-      date: simpleDate,
-      category: simpleCategory || (isExpense ? 'مصروفات عامة' : 'إيرادات تشغيلية'),
-      amount: simpleAmount,
-      method: simpleMethod,
-      description: simpleDesc,
-      branchId: targetBranchId,
-      branchName: currentBranch.name
-    };
+      const record: SimpleRecord = {
+        id: recId,
+        date: simpleDate,
+        category: simpleCategory.trim() || (isExpense ? 'مصروفات عامة' : 'إيرادات تشغيلية'),
+        amount: cleanAmt,
+        method: simpleMethod,
+        description: simpleDesc.trim(),
+        branchId: targetBranchId,
+        branchName: currentBranch.name
+      };
 
-    if (editingSimple) {
-      if (isExpense) {
-        const idx = updated.expenses.findIndex(e => e.id === editingSimple.id);
-        if (idx !== -1) {
-          updated.expenses[idx] = {
-            ...editingSimple,
-            date: simpleDate,
-            category: simpleCategory || 'مصروفات عامة',
-            amount: simpleAmount,
-            method: simpleMethod,
-            description: simpleDesc
-          };
-        }
-      } else {
-        const idx = updated.revenues.findIndex(r => r.id === editingSimple.id);
-        if (idx !== -1) {
-          updated.revenues[idx] = {
-            ...editingSimple,
-            date: simpleDate,
-            category: simpleCategory || 'إيرادات تشغيلية',
-            amount: simpleAmount,
-            method: simpleMethod,
-            description: simpleDesc
-          };
-        }
-      }
-
-      // Update treasury entry in place
-      const trIdx = updated.treasury.findIndex(t => t.sourceId === editingSimple.id || t.id.includes(editingSimple.id));
-      if (trIdx !== -1) {
-        updated.treasury[trIdx].amount = simpleAmount;
-        updated.treasury[trIdx].date = simpleDate;
-        updated.treasury[trIdx].method = simpleMethod;
-        updated.treasury[trIdx].description = `${isExpense ? 'مصروف' : 'إيراد'} (${currentBranch.name}): ${simpleCategory} (${simpleDesc})`;
-      }
-
-      // Update journal entry in place
-      const jIdx = updated.journals.findIndex(j => j.sourceId === editingSimple.id);
-      if (jIdx !== -1) {
-        const lines = updated.journals[jIdx].lines || [];
-        if (lines.length >= 2) {
-          if (isExpense) {
-            lines[0].debit = simpleAmount;
-            lines[1].credit = simpleAmount;
-          } else {
-            lines[0].debit = simpleAmount;
-            lines[1].credit = simpleAmount;
+      if (editingSimple) {
+        if (isExpense) {
+          const idx = updated.expenses.findIndex(item => item.id === editingSimple.id);
+          if (idx !== -1) {
+            updated.expenses[idx] = {
+              ...editingSimple,
+              date: simpleDate,
+              category: record.category,
+              amount: cleanAmt,
+              method: simpleMethod,
+              description: record.description
+            };
+          }
+        } else {
+          const idx = updated.revenues.findIndex(item => item.id === editingSimple.id);
+          if (idx !== -1) {
+            updated.revenues[idx] = {
+              ...editingSimple,
+              date: simpleDate,
+              category: record.category,
+              amount: cleanAmt,
+              method: simpleMethod,
+              description: record.description
+            };
           }
         }
-        updated.journals[jIdx].date = simpleDate;
+
+        // Update treasury entry in place
+        const trIdx = updated.treasury.findIndex(t => t.sourceId === editingSimple.id || t.id.includes(editingSimple.id));
+        if (trIdx !== -1) {
+          updated.treasury[trIdx].amount = cleanAmt;
+          updated.treasury[trIdx].date = simpleDate;
+          updated.treasury[trIdx].method = simpleMethod;
+          updated.treasury[trIdx].description = `${isExpense ? 'مصروف' : 'إيراد'} (${currentBranch.name}): ${record.category} (${record.description})`;
+        }
+
+        // Update journal entry & cash/bank account in place
+        const jIdx = updated.journals.findIndex(j => j.sourceId === editingSimple.id);
+        if (jIdx !== -1) {
+          const lines = updated.journals[jIdx].lines || [];
+          if (lines.length >= 2) {
+            if (isExpense) {
+              lines[0].debit = cleanAmt;
+              lines[0].credit = 0;
+              lines[1].accountId = cashAcc.id;
+              lines[1].accountCode = cashAcc.code;
+              lines[1].accountName = cashAcc.name;
+              lines[1].debit = 0;
+              lines[1].credit = cleanAmt;
+              lines[1].notes = `سداد بطريقة ${simpleMethod}`;
+            } else {
+              lines[0].accountId = cashAcc.id;
+              lines[0].accountCode = cashAcc.code;
+              lines[0].accountName = cashAcc.name;
+              lines[0].debit = cleanAmt;
+              lines[0].credit = 0;
+              lines[0].notes = `تحصيل بطريقة ${simpleMethod}`;
+              lines[1].debit = 0;
+              lines[1].credit = cleanAmt;
+            }
+          }
+          updated.journals[jIdx].date = simpleDate;
+          const editBalCheck = assertJournalBalanced(updated.journals[jIdx]);
+          if (!editBalCheck.balanced) {
+            alert(editBalCheck.reason || 'القيد المحاسبي المعدل غير متوازن.');
+            return;
+          }
+        }
+
+        logAudit(
+          updated,
+          isExpense ? 'تعديل مصروف' : 'تعديل إيراد',
+          `${record.category} بمبلغ ${formatMoney(cleanAmt, updated.settings.currency)}`
+        );
+        onUpdateDb(updated);
+        setShowSimpleModal(false);
+        setEditingSimple(null);
+        setSimpleAmount(0);
+        setSimpleDesc('');
+        return;
       }
 
-      logAudit(
-        updated,
-        isExpense ? 'تعديل مصروف' : 'تعديل إيراد',
-        `${simpleCategory} بمبلغ ${formatMoney(simpleAmount, updated.settings.currency)}`
-      );
+      // Creating NEW Expense / Revenue (Idempotent Deterministic IDs)
+      if (isExpense) {
+        updated.expenses.unshift(record);
+        const deterministicTrId = `tr_expense_${recId}_p0_out`;
+        updated.treasury.unshift({
+          id: deterministicTrId,
+          date: simpleDate,
+          direction: 'out',
+          amount: cleanAmt,
+          method: simpleMethod,
+          description: `مصروف (${currentBranch.name}): ${record.category} (${record.description})`,
+          sourceType: 'expense',
+          sourceId: recId,
+          branchId: targetBranchId,
+          branchName: currentBranch.name
+        });
+
+        const expAcc = updated.accounts.find(a => a.id === 'acc_exp')!;
+        const jEntry: JournalEntry = {
+          id: `jrn_expense_${recId}`,
+          number: `J-${Date.now().toString().slice(-6)}`,
+          date: simpleDate,
+          description: `إثبات مصروف (${currentBranch.name}): ${record.category} - ${record.description}`,
+          sourceType: 'expense',
+          sourceId: recId,
+          lines: [
+            { accountId: expAcc.id, accountCode: expAcc.code, accountName: expAcc.name, debit: cleanAmt, credit: 0, notes: `${record.category} (${currentBranch.name})` },
+            { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: 0, credit: cleanAmt, notes: `سداد بطريقة ${simpleMethod}` }
+          ],
+          createdAt: new Date().toISOString()
+        };
+        const balCheck = assertJournalBalanced(jEntry);
+        if (!balCheck.balanced) {
+          alert(balCheck.reason || 'قيد المصروف غير متوازن.');
+          return;
+        }
+        updated.journals.unshift(jEntry);
+      } else {
+        updated.revenues.unshift(record);
+        const deterministicTrId = `tr_revenue_${recId}_p0_in`;
+        updated.treasury.unshift({
+          id: deterministicTrId,
+          date: simpleDate,
+          direction: 'in',
+          amount: cleanAmt,
+          method: simpleMethod,
+          description: `إيراد (${currentBranch.name}): ${record.category} (${record.description})`,
+          sourceType: 'revenue',
+          sourceId: recId,
+          branchId: targetBranchId,
+          branchName: currentBranch.name
+        });
+
+        const revAcc = updated.accounts.find(a => a.id === 'acc_other_rev')!;
+        const jEntry: JournalEntry = {
+          id: `jrn_revenue_${recId}`,
+          number: `J-${Date.now().toString().slice(-6)}`,
+          date: simpleDate,
+          description: `إثبات إيراد: ${record.category} - ${record.description}`,
+          sourceType: 'revenue',
+          sourceId: recId,
+          lines: [
+            { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: cleanAmt, credit: 0, notes: `تحصيل بطريقة ${simpleMethod}` },
+            { accountId: revAcc.id, accountCode: revAcc.code, accountName: revAcc.name, debit: 0, credit: cleanAmt, notes: record.category }
+          ],
+          createdAt: new Date().toISOString()
+        };
+        const balCheck = assertJournalBalanced(jEntry);
+        if (!balCheck.balanced) {
+          alert(balCheck.reason || 'قيد الإيراد غير متوازن.');
+          return;
+        }
+        updated.journals.unshift(jEntry);
+      }
+
+      logAudit(updated, isExpense ? 'تسجيل مصروف' : 'تسجيل إيراد', `${record.category} بمبلغ ${formatMoney(cleanAmt, updated.settings.currency)}`);
       onUpdateDb(updated);
       setShowSimpleModal(false);
-      setEditingSimple(null);
       setSimpleAmount(0);
       setSimpleDesc('');
-      return;
-    }
-
-    // Creating NEW Expense / Revenue (Idempotent Deterministic IDs)
-    if (isExpense) {
-      updated.expenses.unshift(record);
-      const deterministicTrId = `tr_expense_${recId}_p0_out`;
-      updated.treasury.unshift({
-        id: deterministicTrId,
-        date: simpleDate,
-        direction: 'out',
-        amount: simpleAmount,
-        method: simpleMethod,
-        description: `مصروف (${currentBranch.name}): ${record.category} (${simpleDesc})`,
-        sourceType: 'expense',
-        sourceId: recId,
-        branchId: targetBranchId,
-        branchName: currentBranch.name
-      });
-
-      const expAcc = updated.accounts.find(a => a.id === 'acc_exp')!;
-      const cashAccId = getMethodAccountId(simpleMethod);
-      const cashAcc = updated.accounts.find(a => a.id === cashAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
-
-      updated.journals.unshift({
-        id: `jrn_expense_${recId}`,
-        number: `J-${Date.now().toString().slice(-6)}`,
-        date: simpleDate,
-        description: `إثبات مصروف (${currentBranch.name}): ${record.category} - ${simpleDesc}`,
-        sourceType: 'expense',
-        sourceId: recId,
-        lines: [
-          { accountId: expAcc.id, accountCode: expAcc.code, accountName: expAcc.name, debit: simpleAmount, credit: 0, notes: `${record.category} (${currentBranch.name})` },
-          { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: 0, credit: simpleAmount, notes: `سداد بطريقة ${simpleMethod}` }
-        ],
-        createdAt: new Date().toISOString()
-      });
-    } else {
-      updated.revenues.unshift(record);
-      const deterministicTrId = `tr_revenue_${recId}_p0_in`;
-      updated.treasury.unshift({
-        id: deterministicTrId,
-        date: simpleDate,
-        direction: 'in',
-        amount: simpleAmount,
-        method: simpleMethod,
-        description: `إيراد (${currentBranch.name}): ${record.category} (${simpleDesc})`,
-        sourceType: 'revenue',
-        sourceId: recId,
-        branchId: targetBranchId,
-        branchName: currentBranch.name
-      });
-
-      const revAcc = updated.accounts.find(a => a.id === 'acc_other_rev')!;
-      const cashAccId = getMethodAccountId(simpleMethod);
-      const cashAcc = updated.accounts.find(a => a.id === cashAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
-
-      updated.journals.unshift({
-        id: `jrn_revenue_${recId}`,
-        number: `J-${Date.now().toString().slice(-6)}`,
-        date: simpleDate,
-        description: `إثبات إيراد: ${record.category} - ${simpleDesc}`,
-        sourceType: 'revenue',
-        sourceId: recId,
-        lines: [
-          { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: simpleAmount, credit: 0, notes: `تحصيل بطريقة ${simpleMethod}` },
-          { accountId: revAcc.id, accountCode: revAcc.code, accountName: revAcc.name, debit: 0, credit: simpleAmount, notes: record.category }
-        ],
-        createdAt: new Date().toISOString()
-      });
-    }
-
-    logAudit(updated, isExpense ? 'تسجيل مصروف' : 'تسجيل إيراد', `${record.category} بمبلغ ${formatMoney(simpleAmount, updated.settings.currency)}`);
-    onUpdateDb(updated);
-    setShowSimpleModal(false);
-    setSimpleAmount(0);
-    setSimpleDesc('');
+    });
   };
 
   const handleDeleteTreasuryEntry = (tr: TreasuryEntry) => {
-    const isManager = db.currentUser?.role === 'مدير';
-    if (!isManager) {
-      alert('عذراً، لا يمكن حذف أي حركة خزينة إلا من قِبل المدير العام فقط.');
-      return;
-    }
+    runWithLock(() => {
+      const isManager = db.currentUser?.role === 'مدير';
+      if (!isManager) {
+        alert('عذراً، لا يمكن حذف أي حركة خزينة إلا من قِبل المدير العام فقط.');
+        return;
+      }
 
-    if (!confirm(`هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)} وعكس الأرصدة؟`)) return;
-    const updated = deleteTreasuryEntryAndRevert(db, tr.id);
-    onUpdateDb(updated);
+      if (!confirm(`هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)} وعكس الأرصدة؟`)) return;
+      const updated = deleteTreasuryEntryAndRevert(db, tr.id);
+      onUpdateDb(updated);
+    });
   };
 
   const handleDeleteSimpleRecord = (item: SimpleRecord) => {
-    const isManager = db.currentUser?.role === 'مدير';
-    if (!isManager) {
-      alert('عذراً، لا يمكن حذف أي مصروف أو إيراد إلا من قِبل المدير العام فقط.');
-      return;
-    }
+    runWithLock(() => {
+      const isManager = db.currentUser?.role === 'مدير';
+      if (!isManager) {
+        alert('عذراً، لا يمكن حذف أي مصروف أو إيراد إلا من قِبل المدير العام فقط.');
+        return;
+      }
 
-    const isExp = subPage === 'expenses';
-    if (!confirm(`هل أنت متأكد من حذف ${isExp ? 'المصروف' : 'الإيراد'} "${item.category}"؟`)) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    if (isExp) {
-      updated.expenses = updated.expenses.filter(e => e.id !== item.id);
-    } else {
-      updated.revenues = updated.revenues.filter(r => r.id !== item.id);
-    }
-    updated.treasury = updated.treasury.filter(t => t.sourceId !== item.id);
-    updated.journals = updated.journals.filter(j => j.sourceId !== item.id);
-    logAudit(updated, isExp ? 'حذف مصروف' : 'حذف إيراد', `تم حذف ${item.category} بقيمة ${item.amount}`);
-    onUpdateDb(updated);
+      const isExp = subPage === 'expenses';
+      if (!confirm(`هل أنت متأكد من حذف ${isExp ? 'المصروف' : 'الإيراد'} "${item.category}"؟`)) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (isExp) {
+        updated.expenses = updated.expenses.filter(e => e.id !== item.id);
+      } else {
+        updated.revenues = updated.revenues.filter(r => r.id !== item.id);
+      }
+      updated.treasury = updated.treasury.filter(t => t.sourceId !== item.id);
+      updated.journals = updated.journals.filter(j => j.sourceId !== item.id);
+      logAudit(updated, isExp ? 'حذف مصروف' : 'حذف إيراد', `تم حذف ${item.category} بقيمة ${item.amount}`);
+      onUpdateDb(updated);
+    });
   };
 
   const handleOpenEditSimple = (item: SimpleRecord) => {
@@ -660,62 +747,73 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Add Account to Chart of Accounts
   const handleSaveAccount = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!accCode.trim() || !accName.trim()) return alert('أكمل بيانات الحساب');
+    runWithLock(() => {
+      if (!accCode.trim() || !accName.trim()) return alert('أكمل بيانات الحساب');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    if (updated.accounts.some(a => a.code === accCode.trim())) {
-      alert('كود الحساب موجود بالفعل');
-      return;
-    }
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (updated.accounts.some(a => a.code === accCode.trim())) {
+        alert('كود الحساب موجود بالفعل');
+        return;
+      }
 
-    const newAcc: Account = {
-      id: generateId('acc'),
-      code: accCode.trim(),
-      name: accName.trim(),
-      type: accType
-    };
+      const newAcc: Account = {
+        id: generateId('acc'),
+        code: accCode.trim(),
+        name: accName.trim(),
+        type: accType
+      };
 
-    updated.accounts.push(newAcc);
-    updated.accounts.sort((a, b) => a.code.localeCompare(b.code));
-    logAudit(updated, 'إضافة حساب جديد في الدليل', `${accCode} - ${accName}`);
-    onUpdateDb(updated);
-    setShowAccountModal(false);
-    setAccCode('');
-    setAccName('');
+      updated.accounts.push(newAcc);
+      updated.accounts.sort((a, b) => a.code.localeCompare(b.code));
+      logAudit(updated, 'إضافة حساب جديد في الدليل', `${accCode} - ${accName}`);
+      onUpdateDb(updated);
+      setShowAccountModal(false);
+      setAccCode('');
+      setAccName('');
+    });
   };
 
   // Add Manual Journal Entry
   const handleSaveJournal = (e: React.FormEvent) => {
     e.preventDefault();
-    if (journalAmount <= 0) return alert('المبلغ غير صالح');
-    if (debitAccId === creditAccId) return alert('لا يمكن اختيار نفس الحساب للمدين والدائن');
+    runWithLock(() => {
+      const cleanAmt = roundMoney(journalAmount);
+      if (!isFinitePositive(cleanAmt)) return alert('المبلغ غير صالح');
+      if (debitAccId === creditAccId) return alert('لا يمكن اختيار نفس الحساب للمدين والدائن');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const debitAcc = updated.accounts.find(a => a.id === debitAccId);
-    const creditAcc = updated.accounts.find(a => a.id === creditAccId);
-    if (!debitAcc || !creditAcc) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const debitAcc = updated.accounts.find(a => a.id === debitAccId);
+      const creditAcc = updated.accounts.find(a => a.id === creditAccId);
+      if (!debitAcc || !creditAcc) return;
 
-    const jId = generateId('j');
-    const newEntry: JournalEntry = {
-      id: jId,
-      number: `J-${Date.now().toString().slice(-6)}`,
-      date: journalDate,
-      description: journalDesc || 'قيد يومية تسوية يدوي',
-      sourceType: 'manual',
-      sourceId: jId,
-      lines: [
-        { accountId: debitAcc.id, accountCode: debitAcc.code, accountName: debitAcc.name, debit: journalAmount, credit: 0 },
-        { accountId: creditAcc.id, accountCode: creditAcc.code, accountName: creditAcc.name, debit: 0, credit: journalAmount }
-      ],
-      createdAt: new Date().toISOString()
-    };
+      const jId = generateId('j');
+      const newEntry: JournalEntry = {
+        id: jId,
+        number: `J-${Date.now().toString().slice(-6)}`,
+        date: journalDate,
+        description: journalDesc.trim() || 'قيد يومية تسوية يدوي',
+        sourceType: 'manual',
+        sourceId: jId,
+        lines: [
+          { accountId: debitAcc.id, accountCode: debitAcc.code, accountName: debitAcc.name, debit: cleanAmt, credit: 0 },
+          { accountId: creditAcc.id, accountCode: creditAcc.code, accountName: creditAcc.name, debit: 0, credit: cleanAmt }
+        ],
+        createdAt: new Date().toISOString()
+      };
 
-    updated.journals.unshift(newEntry);
-    logAudit(updated, 'إنشاء قيد يومية يدوي', `${newEntry.number}: ${journalDesc} (${formatMoney(journalAmount, updated.settings.currency)})`);
-    onUpdateDb(updated);
-    setShowJournalModal(false);
-    setJournalAmount(0);
-    setJournalDesc('');
+      const balCheck = assertJournalBalanced(newEntry);
+      if (!balCheck.balanced) {
+        alert(balCheck.reason || 'القيد المحاسبي غير متوازن.');
+        return;
+      }
+
+      updated.journals.unshift(newEntry);
+      logAudit(updated, 'إنشاء قيد يومية يدوي', `${newEntry.number}: ${newEntry.description} (${formatMoney(cleanAmt, updated.settings.currency)})`);
+      onUpdateDb(updated);
+      setShowJournalModal(false);
+      setJournalAmount(0);
+      setJournalDesc('');
+    });
   };
 
   // General Ledger & Trial Balance Calculations
@@ -1351,7 +1449,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowMoveModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">حفظ الحركة</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الحركة'}
+                </button>
               </div>
             </form>
           </div>
@@ -1415,7 +1515,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowTransferModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">تنفيذ التحويل وقيده</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
+                  {isSubmitting ? 'جارٍ التنفيذ...' : 'تنفيذ التحويل وقيده'}
+                </button>
               </div>
             </form>
           </div>
@@ -1489,7 +1591,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowSimpleModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">حفظ وترحيل</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
+                  {isSubmitting ? 'جارٍ الترحيل...' : 'حفظ وترحيل'}
+                </button>
               </div>
             </form>
           </div>
@@ -1540,7 +1644,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowAccountModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">حفظ الحساب</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الحساب'}
+                </button>
               </div>
             </form>
           </div>
@@ -1611,7 +1717,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowJournalModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">ترحيل القيد</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
+                  {isSubmitting ? 'جارٍ الترحيل...' : 'ترحيل القيد'}
+                </button>
               </div>
             </form>
           </div>

@@ -35,6 +35,7 @@ import {
   Branch
 } from '../types/accounting';
 import { normalizeCompanyCode } from '../services/cloudSyncService';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 export interface PermissionItem {
   key: keyof UserPermissions;
@@ -290,6 +291,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   onOpenGoogleDriveBackup
 }) => {
   // User form modal
+  const { isSubmitting, runWithLock } = useSubmitLock();
   const [showUserModal, setShowUserModal] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [userName, setUserName] = useState('');
@@ -508,60 +510,64 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
   const handleSaveUser = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userName.trim() || !userUsername.trim()) return alert('أكمل بيانات المستخدم');
+    runWithLock(() => {
+      if (!userName.trim() || !userUsername.trim()) return alert('أكمل بيانات المستخدم');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const branch = (updated.branches || []).find(b => b.id === userBranchId);
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const branch = (updated.branches || []).find(b => b.id === userBranchId);
 
-    const targetPermissions: UserPermissions = { ...userPermissions };
-    targetPermissions.canViewInvoices = targetPermissions.canViewSales !== false;
-    targetPermissions.canCreateInvoices = targetPermissions.canCreateSales !== false;
+      const targetPermissions: UserPermissions = { ...userPermissions };
+      targetPermissions.canViewInvoices = targetPermissions.canViewSales !== false;
+      targetPermissions.canCreateInvoices = targetPermissions.canCreateSales !== false;
 
-    if (editingUser) {
-      const idx = updated.users.findIndex(u => u.id === editingUser.id);
-      if (idx !== -1) {
-        updated.users[idx] = {
-          ...updated.users[idx],
+      if (editingUser) {
+        const idx = updated.users.findIndex(u => u.id === editingUser.id);
+        if (idx !== -1) {
+          updated.users[idx] = {
+            ...updated.users[idx],
+            name: userName.trim(),
+            username: userUsername.trim().toLowerCase(),
+            password: userPassword.trim(),
+            role: userRole,
+            branchId: userBranchId || undefined,
+            branchName: branch?.name || undefined,
+            permissions: targetPermissions
+          };
+          logAudit(updated, 'تعديل بيانات مستخدم وصلاحياته', `${userName} (${userRole})`);
+        }
+      } else {
+        const newUser: User = {
+          id: generateId('usr'),
           name: userName.trim(),
           username: userUsername.trim().toLowerCase(),
           password: userPassword.trim(),
           role: userRole,
+          active: true,
           branchId: userBranchId || undefined,
           branchName: branch?.name || undefined,
           permissions: targetPermissions
         };
-        logAudit(updated, 'تعديل بيانات مستخدم وصلاحياته', `${userName} (${userRole})`);
+        updated.users.push(newUser);
+        logAudit(updated, 'إضافة مستخدم جديد وتحديد الصلاحيات', `${newUser.name} (${newUser.role})`);
       }
-    } else {
-      const newUser: User = {
-        id: generateId('usr'),
-        name: userName.trim(),
-        username: userUsername.trim().toLowerCase(),
-        password: userPassword.trim(),
-        role: userRole,
-        active: true,
-        branchId: userBranchId || undefined,
-        branchName: branch?.name || undefined,
-        permissions: targetPermissions
-      };
-      updated.users.push(newUser);
-      logAudit(updated, 'إضافة مستخدم جديد وتحديد الصلاحيات', `${newUser.name} (${newUser.role})`);
-    }
 
-    onUpdateDb(updated);
-    setShowUserModal(false);
+      onUpdateDb(updated);
+      setShowUserModal(false);
+    });
   };
 
   const handleDeleteUser = (u: User) => {
-    if (u.role === 'مدير' && db.users.filter(x => x.role === 'مدير').length <= 1) {
-      alert('لا يمكن حذف المدير العام الوحيد للنظام.');
-      return;
-    }
-    if (!confirm(`هل أنت متأكد من حذف المستخدم "${u.name}"؟`)) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.users = updated.users.filter(x => x.id !== u.id);
-    logAudit(updated, 'حذف مستخدم', u.name);
-    onUpdateDb(updated);
+    runWithLock(() => {
+      if (u.role === 'مدير' && db.users.filter(x => x.role === 'مدير').length <= 1) {
+        alert('لا يمكن حذف المدير العام الوحيد للنظام.');
+        return;
+      }
+      if (!confirm(`هل أنت متأكد من حذف المستخدم "${u.name}"؟`)) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.users = updated.users.filter(x => x.id !== u.id);
+      logAudit(updated, 'حذف مستخدم', u.name);
+      onUpdateDb(updated);
+    });
   };
 
   // Branch Handlers
@@ -589,89 +595,98 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
   const handleSaveBranch = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!branchName.trim()) return alert('يرجى إدخال اسم الفرع');
+    runWithLock(() => {
+      if (!branchName.trim()) return alert('يرجى إدخال اسم الفرع');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    if (!updated.branches) updated.branches = [];
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (!updated.branches) updated.branches = [];
 
-    const isTargetMawan = (editingBranch && isBranchMawan(editingBranch)) || branchName.includes('الموان') || branchCode === 'BR-02';
-    const cleanPin = branchPin.trim() || (isTargetMawan ? '1272000' : '1234');
+      const isTargetMawan = (editingBranch && isBranchMawan(editingBranch)) || branchName.includes('الموان') || branchCode === 'BR-02';
+      const cleanPin = branchPin.trim() || (isTargetMawan ? '1272000' : '1234');
 
-    if (editingBranch) {
-      const idx = updated.branches.findIndex(b => b.id === editingBranch.id);
-      if (idx !== -1) {
-        updated.branches[idx] = {
-          ...updated.branches[idx],
+      if (editingBranch) {
+        const idx = updated.branches.findIndex(b => b.id === editingBranch.id);
+        if (idx !== -1) {
+          updated.branches[idx] = {
+            ...updated.branches[idx],
+            name: branchName.trim(),
+            code: branchCode.trim() || `BR-${Date.now().toString().slice(-3)}`,
+            address: branchAddress.trim(),
+            phone: branchPhone.trim(),
+            isMain: branchIsMain,
+            pin: cleanPin
+          };
+          logAudit(updated, 'تعديل فرع ورقم سري', branchName);
+        }
+      } else {
+        const newBranch: Branch = {
+          id: generateId('br'),
           name: branchName.trim(),
-          code: branchCode.trim() || `BR-${Date.now().toString().slice(-3)}`,
+          code: branchCode.trim() || `BR-${(updated.branches.length + 1).toString().padStart(2, '0')}`,
           address: branchAddress.trim(),
           phone: branchPhone.trim(),
-          isMain: branchIsMain,
+          isMain: branchIsMain || updated.branches.length === 0,
           pin: cleanPin
         };
-        logAudit(updated, 'تعديل فرع ورقم سري', branchName);
+        updated.branches.push(newBranch);
+        logAudit(updated, 'إضافة فرع جديد مع رقم سري للحماية', newBranch.name);
       }
-    } else {
-      const newBranch: Branch = {
-        id: generateId('br'),
-        name: branchName.trim(),
-        code: branchCode.trim() || `BR-${(updated.branches.length + 1).toString().padStart(2, '0')}`,
-        address: branchAddress.trim(),
-        phone: branchPhone.trim(),
-        isMain: branchIsMain || updated.branches.length === 0,
-        pin: cleanPin
-      };
-      updated.branches.push(newBranch);
-      logAudit(updated, 'إضافة فرع جديد مع رقم سري للحماية', newBranch.name);
-    }
 
-    onUpdateDb(updated);
-    setShowBranchModal(false);
+      onUpdateDb(updated);
+      setShowBranchModal(false);
+    });
   };
 
   const handleDeleteBranch = (b: Branch) => {
-    if (b.isMain) {
-      alert('لا يمكن حذف الفرع الرئيسي للمحل.');
-      return;
-    }
-    const hasInvoices = (db.invoices || []).some(inv => inv.branchId === b.id);
-    if (hasInvoices) {
-      alert('لا يمكن حذف هذا الفرع لوجود فواتير مسجلة مرتبطة به.');
-      return;
-    }
-    if (!confirm(`هل ترغب في حذف فرع "${b.name}"؟`)) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.branches = (updated.branches || []).filter(x => x.id !== b.id);
-    logAudit(updated, 'حذف فرع', b.name);
-    onUpdateDb(updated);
+    runWithLock(() => {
+      if (b.isMain) {
+        alert('لا يمكن حذف الفرع الرئيسي للمحل.');
+        return;
+      }
+      const hasInvoices = (db.invoices || []).some(inv => inv.branchId === b.id);
+      if (hasInvoices) {
+        alert('لا يمكن حذف هذا الفرع لوجود فواتير مسجلة مرتبطة به.');
+        return;
+      }
+      if (!confirm(`هل ترغب في حذف فرع "${b.name}"؟`)) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.branches = (updated.branches || []).filter(x => x.id !== b.id);
+      logAudit(updated, 'حذف فرع', b.name);
+      onUpdateDb(updated);
+    });
   };
 
   // Add Period
   const handleSavePeriod = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!periodName.trim() || !periodFrom || !periodTo) return alert('أكمل تواريخ الفترة');
+    runWithLock(() => {
+      if (!periodName.trim() || !periodFrom || !periodTo) return alert('أكمل تواريخ الفترة');
+      if (periodFrom > periodTo) return alert('تاريخ بداية الفترة يجب أن يسبق أو يساوي تاريخ نهايتها.');
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const newPeriod: FiscalPeriod = {
-      id: generateId('per'),
-      name: periodName.trim(),
-      from: periodFrom,
-      to: periodTo,
-      status: 'مفتوح'
-    };
-    updated.periods.push(newPeriod);
-    logAudit(updated, 'إنشاء فترة مالية جديدة', newPeriod.name);
-    onUpdateDb(updated);
-    setShowPeriodModal(false);
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const newPeriod: FiscalPeriod = {
+        id: generateId('per'),
+        name: periodName.trim(),
+        from: periodFrom,
+        to: periodTo,
+        status: 'مفتوح'
+      };
+      updated.periods.push(newPeriod);
+      logAudit(updated, 'إنشاء فترة مالية جديدة', newPeriod.name);
+      onUpdateDb(updated);
+      setShowPeriodModal(false);
+    });
   };
 
   const handleClosePeriod = (pId: string) => {
-    if (!confirm('هل ترغب في إقفال هذه الفترة المحاسبية؟')) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    const p = updated.periods.find(item => item.id === pId);
-    if (p) p.status = 'مغلق';
-    logAudit(updated, 'إقفال فترة مالية', p?.name || '');
-    onUpdateDb(updated);
+    runWithLock(() => {
+      if (!confirm('هل ترغب في إقفال هذه الفترة المحاسبية؟')) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const p = updated.periods.find(item => item.id === pId);
+      if (p) p.status = 'مغلق';
+      logAudit(updated, 'إقفال فترة مالية', p?.name || '');
+      onUpdateDb(updated);
+    });
   };
 
   // Export JSON Backup
@@ -714,66 +729,68 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   // Save Settings
   const handleSaveSettings = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.settings = { ...settingsForm };
-    logAudit(updated, 'تحديث إعدادات المنشأة', updated.settings.company);
+    await runWithLock(async () => {
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.settings = { ...settingsForm };
+      logAudit(updated, 'تحديث إعدادات المنشأة', updated.settings.company);
 
-    // Sync company name to primary branch and warehouse so invoices display the user-defined name
-    const compName = updated.settings.company?.trim() || 'شركة الموان';
-    if (updated.branches && updated.branches.length > 0) {
-      if (updated.branches[0].name.startsWith('الفرع الرئيسي')) {
-        updated.branches[0].name = `الفرع الرئيسي - ${compName}`;
+      // Sync company name to primary branch and warehouse so invoices display the user-defined name
+      const compName = updated.settings.company?.trim() || 'شركة الموان';
+      if (updated.branches && updated.branches.length > 0) {
+        if (updated.branches[0].name.startsWith('الفرع الرئيسي')) {
+          updated.branches[0].name = `الفرع الرئيسي - ${compName}`;
+        }
+        updated.branches[0].pin = updated.settings.companyPin || '2919';
       }
-      updated.branches[0].pin = updated.settings.companyPin || '2919';
-    }
-    if (updated.warehouses && updated.warehouses.length > 0) {
-      if (updated.warehouses[0].name.includes('الرئيسي')) {
-        updated.warehouses[0].name = `مخزن ${compName} الرئيسي`;
+      if (updated.warehouses && updated.warehouses.length > 0) {
+        if (updated.warehouses[0].name.includes('الرئيسي')) {
+          updated.warehouses[0].name = `مخزن ${compName} الرئيسي`;
+        }
       }
-    }
 
-    // Sync active tenant name, PIN, code, and currency in company registry
-    const activeId = getActiveTenantId();
-    if (activeId) {
-      updateCompany(activeId, {
-        name: updated.settings.company,
-        code: updated.settings.companyCode,
-        password: updated.settings.companyPin,
-        currency: updated.settings.currency,
-        phone: updated.settings.phone,
-        address: updated.settings.address
-      });
-    }
-
-    onUpdateDb(updated);
-
-    // Update active user session and device profile with new company details immediately
-    try {
-      const rawSession = localStorage.getItem('hesabaty_active_user');
-      if (rawSession) {
-        const session = JSON.parse(rawSession);
-        session.companyName = updated.settings.company;
-        localStorage.setItem('hesabaty_active_user', JSON.stringify(session));
+      // Sync active tenant name, PIN, code, and currency in company registry
+      const activeId = getActiveTenantId();
+      if (activeId) {
+        updateCompany(activeId, {
+          name: updated.settings.company,
+          code: updated.settings.companyCode,
+          password: updated.settings.companyPin,
+          currency: updated.settings.currency,
+          phone: updated.settings.phone,
+          address: updated.settings.address
+        });
       }
-      const rawProfile = localStorage.getItem('hesabaty_device_profile');
-      if (rawProfile) {
-        const profile = JSON.parse(rawProfile);
-        profile.companyName = updated.settings.company;
-        profile.companyCode = updated.settings.companyCode;
-        localStorage.setItem('hesabaty_device_profile', JSON.stringify(profile));
+
+      onUpdateDb(updated);
+
+      // Update active user session and device profile with new company details immediately
+      try {
+        const rawSession = localStorage.getItem('hesabaty_active_user');
+        if (rawSession) {
+          const session = JSON.parse(rawSession);
+          session.companyName = updated.settings.company;
+          localStorage.setItem('hesabaty_active_user', JSON.stringify(session));
+        }
+        const rawProfile = localStorage.getItem('hesabaty_device_profile');
+        if (rawProfile) {
+          const profile = JSON.parse(rawProfile);
+          profile.companyName = updated.settings.company;
+          profile.companyCode = updated.settings.companyCode;
+          localStorage.setItem('hesabaty_device_profile', JSON.stringify(profile));
+        }
+      } catch (err) {
+        console.warn('Session profile sync error:', err);
       }
-    } catch (err) {
-      console.warn('Session profile sync error:', err);
-    }
 
-    // Push to Firestore Cloud immediately
-    try {
-      await pushDatabaseToCloud(updated, true);
-    } catch (err) {
-      console.warn('Cloud sync error on settings save:', err);
-    }
+      // Push to Firestore Cloud immediately
+      try {
+        await pushDatabaseToCloud(updated, true);
+      } catch (err) {
+        console.warn('Cloud sync error on settings save:', err);
+      }
 
-    alert(`✓ تم حفظ وتحديث اسم وبيانات منشأة «${updated.settings.company}» بنجاح وتأكيد مزامنتها سحابياً لجميع الأجهزة.`);
+      alert(`✓ تم حفظ وتحديث اسم وبيانات منشأة «${updated.settings.company}» بنجاح وتأكيد مزامنتها سحابياً لجميع الأجهزة.`);
+    });
   };
 
   return (
@@ -942,8 +959,9 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                       {u.role !== 'مدير' && (
                         <button
                           type="button"
+                          disabled={isSubmitting}
                           onClick={() => handleDeleteUser(u)}
-                          className="p-1.5 text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded-xl text-xs font-bold transition-all cursor-pointer border border-rose-200"
+                          className="p-1.5 text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded-xl text-xs font-bold transition-all cursor-pointer border border-rose-200 disabled:opacity-50"
                           title="حذف المستخدم"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -1196,8 +1214,9 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                     {!b.isMain && (
                       <button
                         type="button"
+                        disabled={isSubmitting}
                         onClick={() => handleDeleteBranch(b)}
-                        className="px-2 py-1 text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded-md text-xs font-bold transition-all cursor-pointer"
+                        className="px-2 py-1 text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded-md text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
                         title="حذف الفرع"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -1351,8 +1370,9 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                 {p.status === 'مفتوح' && (
                   <div className="pt-1">
                     <button
+                      disabled={isSubmitting}
                       onClick={() => handleClosePeriod(p.id)}
-                      className="w-full py-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-700 text-slate-700 border border-slate-200 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                      className="w-full py-1.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-700 text-slate-700 border border-slate-200 rounded-lg text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
                     >
                       إقفال الفترة المحاسبية
                     </button>
@@ -1465,12 +1485,13 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
             </div>
             <button
               type="button"
+              disabled={isSubmitting}
               onClick={() => handleSaveSettings()}
-              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center justify-center gap-2 self-start sm:self-auto active:scale-95"
+              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center justify-center gap-2 self-start sm:self-auto active:scale-95 disabled:opacity-50"
               title="حفظ كافة التغييرات والشعار فوراً"
             >
               <Check className="w-4 h-4 text-white" />
-              <span>حفظ الإعدادات والشعار</span>
+              <span>{isSubmitting ? 'جاري الحفظ...' : 'حفظ الإعدادات والشعار'}</span>
             </button>
           </div>
 
@@ -1684,10 +1705,11 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
             <div className="pt-2 flex justify-end">
               <button
                 type="submit"
-                className="px-6 py-2.5 bg-black hover:bg-slate-800 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center gap-1.5"
+                disabled={isSubmitting}
+                className="px-6 py-2.5 bg-black hover:bg-slate-800 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
               >
                 <Check className="w-4 h-4 text-emerald-400" />
-                <span>حفظ كافة إعدادات المنشأة والشعار والترويسة</span>
+                <span>{isSubmitting ? 'جاري الحفظ...' : 'حفظ كافة إعدادات المنشأة والشعار والترويسة'}</span>
               </button>
             </div>
           </form>
@@ -2002,7 +2024,8 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   </button>
                   <button
                     type="submit"
-                    className="px-6 py-2.5 bg-slate-950 hover:bg-slate-800 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center gap-1.5"
+                    disabled={isSubmitting}
+                    className="px-6 py-2.5 bg-slate-950 hover:bg-slate-800 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                   >
                     <Check className="w-4 h-4 text-emerald-400" />
                     <span>{editingUser ? 'حفظ الصلاحيات والمستخدم' : 'إنشاء المستخدم بالصلاحيات'}</span>
@@ -2121,7 +2144,8 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer disabled:opacity-50"
                 >
                   {editingBranch ? 'حفظ التعديل' : 'حفظ الفرع'}
                 </button>
@@ -2169,7 +2193,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
               </div>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowPeriodModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold">إلغاء</button>
-                <button type="submit" className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold">إنشاء الفترة</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black text-white rounded text-xs font-bold disabled:opacity-50">إنشاء الفترة</button>
               </div>
             </form>
           </div>

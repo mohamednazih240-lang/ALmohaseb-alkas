@@ -17,9 +17,10 @@ import {
   Scale
 } from 'lucide-react';
 import { AccountingDB, Currency, JournalEntry } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit } from '../services/accountingStorage';
+import { formatMoney, generateId, getTodayDate, logAudit, roundQty, isFinitePositive } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { useSubmitLock } from '../hooks/useSubmitLock';
 
 interface CurrenciesViewProps {
   db: AccountingDB;
@@ -29,6 +30,7 @@ interface CurrenciesViewProps {
 export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }) => {
   const [showModal, setShowModal] = useState(false);
   const [editingCurrency, setEditingCurrency] = useState<Currency | null>(null);
+  const { isSubmitting, runWithLock } = useSubmitLock();
 
   useModalBackHandler(showModal, () => setShowModal(false), 'currency_modal');
   const [code, setCode] = useState('');
@@ -68,57 +70,66 @@ export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!code.trim() || !name.trim()) return alert('أدخل بيانات العملة بالكامل');
+    runWithLock(() => {
+      if (!code.trim() || !name.trim()) return alert('أدخل بيانات العملة بالكامل');
+      const cleanRate = isBase ? 1 : roundQty(Number(rate));
+      if (!isFinitePositive(cleanRate)) {
+        alert('سعر الصرف يجب أن يكون رقماً موجباً أكبر من صفر.');
+        return;
+      }
 
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
-    if (isBase) {
-      // Unset other base currencies
-      updated.currencies.forEach(c => c.isBase = false);
-    }
+      if (isBase) {
+        // Unset other base currencies
+        updated.currencies.forEach(c => c.isBase = false);
+      }
 
-    if (editingCurrency) {
-      const idx = updated.currencies.findIndex(c => c.id === editingCurrency.id);
-      if (idx !== -1) {
-        updated.currencies[idx] = {
-          ...updated.currencies[idx],
+      if (editingCurrency) {
+        const idx = updated.currencies.findIndex(c => c.id === editingCurrency.id);
+        if (idx !== -1) {
+          updated.currencies[idx] = {
+            ...updated.currencies[idx],
+            code: code.trim().toUpperCase(),
+            name: name.trim(),
+            symbol: symbol.trim(),
+            rate: cleanRate,
+            isBase,
+            lastUpdated: getTodayDate()
+          };
+        }
+        logAudit(updated, 'تعديل سعر صرف عملة', `${name} (${cleanRate})`);
+      } else {
+        const newCurr: Currency = {
+          id: generateId('curr'),
           code: code.trim().toUpperCase(),
           name: name.trim(),
           symbol: symbol.trim(),
-          rate: isBase ? 1 : Number(rate) || 1,
+          rate: cleanRate,
           isBase,
           lastUpdated: getTodayDate()
         };
+        updated.currencies.push(newCurr);
+        logAudit(updated, 'إضافة عملة جديدة', `${newCurr.name} (${newCurr.code})`);
       }
-      logAudit(updated, 'تعديل سعر صرف عملة', `${name} (${rate})`);
-    } else {
-      const newCurr: Currency = {
-        id: generateId('curr'),
-        code: code.trim().toUpperCase(),
-        name: name.trim(),
-        symbol: symbol.trim(),
-        rate: isBase ? 1 : Number(rate) || 1,
-        isBase,
-        lastUpdated: getTodayDate()
-      };
-      updated.currencies.push(newCurr);
-      logAudit(updated, 'إضافة عملة جديدة', `${newCurr.name} (${newCurr.code})`);
-    }
 
-    onUpdateDb(updated);
-    setShowModal(false);
+      onUpdateDb(updated);
+      setShowModal(false);
+    });
   };
 
   const handleDelete = (id: string, cName: string, isBaseCurr: boolean) => {
-    if (isBaseCurr) {
-      alert('لا يمكن حذف العملة الأساسية للنظام.');
-      return;
-    }
-    if (!confirm(`هل أنت متأكد من حذف العملة (${cName})؟`)) return;
-    const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.currencies = updated.currencies.filter(c => c.id !== id);
-    logAudit(updated, 'حذف عملة', cName);
-    onUpdateDb(updated);
+    runWithLock(() => {
+      if (isBaseCurr) {
+        alert('لا يمكن حذف العملة الأساسية للنظام.');
+        return;
+      }
+      if (!confirm(`هل أنت متأكد من حذف العملة (${cName})؟`)) return;
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      updated.currencies = updated.currencies.filter(c => c.id !== id);
+      logAudit(updated, 'حذف عملة', cName);
+      onUpdateDb(updated);
+    });
   };
 
   // Convert calculation
@@ -425,9 +436,10 @@ export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold rounded-xl"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-amber-700 hover:bg-amber-800 disabled:opacity-50 text-white text-xs font-bold rounded-xl"
                 >
-                  حفظ العملة
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ العملة'}
                 </button>
               </div>
             </form>
