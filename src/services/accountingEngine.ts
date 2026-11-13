@@ -28,6 +28,7 @@ import {
   getNextUniqueVoucherNumber,
   buildProductFifoLedger,
   matchProductStrictly,
+  generateUniqueProductCode,
   RAHMA_INVOICE_17_ITEMS
 } from './accountingStorage';
 
@@ -372,7 +373,10 @@ export function postInvoiceTransaction(
 
     // Purchases: create new catalog item ONLY when strictly new (no auto-generated selling markups)
     if (!prod && item.productName && item.productName.trim()) {
-      const newCode = item.productCode || `P-${100 + updated.products.length + 1}`;
+      const candidateCode = item.productCode?.trim() || '';
+      const newCode = (candidateCode && !updated.products.some(p => (p.code || '').trim().toLowerCase() === candidateCode.toLowerCase()))
+        ? candidateCode
+        : generateUniqueProductCode(updated);
       const unitBuy = isPurchase ? roundMoney(Number(item.unitPrice) || 0) : 0;
       prod = {
         id: (item.productId && item.productId.startsWith('prod_')) ? item.productId : `prod_${cleanIdPart(item.productName)}_${Date.now().toString(36)}`,

@@ -736,10 +736,12 @@ export const SalesView: React.FC<SalesViewProps> = ({
                     </span>
                   </div>
 
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-500 font-medium">طريقة السداد:</span>
-                    <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px] font-medium text-slate-800">
-                      {inv.paymentMethod}
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="text-slate-500 font-medium shrink-0">طريقة السداد:</span>
+                    <span className="px-2 py-0.5 bg-slate-100 rounded text-[11px] font-bold text-slate-800 truncate max-w-[210px]">
+                      {(inv.payments && inv.payments.filter(p => p.method !== 'آجل' && p.amount > 0).length > 1)
+                        ? inv.payments.filter(p => p.method !== 'آجل' && p.amount > 0).map(p => `${p.method} (${formatMoney(p.amount, db.settings.currency)})`).join(' + ')
+                        : inv.paymentMethod}
                     </span>
                   </div>
 
@@ -772,94 +774,100 @@ export const SalesView: React.FC<SalesViewProps> = ({
                   </div>
                 </div>
 
-                {/* Card Footer: Items count, Creator User, and Actions */}
-                <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-[11px] text-slate-500 font-medium">
+                {/* Card Footer: Meta Badges Row + Full-Width Clean Action Bar */}
+                <div className="pt-2.5 border-t border-slate-100 flex flex-col gap-2">
+                  {/* Meta Row (No squishing on mobile) */}
+                  <div className="flex flex-wrap items-center gap-1.5 w-full">
+                    <span className="text-[11px] text-slate-600 font-bold bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200 whitespace-nowrap">
                       {inv.items.length} أصناف
                     </span>
                     {inv.createdBy && (
-                      <span className="text-[10px] bg-emerald-50 text-emerald-800 px-1.5 py-0.5 rounded font-bold border border-emerald-200" title="منشئ الفاتورة">
+                      <span className="text-[10px] bg-emerald-50 text-emerald-800 px-2 py-0.5 rounded-md font-bold border border-emerald-200 whitespace-nowrap" title="منشئ الفاتورة">
                         المنشئ: {inv.createdBy}
                       </span>
                     )}
                     {inv.updatedBy && (
-                      <span className="text-[10px] bg-amber-50 text-amber-800 px-1.5 py-0.5 rounded font-bold border border-amber-200" title="آخر من قام بتعديل الفاتورة">
+                      <span className="text-[10px] bg-amber-50 text-amber-800 px-2 py-0.5 rounded-md font-bold border border-amber-200 whitespace-nowrap" title="آخر من قام بتعديل الفاتورة">
                         عُدلت: {inv.updatedBy}
                       </span>
                     )}
                     {inv.branchName && (
-                      <span className="text-[10px] bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-bold border border-blue-200">
+                      <span className="text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-md font-bold border border-blue-200 truncate max-w-full" title={inv.branchName}>
                         الفرع: {inv.branchName}
                       </span>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-1">
-                    {/* Quick Return action on regular sales invoices */}
-                    {!isRet && canCreateSales && (
+                  {/* Actions Row */}
+                  <div className="flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-slate-100 w-full">
+                    <div className="flex items-center gap-1">
+                      {/* Quick Return action on regular sales invoices */}
+                      {!isRet && canCreateSales && (
+                        <button
+                          type="button"
+                          onClick={() => handleCreateReturnFromInvoice(inv)}
+                          className="px-2 py-1 text-rose-700 hover:text-rose-900 hover:bg-rose-50 border border-rose-200 rounded-md text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer"
+                          title="عمل مرتجع مبيعات من هذه الفاتورة"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 text-rose-600" />
+                          <span>مرتجع</span>
+                        </button>
+                      )}
+
                       <button
-                        type="button"
-                        onClick={() => handleCreateReturnFromInvoice(inv)}
-                        className="px-2 py-1 text-rose-700 hover:text-rose-900 hover:bg-rose-50 border border-rose-200 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                        title="عمل مرتجع مبيعات من هذه الفاتورة"
+                        onClick={() => setSelectedAuditInvoice(inv)}
+                        className="px-2 py-1 text-blue-700 hover:text-blue-900 hover:bg-blue-50 border border-blue-100 rounded-md text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer"
+                        title="عرض سجل الرقابة والتدقيق وتاريخ التعديلات"
                       >
-                        <RotateCcw className="w-3.5 h-3.5 text-rose-600" />
-                        <span className="hidden xs:inline">عمل مرتجع</span>
+                        <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
+                        <span>التدقيق</span>
                       </button>
-                    )}
+                    </div>
 
-                    <button
-                      onClick={() => setSelectedAuditInvoice(inv)}
-                      className="px-2 py-1 text-blue-700 hover:text-blue-900 hover:bg-blue-50 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                      title="عرض سجل الرقابة والتدقيق وتاريخ التعديلات"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                      <span className="hidden xs:inline">التدقيق</span>
-                    </button>
-
-                    <button
-                      onClick={() => onPreviewInvoice(inv)}
-                      className="px-2.5 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                      title="معاينة تفاصيل الفاتورة"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>معاينة</span>
-                    </button>
-
-                    <button
-                      onClick={() => onPrintInvoice ? onPrintInvoice(inv) : onPreviewInvoice(inv)}
-                      className="px-2.5 py-1 text-white bg-slate-900 hover:bg-black rounded-md text-xs font-bold transition-all flex items-center gap-1 cursor-pointer shadow-xs"
-                      title="طباعة فورية مباشرة بمقاس الورقة (A5 / A4 / حراري)"
-                    >
-                      <Printer className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>طباعة</span>
-                    </button>
-
-                    {canEditSales && (
+                    <div className="flex items-center gap-1">
                       <button
-                        onClick={() => {
-                          setEditingInvoice(inv);
-                          setSalesMode(inv.invoiceKind === 'wholesale' ? 'wholesale' : (inv.invoiceKind === 'sale_return' ? 'sale_return' : 'sale'));
-                          setActiveTab('editor');
-                        }}
-                        className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
-                        title="تعديل الفاتورة في المحرر"
+                        onClick={() => onPreviewInvoice(inv)}
+                        className="px-2.5 py-1 text-slate-700 hover:text-black bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer"
+                        title="معاينة تفاصيل الفاتورة"
                       >
-                        <Edit className="w-3.5 h-3.5" />
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>معاينة</span>
                       </button>
-                    )}
 
-                    {canDeleteSales && (
                       <button
-                        disabled={isSubmitting}
-                        onClick={() => handleDeleteInvoice(inv)}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors cursor-pointer disabled:opacity-50"
-                        title="حذف الفاتورة وعكس القيود"
+                        onClick={() => onPrintInvoice ? onPrintInvoice(inv) : onPreviewInvoice(inv)}
+                        className="px-2.5 py-1 text-white bg-slate-900 hover:bg-black rounded-md text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer shadow-xs"
+                        title="طباعة فورية مباشرة بمقاس الورقة (A5 / A4 / حراري)"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>طباعة</span>
                       </button>
-                    )}
+
+                      {canEditSales && (
+                        <button
+                          onClick={() => {
+                            setEditingInvoice(inv);
+                            setSalesMode(inv.invoiceKind === 'wholesale' ? 'wholesale' : (inv.invoiceKind === 'sale_return' ? 'sale_return' : 'sale'));
+                            setActiveTab('editor');
+                          }}
+                          className="p-1.5 text-slate-600 hover:text-black hover:bg-slate-100 border border-slate-200 rounded-md transition-colors cursor-pointer"
+                          title="تعديل الفاتورة في المحرر"
+                        >
+                          <Edit className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      {canDeleteSales && (
+                        <button
+                          disabled={isSubmitting}
+                          onClick={() => handleDeleteInvoice(inv)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 rounded-md transition-colors cursor-pointer disabled:opacity-50"
+                          title="حذف الفاتورة وعكس القيود"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

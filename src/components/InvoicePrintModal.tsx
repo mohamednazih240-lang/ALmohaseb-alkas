@@ -571,7 +571,27 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                         </div>
 
                         <div className="total-row" style={{ borderTop: '1px dashed #666', paddingTop: '4px', marginTop: '3px' }}>
-                          <span>طريقة الدفع: <span className="payment-status-badge">{effectiveRemaining <= 0 ? 'كاش / نقدي' : effectivePaid <= 0 ? 'آجل ذمم' : 'سداد جزئي'}</span></span>
+                          <span>
+                            طريقة الدفع:{' '}
+                            <span className="payment-status-badge">
+                              {(() => {
+                                const methodLabels: Record<string, string> = {
+                                  'نقدي': 'كاش / نقدي',
+                                  'Vodafone Cash': 'فودافون كاش (Vodafone Cash)',
+                                  'InstaPay': 'إنستاباي (InstaPay)',
+                                  'Visa / POS': 'فيزا / ماكينة (Visa/POS)',
+                                  'تحويل بنكي': 'تحويل بنكي',
+                                  'آجل': 'آجل ذمم'
+                                };
+                                if (effectivePaid <= 0) return 'آجل ذمم';
+                                const splits = (invoice.payments || []).filter(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0);
+                                const primaryLabel = splits.length > 1
+                                  ? splits.map(s => `${methodLabels[s.method] || s.method} (${formatMoneyClean(s.amount)})`).join(' + ')
+                                  : (methodLabels[splits[0]?.method || invoice.paymentMethod || 'نقدي'] || invoice.paymentMethod || 'كاش / نقدي');
+                                return effectiveRemaining > 0 ? `${primaryLabel} (سداد جزئي)` : primaryLabel;
+                              })()}
+                            </span>
+                          </span>
                           <span>المدفوع: <strong>{formatMoneyClean(effectivePaid)} {settings.currency || 'ج.م'}</strong></span>
                         </div>
 

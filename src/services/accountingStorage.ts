@@ -1393,11 +1393,11 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     const norm = normalizeArabicText(p.name);
     if (!prodByNorm.has(norm)) {
       // التأكد من أن كود الصنف فريد تماماً ولا يتكرر لصنف آخر
-      if (!p.code || p.code.trim() === '' || seenCodes.has(p.code.trim())) {
-        maxCodeNum++;
-        p.code = `P-${maxCodeNum}`;
+      const codeKey = (p.code || '').trim().toLowerCase();
+      if (!codeKey || seenCodes.has(codeKey)) {
+        p.code = generateUniqueProductCode(db);
       }
-      seenCodes.add(p.code.trim());
+      seenCodes.add(p.code.trim().toLowerCase());
       prodByNorm.set(norm, p);
       uniqueProducts.push(p);
     } else {
@@ -1523,8 +1523,9 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
 
       // ثالثاً: إدراج الصنف في الكتالوج عند الاستعادة من فواتير المشتريات المسجلة (بدون تسعير بيع تلقائي أو نسب وهمية)
       if (!prod && item.productName.trim()) {
-        const newCode = (item.productCode && item.productCode.trim() && !seenCodes.has(item.productCode.trim()))
-          ? item.productCode.trim()
+        const candCode = (item.productCode || '').trim();
+        const newCode = (candCode && !seenCodes.has(candCode.toLowerCase()))
+          ? candCode
           : generateUniqueProductCode(db);
         const unitBuy = isPurchase
           ? (Number(item.unitPrice || item.costPrice || (item as any).price) || 0)
@@ -1548,7 +1549,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
         };
         db.products.push(prod);
         prodByNorm.set(normItemName, prod);
-        seenCodes.add(newCode);
+        seenCodes.add(newCode.toLowerCase());
       }
 
       if (!prod) return;
@@ -1626,40 +1627,74 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       const isOutflow = isPurchase || isSaleReturn;
       const direction: 'in' | 'out' = isOutflow ? 'out' : 'in';
       const sourceType = isPurchase ? 'purchase' : (isSale ? 'sale' : (isSaleReturn ? 'sale_return' : 'purchase_return'));
-      const deterministicTrId = getDeterministicTreasuryId(sourceType, inv.id, 0, direction);
 
-      const existingTr = db.treasury.find(tr =>
-        tr.id === deterministicTrId ||
-        tr.sourceId === inv.id ||
-        ((tr as any).invoiceId === inv.id) ||
-        (tr.sourceType === sourceType && (tr as any).refNumber && String((tr as any).refNumber).trim() === String(inv.number).trim() && tr.direction === direction)
+      const existingSplitEntries = db.treasury.filter(tr =>
+        tr.sourceId === inv.id && tr.direction === direction
       );
+      const existingSplitSum = existingSplitEntries.reduce((s, t) => s + (Number(t.amount) || 0), 0);
+      const activeSplits = (inv.payments || []).filter(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0);
 
-      const desc = isPurchase
-        ? `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'}`
-        : `تحصيل فاتورة مبيعات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'عميل'}`;
-
-      if (!existingTr) {
-        db.treasury.unshift({
-          id: deterministicTrId,
-          date: inv.date || getTodayDate(),
-          direction,
-          amount: paidAmount,
-          method: inv.paymentMethod || 'نقدي',
-          description: desc,
-          sourceType,
-          sourceId: inv.id,
-          branchId: targetBranch,
-          branchName: branchName
+      if (activeSplits.length > 1 && Math.abs(existingSplitSum - paidAmount) <= 0.05 && existingSplitEntries.length === activeSplits.length) {
+        // Split payments already match exact paid amount & channel count; keep them intact
+      } else if (activeSplits.length > 1 && Math.abs(activeSplits.reduce((s, p) => s + Number(p.amount), 0) - paidAmount) <= 0.05) {
+        // Rebuild split treasury entries accurately per channel
+        db.treasury = db.treasury.filter(tr => !(tr.sourceId === inv.id && tr.direction === direction));
+        activeSplits.forEach((pLine, pIdx) => {
+          const splitId = getDeterministicTreasuryId(sourceType, inv.id, pIdx, direction);
+          const desc = isPurchase
+            ? `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'} عبر ${pLine.method}`
+            : `تحصيل فاتورة مبيعات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'عميل'} عبر ${pLine.method}`;
+          db.treasury.unshift({
+            id: splitId,
+            date: inv.date || getTodayDate(),
+            direction,
+            amount: Number(pLine.amount),
+            method: pLine.method,
+            description: desc,
+            sourceType,
+            sourceId: inv.id,
+            branchId: targetBranch,
+            branchName: branchName
+          });
         });
         treasuryDiscrepanciesFixed++;
       } else {
-        existingTr.id = deterministicTrId;
-        if (Math.abs(existingTr.amount - paidAmount) > 0.01) {
-          existingTr.amount = paidAmount;
-          existingTr.method = inv.paymentMethod || existingTr.method || 'نقدي';
-          existingTr.description = desc;
+        const deterministicTrId = getDeterministicTreasuryId(sourceType, inv.id, 0, direction);
+        const resolvedMethod = (activeSplits[0]?.method) || (inv.paymentMethod && inv.paymentMethod !== 'آجل' ? inv.paymentMethod : 'نقدي');
+
+        const existingTr = db.treasury.find(tr =>
+          tr.id === deterministicTrId ||
+          tr.sourceId === inv.id ||
+          ((tr as any).invoiceId === inv.id) ||
+          (tr.sourceType === sourceType && (tr as any).refNumber && String((tr as any).refNumber).trim() === String(inv.number).trim() && tr.direction === direction)
+        );
+
+        const desc = isPurchase
+          ? `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'} عبر ${resolvedMethod}`
+          : `تحصيل فاتورة مبيعات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'عميل'} عبر ${resolvedMethod}`;
+
+        if (!existingTr) {
+          db.treasury.unshift({
+            id: deterministicTrId,
+            date: inv.date || getTodayDate(),
+            direction,
+            amount: paidAmount,
+            method: resolvedMethod,
+            description: desc,
+            sourceType,
+            sourceId: inv.id,
+            branchId: targetBranch,
+            branchName: branchName
+          });
           treasuryDiscrepanciesFixed++;
+        } else {
+          existingTr.id = deterministicTrId;
+          if (Math.abs(existingTr.amount - paidAmount) > 0.01 || existingTr.method !== resolvedMethod) {
+            existingTr.amount = paidAmount;
+            existingTr.method = resolvedMethod;
+            existingTr.description = desc;
+            treasuryDiscrepanciesFixed++;
+          }
         }
       }
     }

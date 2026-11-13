@@ -71,6 +71,7 @@ import {
   getLatestVerifiedPurchaseInfo,
   buildProductFifoLedger,
   matchProductStrictly,
+  isDuplicateProduct,
   generateUniqueProductCode,
   roundMoney,
   roundQty,
@@ -129,6 +130,79 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 }) => {
   const invoiceBranchId = editingInvoice?.branchId || activeBranchId || db.currentUser?.branchId || db.branches?.[0]?.id || 'br_main';
   const invoiceBranch = (db.branches || []).find(b => b.id === invoiceBranchId) || { id: 'br_main', name: 'الفرع الرئيسي' };
+
+  // Live chronological FIFO ledger for exact original remaining stock calculation (accounting for all prior purchases & sales)
+  const liveFifoLedger = useMemo(
+    () => buildProductFifoLedger(db, invoiceBranchId, editingInvoice?.id),
+    [db, invoiceBranchId, editingInvoice?.id]
+  );
+
+  // Company-wide chronological FIFO ledger fallback for authoritative last purchase price across branches
+  const globalFifoLedger = useMemo(
+    () => buildProductFifoLedger(db, undefined, editingInvoice?.id),
+    [db, editingInvoice?.id]
+  );
+
+  const getTrueRemainingStock = (prod: Product): number => {
+    const summary = liveFifoLedger.getProductSummary(prod.id, prod.name);
+    const bp = getProductForBranch(prod, invoiceBranchId);
+    const normProd = normalizeArabicText(prod.name);
+    const hasLedgerActivity =
+      summary.purchasesCount > 0 ||
+      summary.onHandQty !== 0 ||
+      db.stockMovements.some(
+        sm =>
+          (sm.productId === prod.id || normalizeArabicText(sm.productName) === normProd) &&
+          (!invoiceBranchId || !sm.branchId || sm.branchId === invoiceBranchId || invoiceBranchId === 'br_main' || sm.branchId === 'br_mawan')
+      ) ||
+      db.invoices.some(
+        inv =>
+          inv.invoiceKind !== 'quote' &&
+          inv.id !== editingInvoice?.id &&
+          inv.items?.some(it => it.productId === prod.id || normalizeArabicText(it.productName) === normProd)
+      );
+
+    return roundQty(hasLedgerActivity ? summary.onHandQty : (Number(bp.currentQty) || 0));
+  };
+
+  // Authoritative last purchase price (latest posted purchase invoice via FIFO ledger -> branch buyPrice -> catalog buyPrice)
+  const getLastPurchaseInfo = (prod: Product): { price: number; invoiceNumber?: string; date?: string; isVerified: boolean } => {
+    const branchSummary = liveFifoLedger.getProductSummary(prod.id, prod.name);
+    if (branchSummary.hasVerifiedPurchase && branchSummary.latestBuyPrice > 0) {
+      return {
+        price: roundMoney(branchSummary.latestBuyPrice),
+        invoiceNumber: branchSummary.lastInvoiceNumber,
+        date: branchSummary.lastPurchaseDate,
+        isVerified: true
+      };
+    }
+    const globalSummary = globalFifoLedger.getProductSummary(prod.id, prod.name);
+    if (globalSummary.hasVerifiedPurchase && globalSummary.latestBuyPrice > 0) {
+      return {
+        price: roundMoney(globalSummary.latestBuyPrice),
+        invoiceNumber: globalSummary.lastInvoiceNumber,
+        date: globalSummary.lastPurchaseDate,
+        isVerified: true
+      };
+    }
+    const bp = getProductForBranch(prod, invoiceBranchId);
+    const fallbackBuy = bp.buyPrice > 0 ? bp.buyPrice : (Number(prod.buyPrice) || 0);
+    return {
+      price: roundMoney(fallbackBuy),
+      isVerified: false
+    };
+  };
+
+  const resolveAutoUnitPrice = (prod: Product): number => {
+    const bp = getProductForBranch(prod, invoiceBranchId);
+    if (mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy') {
+      return getLastPurchaseInfo(prod).price;
+    }
+    if (mode === 'wholesale' || priceType === 'wholesale') {
+      return roundMoney(bp.wholesalePrice);
+    }
+    return roundMoney(bp.sellPrice);
+  };
   // Theme configuration based on mode
   const getTheme = () => {
     switch (mode) {
@@ -319,8 +393,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const currentUserId = activeOperator?.id || db.currentUser?.id || 'usr_admin';
   const currentUserRole = activeOperator?.role || db.currentUser?.role || 'مدير';
 
-  // Settlement / Payment Type Choice (نقدي كاش vs آجل ذمم vs سداد جزئي)
+  // Settlement / Payment Type Choice (نقدي كاش vs آجل ذمم vs سداد جزئي) + Exact Treasury Channel
   const [settlementType, setSettlementType] = useState<'cash' | 'credit' | 'partial'>('cash');
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('نقدي');
   const [partialPaidInput, setPartialPaidInput] = useState<string>('');
 
   // Fast on-the-fly item creation modal states (إضافة صنف غير موجود فوراً بالمخزون والفاتورة)
@@ -347,6 +422,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Rapid Item Modal States (merged from user index.html code with bidirectional calculation & Enter navigation)
   const [showRapidItemModal, setShowRapidItemModal] = useState<boolean>(false);
+  const [showRapidDropdown, setShowRapidDropdown] = useState<boolean>(false);
   const [rapidEditingIndex, setRapidEditingIndex] = useState<number | null>(null);
   const [rapidItemName, setRapidItemName] = useState<string>('');
   const [rapidItemDesc, setRapidItemDesc] = useState<string>('');
@@ -523,6 +599,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (data.globalInvTax) setGlobalInvTax(data.globalInvTax);
     if (data.extraIncomeVal) setExtraIncomeVal(data.extraIncomeVal);
     if (data.settlementType) setSettlementType(data.settlementType);
+    if (data.selectedPaymentMethod) setSelectedPaymentMethod(data.selectedPaymentMethod);
     if (data.partialPaidInput) setPartialPaidInput(data.partialPaidInput);
     if (data.paymentRows) setPaymentRows(data.paymentRows);
     if (data.selectedParty) setSelectedParty(data.selectedParty);
@@ -557,6 +634,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         selectedParty,
         invoiceBranchId,
         settlementType,
+        selectedPaymentMethod,
         partialPaidInput,
         globalInvDisc,
         globalInvTax,
@@ -584,6 +662,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     selectedParty,
     invoiceBranchId,
     settlementType,
+    selectedPaymentMethod,
     partialPaidInput,
     globalInvDisc,
     globalInvTax,
@@ -623,10 +702,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         setPartialPaidInput('');
       }
 
+      const activeNonCreditPay = editingInvoice.payments?.find(p => p.method !== 'آجل' && p.amount > 0);
+      const initPayMethod: PaymentMethod =
+        editingInvoice.paymentMethod && editingInvoice.paymentMethod !== 'آجل'
+          ? editingInvoice.paymentMethod
+          : (activeNonCreditPay?.method || 'نقدي');
+      setSelectedPaymentMethod(initPayMethod);
+
       if (editingInvoice.payments && editingInvoice.payments.length > 0) {
         setPaymentRows([...editingInvoice.payments]);
       } else if (editingInvoice.paid > 0) {
-        setPaymentRows([{ method: editingInvoice.paymentMethod, amount: editingInvoice.paid }]);
+        setPaymentRows([{ method: initPayMethod, amount: editingInvoice.paid }]);
       } else {
         setPaymentRows([]);
       }
@@ -648,6 +734,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setGlobalInvTax('');
       setExtraIncomeVal('');
       setPaymentRows([]);
+      setSettlementType('cash');
+      setSelectedPaymentMethod('نقدي');
+      setPartialPaidInput('');
 
       // Default party: ALWAYS "نقدي" (Cash) as strictly requested
       setCustSearchInput('نقدي');
@@ -772,6 +861,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setRapidItemTax('');
     setRapidItemTaxType('fixed');
     setRapidItemTotal('');
+    setShowRapidDropdown(false);
     setShowRapidItemModal(true);
     setTimeout(() => rapidNameRef.current?.focus(), 100);
   };
@@ -789,25 +879,38 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setRapidItemTax(it.taxRate ? String(it.taxRate) : '');
     setRapidItemTaxType('fixed');
     setRapidItemTotal(it.total ? String(it.total.toFixed(2)) : '');
+    setShowRapidDropdown(false);
     setShowRapidItemModal(true);
     setTimeout(() => rapidNameRef.current?.focus(), 100);
   };
 
+  const applyRapidMatchedProduct = (matched: Product) => {
+    setRapidItemName(matched.name);
+    setShowRapidDropdown(false);
+    const pPrice = resolveAutoUnitPrice(matched);
+
+    // Pre-fill and keep fixed on the resolved price (last purchase price in purchase/buy modes) until user modifies it
+    setRapidItemPrice(pPrice > 0 ? String(pPrice) : '');
+    const qtyNum = parseNum(rapidItemQty) || 1;
+    const baseTotal = qtyNum * pPrice;
+    const rawDisc = parseNum(rapidItemDiscount);
+    const discVal = rapidItemDiscountType === 'percent' ? (baseTotal * rawDisc / 100) : rawDisc;
+    const rawTax = parseNum(rapidItemTax);
+    const taxVal = rapidItemTaxType === 'percent' ? (baseTotal * rawTax / 100) : rawTax;
+    const tot = Math.max(0, baseTotal - discVal + taxVal);
+    setRapidItemTotal(tot > 0 ? tot.toFixed(2) : '');
+  };
+
   const onRapidItemNameChange = (val: string) => {
     setRapidItemName(val);
-    const matched = db.products.find(
-      p => p.name.trim().toLowerCase() === val.trim().toLowerCase() ||
-           p.code.toLowerCase() === val.trim().toLowerCase() ||
-           (p.barcode && p.barcode === val.trim())
-    );
+    setShowRapidDropdown(true);
+    const matchRes = matchProductStrictly(db, { name: val, code: val });
+    const matched = matchRes.exactMatch;
     if (matched) {
-      const bp = getProductForBranch(matched, invoiceBranchId);
-      let pPrice = bp.sellPrice;
-      if (mode === 'purchase' || mode === 'purchase_return') pPrice = bp.buyPrice;
-      else if (mode === 'wholesale' || priceType === 'wholesale') pPrice = bp.wholesalePrice;
-      else if (priceType === 'buy') pPrice = bp.buyPrice;
+      const pPrice = resolveAutoUnitPrice(matched);
 
-      setRapidItemPrice(pPrice.toString());
+      // Fix input price on resolved last purchase price / selling price until changed by user
+      setRapidItemPrice(pPrice > 0 ? String(pPrice) : '');
       const qtyNum = parseNum(rapidItemQty) || 1;
       const baseTotal = qtyNum * pPrice;
       const rawDisc = parseNum(rapidItemDiscount);
@@ -909,6 +1012,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         total: calculatedTotal
       };
 
+      const trueRemainingNow = getTrueRemainingStock(matched);
+      const existingDraftQty = roundQty(
+        invoiceItems
+          .filter((it, i) => i !== rapidEditingIndex && (it.productId === matched!.id || normalizeArabicText(it.productName) === normalizeArabicText(matched!.name)))
+          .reduce((s, it) => s + (Number(it.qty) || 0), 0)
+      );
+      const projectedRemaining = roundQty(trueRemainingNow - existingDraftQty - qty);
+      const isNegativeSale = (mode === 'sale' || mode === 'wholesale') && projectedRemaining < 0;
+
       if (rapidEditingIndex !== null && rapidEditingIndex >= 0) {
         setInvoiceItems(prev => {
           const copy = [...prev];
@@ -934,7 +1046,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               spec: rapidItemDesc.trim() || copy[existingIdx].spec,
               total: roundMoney(Math.max(0, roundMoney(newQty * finalPrice) - (copy[existingIdx].discount || 0) + (copy[existingIdx].taxRate || 0)))
             };
-            showToast(`✓ تم زيادة كمية "${name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
+            showToast(
+              isNegativeSale
+                ? `✓ تم زيادة "${name}" إلى (${newQty}) — بيع بالسالب (${projectedRemaining}) لحين شرائه`
+                : `✓ تم زيادة كمية "${name}" إلى (${newQty}) بدلاً من تكرار الصنف`
+            );
             return copy;
           }
           return [...prev, itemObj];
@@ -948,7 +1064,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         setRapidItemTax('');
         setRapidItemTotal('');
         rapidNameRef.current?.focus();
-        showToast(`✓ تمت إضافة الصنف "${name}" للفاتورة`);
+        showToast(
+          isNegativeSale
+            ? `✓ تمت إضافة "${name}" — الرصيد المتبقي (${projectedRemaining}) بالسالب لحين شرائه`
+            : `✓ تمت إضافة الصنف "${name}" للفاتورة`
+        );
       }
     });
   };
@@ -983,7 +1103,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         const bp = getProductForBranch(prod, invoiceBranchId);
         let newPrice = bp.sellPrice;
         if (newType === 'wholesale') newPrice = bp.wholesalePrice;
-        else if (newType === 'buy') newPrice = bp.buyPrice;
+        else if (newType === 'buy') newPrice = getLastPurchaseInfo(prod).price;
         else newPrice = bp.sellPrice;
 
         return {
@@ -1014,35 +1134,29 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const extraIncome = roundMoney(Math.max(0, parseFloat(extraIncomeVal) || 0));
   const netTotal = roundMoney(Math.max(0, itemsSubTotal - globalDiscCalculated + globalTaxCalculated + extraIncome));
 
+  const activeCustomPaymentRows = paymentRows
+    .filter(r => r.method !== 'آجل' && roundMoney(Number(r.amount) || 0) > 0)
+    .map(r => ({ method: r.method, amount: roundMoney(Number(r.amount) || 0) }));
+  const hasMultiSplitPayments = settlementType !== 'credit' && activeCustomPaymentRows.length > 1;
+
   let paidTotal = 0;
-  if (settlementType === 'cash') {
-    paidTotal = netTotal;
-  } else if (settlementType === 'credit') {
+  if (settlementType === 'credit') {
     paidTotal = 0;
+  } else if (hasMultiSplitPayments) {
+    paidTotal = roundMoney(Math.min(netTotal, activeCustomPaymentRows.reduce((s, r) => s + r.amount, 0)));
+  } else if (settlementType === 'cash') {
+    paidTotal = netTotal;
   } else if (settlementType === 'partial') {
     const p = roundMoney(parseFloat(partialPaidInput) || 0);
     paidTotal = roundMoney(Math.min(netTotal, Math.max(0, p)));
-  } else {
-    if (paymentRows.length === 0) {
-      paidTotal = netTotal;
-    } else {
-      paidTotal = roundMoney(paymentRows.reduce((s, r) => s + Math.max(0, Number(r.amount) || 0), 0));
-    }
   }
   const remainTotal = roundMoney(Math.max(0, netTotal - paidTotal));
 
-  // Quick add from lookup card
+  // Quick add from lookup card (allows depleted/zero-stock sales into negative smoothly)
   const quickAddItem = (prod: Product) => {
-    const branchProd = getProductForBranch(prod, invoiceBranchId);
-    let activePrice = branchProd.sellPrice;
-    if (mode === 'purchase' || mode === 'purchase_return') activePrice = branchProd.buyPrice;
-    else if (mode === 'wholesale' || priceType === 'wholesale') activePrice = branchProd.wholesalePrice;
-    else if (priceType === 'buy') activePrice = branchProd.buyPrice;
-
-    if (mode === 'sale' && branchProd.currentQty <= 0) {
-      const confirmNeg = confirm(`⚠️ تنبيه: رصيد الصنف "${prod.name}" بفرع (${invoiceBranch.name}) هو (${branchProd.currentQty}). هل ترغب في إتمام البيع بالسالب؟`);
-      if (!confirmNeg) return;
-    }
+    const activePrice = resolveAutoUnitPrice(prod);
+    const liveStock = getTrueRemainingStock(prod);
+    const willBeNegative = (mode === 'sale' || mode === 'wholesale') && (liveStock - 1) < 0;
 
     setInvoiceItems(prev => {
       const existingIdx = prev.findIndex(it => it.productId === prod.id && (!it.spec || it.spec === ''));
@@ -1080,53 +1194,41 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
     });
 
+    if (willBeNegative) {
+      showToast(`✓ تم إدراج "${prod.name}" (بيع بالسالب لحين شرائه)`);
+    }
     setShowLookupModal(false);
   };
 
-  // Open detailed card for selected product to specify quantity & verify/modify price
+  // Open detailed card for selected product — pre-fill and fix default price (last purchase price in purchase mode) until changed
   const openItemCard = (prod: Product) => {
-    const branchProd = getProductForBranch(prod, invoiceBranchId);
-    let defPrice = branchProd.sellPrice;
-    if (mode === 'purchase' || mode === 'purchase_return') {
-      defPrice = branchProd.buyPrice;
-    } else if (mode === 'wholesale' || priceType === 'wholesale') {
-      defPrice = branchProd.wholesalePrice;
-    } else if (priceType === 'buy') {
-      defPrice = branchProd.buyPrice;
-    }
+    const defPrice = resolveAutoUnitPrice(prod);
 
     setSelectedCardProduct(prod);
-    setItemCardQty(''); // Empty string! No pre-filled numbers or zeroes!
-    setItemCardPrice(''); // Empty string! No pre-filled numbers or zeroes!
+    setItemCardQty('1');
+    setItemCardPrice(defPrice > 0 ? String(defPrice) : '');
     setItemCardDefaultPrice(defPrice);
     setItemCardSpec('');
     setShowItemCardModal(true);
   };
 
-  // Confirm adding the item from the detailed card into invoice items
+  // Confirm adding the item from the detailed card into invoice items (allows negative stock seamlessly)
   const confirmAddItemFromCard = (closeCatalog: boolean = false) => {
     if (!selectedCardProduct) return;
     const qty = parseFloat(itemCardQty);
-    let unitPrice = itemCardPrice.trim() !== '' ? parseFloat(itemCardPrice) : itemCardDefaultPrice;
+    const unitPrice = itemCardPrice.trim() !== '' ? parseFloat(itemCardPrice) : itemCardDefaultPrice;
 
     if (isNaN(qty) || qty <= 0) {
-      alert('يرجى إدخال الكمية أو العدد للصنف (الخانة خالية حالياً)');
+      alert('يرجى إدخال الكمية أو العدد للصنف');
       return;
     }
     if (isNaN(unitPrice) || unitPrice < 0) {
-      alert('يرجى إدخال سعر الصنف (الخانة خالية حالياً)');
+      alert('يرجى إدخال سعر الصنف');
       return;
     }
 
-    const branchProd = getProductForBranch(selectedCardProduct, invoiceBranchId);
-
-    // Negative stock check if sale mode
-    if ((mode === 'sale' || mode === 'wholesale') && branchProd.currentQty < qty) {
-      const confirmNeg = confirm(
-        `⚠️ تنبيه: رصيد الصنف "${selectedCardProduct.name}" بفرع (${invoiceBranch.name}) هو (${branchProd.currentQty}) والكمية المطلوبة هي (${qty}). هل ترغب في المتابعة؟`
-      );
-      if (!confirmNeg) return;
-    }
+    const liveStock = getTrueRemainingStock(selectedCardProduct);
+    const isNegativeSale = (mode === 'sale' || mode === 'wholesale') && (liveStock - qty) < 0;
 
     setInvoiceItems(prev => {
       const existingIdx = prev.findIndex(
@@ -1144,7 +1246,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           spec: itemCardSpec.trim() || copy[existingIdx].spec,
           total: (newQty * effectivePrice) - (copy[existingIdx].discount || 0)
         };
-        showToast(`✓ تم زيادة كمية "${selectedCardProduct.name}" إلى (${newQty}) بدلاً من تكرار الصنف`);
+        showToast(
+          isNegativeSale
+            ? `✓ تم زيادة "${selectedCardProduct.name}" إلى (${newQty}) [بيع بالسالب لحين الشراء]`
+            : `✓ تم زيادة كمية "${selectedCardProduct.name}" إلى (${newQty}) بدلاً من تكرار الصنف`
+        );
         return copy;
       } else {
         const fifoLedger = buildProductFifoLedger(db, invoiceBranchId, editingInvoice?.id);
@@ -1442,10 +1548,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
+      const resolvedCode = (newItemCode.trim() && !isDuplicateProduct(updated, newItemCode.trim()).isDuplicate)
+        ? newItemCode.trim()
+        : generateUniqueProductCode(updated);
+
       const newProd: Product = {
         id: generateId('prod'),
         name: cleanName,
-        code: newItemCode.trim() || `PRD-${100 + updated.products.length + 1}`,
+        code: resolvedCode,
         barcode: '',
         category: newCategory || 'عامة',
         unit: 'قطعة',
@@ -1687,10 +1797,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         }
       }
 
-      // Determine final status & payment method cleanly based on settlementType
+      // Determine final status & payment channel cleanly based on settlementType & paymentRows
       let finalPaid = roundMoney(paidTotal);
       let finalRemaining = roundMoney(remainTotal);
-      let mainPaymentMethod: PaymentMethod = 'نقدي';
+      let mainPaymentMethod: PaymentMethod = selectedPaymentMethod || 'نقدي';
       let normalizedPayments: InvoicePaymentLine[] = [];
 
       if (settlementType === 'credit') {
@@ -1698,28 +1808,23 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         finalPaid = 0;
         finalRemaining = netTotal;
         normalizedPayments = [];
+      } else if (activeCustomPaymentRows.length > 1) {
+        normalizedPayments = activeCustomPaymentRows;
+        finalPaid = roundMoney(Math.min(netTotal, activeCustomPaymentRows.reduce((s, r) => s + r.amount, 0)));
+        finalRemaining = roundMoney(Math.max(0, netTotal - finalPaid));
+        mainPaymentMethod = finalPaid > 0 ? activeCustomPaymentRows[0].method : 'آجل';
       } else if (settlementType === 'cash') {
-        mainPaymentMethod = 'نقدي';
+        const chosenMethod: PaymentMethod = selectedPaymentMethod || activeCustomPaymentRows[0]?.method || 'نقدي';
+        mainPaymentMethod = chosenMethod;
         finalPaid = netTotal;
         finalRemaining = 0;
-        normalizedPayments = netTotal > 0 ? [{ method: 'نقدي', amount: netTotal }] : [];
-      } else if (settlementType === 'partial') {
-        mainPaymentMethod = finalPaid > 0 ? 'نقدي' : 'آجل';
-        finalRemaining = roundMoney(Math.max(0, netTotal - finalPaid));
-        normalizedPayments = finalPaid > 0 ? [{ method: 'نقدي', amount: finalPaid }] : [];
+        normalizedPayments = netTotal > 0 ? [{ method: chosenMethod, amount: netTotal }] : [];
       } else {
-        const cleanRows = paymentRows
-          .filter(r => r.method !== 'آجل' && roundMoney(r.amount) > 0)
-          .map(r => ({ method: r.method, amount: roundMoney(r.amount) }));
-        if (cleanRows.length > 0) {
-          normalizedPayments = cleanRows;
-          finalPaid = roundMoney(Math.min(netTotal, cleanRows.reduce((s, r) => s + r.amount, 0)));
-          finalRemaining = roundMoney(Math.max(0, netTotal - finalPaid));
-          mainPaymentMethod = cleanRows[0].method;
-        } else {
-          mainPaymentMethod = finalPaid > 0 ? 'نقدي' : 'آجل';
-          normalizedPayments = finalPaid > 0 ? [{ method: 'نقدي', amount: finalPaid }] : [];
-        }
+        // settlementType === 'partial'
+        const chosenMethod: PaymentMethod = selectedPaymentMethod || activeCustomPaymentRows[0]?.method || 'نقدي';
+        mainPaymentMethod = finalPaid > 0 ? chosenMethod : 'آجل';
+        finalRemaining = roundMoney(Math.max(0, netTotal - finalPaid));
+        normalizedPayments = finalPaid > 0 ? [{ method: chosenMethod, amount: finalPaid }] : [];
       }
 
       let status: 'مدفوع' | 'جزئي' | 'آجل' = 'مدفوع';
@@ -1954,17 +2059,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       // Auto-register brand new items ONLY during purchase posting (never on sales/returns/quotes, and never with invented markups)
       if (!prod && mode === 'purchase' && item.productName && item.productName.trim()) {
         const rawName = item.productName.trim();
-        let maxCode = 1300;
-        updated.products.forEach(p => {
-          const m = p.code?.match(/\d+/);
-          if (m) {
-            const num = parseInt(m[0], 10);
-            if (num > maxCode) maxCode = num;
-          }
-        });
-        const newCode = (item.productCode && item.productCode.trim() && !updated.products.some(p => p.code === item.productCode.trim()))
-          ? item.productCode.trim()
-          : `P-${maxCode + 1}`;
+        const candidateCode = item.productCode?.trim() || '';
+        const newCode = (candidateCode && !updated.products.some(p => (p.code || '').trim().toLowerCase() === candidateCode.toLowerCase()))
+          ? candidateCode
+          : generateUniqueProductCode(updated);
         const unitBuy = Number(item.unitPrice) || 0;
         const newProdId = item.productId && item.productId.startsWith('prod_') ? item.productId : generateId('prod');
 
@@ -2088,7 +2186,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           buyPrice: (isPurchase && Number(item.unitPrice) > 0) ? Number(item.unitPrice) : bpCurrent.buyPrice
         });
 
-        if (isPurchase && Number(item.unitPrice) > 0 && (invoiceBranchId === 'br_main' || invoiceBranchId === 'br_mawan')) {
+        if (isPurchase && Number(item.unitPrice) > 0) {
           updatedProd.buyPrice = Number(item.unitPrice);
         }
 
@@ -2097,7 +2195,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
     });
 
-    // 2. Treasury entries for each payment belonging to this branch (in for sales, out for purchases)
+    // 2. Treasury entries for each payment belonging to this branch & chosen payment channel (in for sales, out for purchases)
+    updated.treasury = updated.treasury.filter(t => t.sourceId !== invId && (t as any).invoiceId !== invId);
     if (finalPaid > 0) {
       const isOutflow = mode === 'purchase' || mode === 'sale_return';
       const trDirection: 'in' | 'out' = isOutflow ? 'out' : 'in';
@@ -2119,14 +2218,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             direction: trDirection,
             amount: pLine.amount,
             method: pLine.method,
-            description: `${trActionDesc} (${invoiceBranch.name}) - ${partyName}`,
+            description: `${trActionDesc} (${invoiceBranch.name}) - ${partyName} عبر ${pLine.method}`,
             sourceType: mode,
             sourceId: invId,
             branchId: invoiceBranchId,
             branchName: invoiceBranch.name
           };
 
-          const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId || (t.sourceId === invId && t.direction === trDirection));
+          const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId);
           if (existingTrIdx > -1) {
             updated.treasury[existingTrIdx] = trEntry;
           } else {
@@ -2237,6 +2336,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         // Reset for next invoice
         setInvoiceItems([]);
         setPaymentRows([]);
+        setSettlementType('cash');
+        setSelectedPaymentMethod('نقدي');
+        setPartialPaidInput('');
         setJobSite('');
         setGlobalInvDisc('');
         setGlobalInvTax('');
@@ -2846,92 +2948,149 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </div>
             </div>
 
-            {/* Settlement / Payment Choice Bar (نقدي كاش vs آجل ذمم vs سداد جزئي) */}
-            <div className="col-span-3 sm:col-span-6 bg-slate-900 text-white p-2 rounded-md flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2 shadow-xs">
-              <div className="flex items-center gap-2">
-                <Wallet className="w-4 h-4 text-emerald-400 shrink-0" />
-                <div>
-                  <span className="text-[10px] font-bold block">
-                    طريقة السداد / نوع التسوية ({mode === 'purchase' ? 'مع المورد' : 'مع العميل'}):
-                  </span>
-                  <span className="text-[8.5px] text-slate-300">
-                    {settlementType === 'cash' ? '✓ نقدي - سداد كامل بالصندوق والخزينة' :
-                     settlementType === 'credit' ? '✓ آجل ذمم - قيد المبلغ على حساب الطرف (غير مسدد)' :
-                     '✓ سداد جزئي - جزء نقدي والمتبقي آجل على الحساب'}
-                  </span>
+            {/* Settlement / Payment Choice Bar (نقدي كاش vs آجل ذمم vs سداد جزئي + اختيار خزينة الدفع الفعلية) */}
+            <div className="col-span-3 sm:col-span-6 bg-slate-900 text-white p-2 rounded-md flex flex-col gap-2 shadow-xs">
+              <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Wallet className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <div>
+                    <span className="text-[10px] font-bold block">
+                      طريقة السداد / نوع التسوية ({mode === 'purchase' ? 'مع المورد' : 'مع العميل'}):
+                    </span>
+                    <span className="text-[8.5px] text-slate-300">
+                      {settlementType === 'credit'
+                        ? '✓ آجل ذمم - قيد المبلغ على حساب الطرف (غير مسدد)'
+                        : hasMultiSplitPayments
+                        ? `✓ سداد مقسم (${activeCustomPaymentRows.map(r => `${r.method}: ${r.amount}`).join(' + ')})`
+                        : settlementType === 'cash'
+                        ? `✓ مسدد بالكامل عبر: ${selectedPaymentMethod}`
+                        : `✓ سداد جزئي عبر (${selectedPaymentMethod}) والمتبقي آجل على الحساب`}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettlementType('cash');
+                      setPartialPaidInput('');
+                    }}
+                    className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                      settlementType === 'cash'
+                        ? 'bg-emerald-600 text-white shadow ring-2 ring-emerald-400 font-black'
+                        : 'bg-white/10 text-white hover:bg-white/20'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>مسدد بالكامل</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettlementType('credit');
+                      setPartialPaidInput('');
+                      setPaymentRows([]);
+                    }}
+                    className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                      settlementType === 'credit'
+                        ? 'bg-amber-600 text-white shadow ring-2 ring-amber-400 font-black'
+                        : 'bg-white/10 text-white hover:bg-white/20'
+                    }`}
+                  >
+                    <Building2 className="w-3.5 h-3.5" />
+                    <span>آجل ذمم (على الحساب)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettlementType('partial');
+                      setPartialPaidInput(partialPaidInput || String(Math.round(netTotal / 2)));
+                    }}
+                    className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                      settlementType === 'partial'
+                        ? 'bg-blue-600 text-white shadow ring-2 ring-blue-400 font-black'
+                        : 'bg-white/10 text-white hover:bg-white/20'
+                    }`}
+                  >
+                    <CreditCard className="w-3.5 h-3.5" />
+                    <span>سداد جزئي</span>
+                  </button>
+
+                  {settlementType === 'partial' && !hasMultiSplitPayments && (
+                    <div className="flex items-center gap-1 bg-white text-slate-900 px-2 py-0.5 rounded text-[10px]">
+                      <span className="font-bold text-slate-700">المسدد:</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max={netTotal}
+                        step="any"
+                        value={partialPaidInput}
+                        onChange={e => setPartialPaidInput(e.target.value)}
+                        onFocus={e => e.target.select()}
+                        placeholder="0.00"
+                        className="w-16 text-center font-mono font-bold text-xs text-blue-700 outline-none"
+                      />
+                      <span className="font-bold text-slate-500">{db.settings.currency}</span>
+                      <span className="text-[9px] text-rose-600 font-bold mr-1">
+                        (المتبقي: {(Math.max(0, netTotal - (parseFloat(partialPaidInput) || 0))).toFixed(2)})
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-1.5 justify-end">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSettlementType('cash');
-                    setPartialPaidInput('');
-                  }}
-                  className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
-                    settlementType === 'cash'
-                      ? 'bg-emerald-600 text-white shadow ring-2 ring-emerald-400 font-black'
-                      : 'bg-white/10 text-white hover:bg-white/20'
-                  }`}
-                >
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>نقدي (كاش)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSettlementType('credit');
-                    setPartialPaidInput('');
-                  }}
-                  className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
-                    settlementType === 'credit'
-                      ? 'bg-amber-600 text-white shadow ring-2 ring-amber-400 font-black'
-                      : 'bg-white/10 text-white hover:bg-white/20'
-                  }`}
-                >
-                  <Building2 className="w-3.5 h-3.5" />
-                  <span>آجل ذمم (على الحساب)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSettlementType('partial');
-                    setPartialPaidInput(partialPaidInput || String(Math.round(netTotal / 2)));
-                  }}
-                  className={`px-3 py-1 rounded text-xs font-bold transition-all flex items-center gap-1 cursor-pointer ${
-                    settlementType === 'partial'
-                      ? 'bg-blue-600 text-white shadow ring-2 ring-blue-400 font-black'
-                      : 'bg-white/10 text-white hover:bg-white/20'
-                  }`}
-                >
-                  <CreditCard className="w-3.5 h-3.5" />
-                  <span>سداد جزئي</span>
-                </button>
-
-                {settlementType === 'partial' && (
-                  <div className="flex items-center gap-1 bg-white text-slate-900 px-2 py-0.5 rounded text-[10px]">
-                    <span className="font-bold text-slate-700">المسدد نقداً:</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max={netTotal}
-                      step="any"
-                      value={partialPaidInput}
-                      onChange={e => setPartialPaidInput(e.target.value)}
-                      onFocus={e => e.target.select()}
-                      placeholder="0.00"
-                      className="w-16 text-center font-mono font-bold text-xs text-blue-700 outline-none"
-                    />
-                    <span className="font-bold text-slate-500">{db.settings.currency}</span>
-                    <span className="text-[9px] text-rose-600 font-bold mr-1">
-                      (المتبقي: {(Math.max(0, netTotal - (parseFloat(partialPaidInput) || 0))).toFixed(2)})
-                    </span>
+              {/* Payment Channel Selector (تظهر في الفاتورة وتسمع فوراً في الخزينة / المحفظة / البنك المحدد) */}
+              {settlementType !== 'credit' && (
+                <div className="pt-1.5 border-t border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+                  <span className="text-[9.5px] text-emerald-300 font-bold flex items-center gap-1 shrink-0">
+                    <CreditCard className="w-3 h-3" />
+                    <span>{mode === 'purchase' || mode === 'sale_return' ? 'خزينة / وسيلة الصرف:' : 'خزينة / وسيلة التحصيل:'}</span>
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1">
+                    {PAYMENT_METHODS.filter(m => m !== 'آجل').map(m => {
+                      const isActive = !hasMultiSplitPayments && selectedPaymentMethod === m;
+                      const label =
+                        m === 'نقدي' ? 'نقدي (الخزينة)' :
+                        m === 'Vodafone Cash' ? 'فودافون كاش' :
+                        m === 'InstaPay' ? 'إنستاباي' :
+                        m === 'Visa / POS' ? 'فيزا POS' :
+                        'تحويل بنكي';
+                      return (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => {
+                            setSelectedPaymentMethod(m);
+                            setPaymentRows(prev => (prev.length > 1 ? [] : prev.map(r => ({ ...r, method: m }))));
+                          }}
+                          className={`px-2 py-0.5 rounded text-[9.5px] font-bold transition-all cursor-pointer border ${
+                            isActive
+                              ? 'bg-emerald-500 text-slate-950 border-emerald-300 shadow-xs'
+                              : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      onClick={() => setShowOptionsModal(true)}
+                      className={`px-2 py-0.5 rounded text-[9.5px] font-bold transition-all cursor-pointer border ${
+                        hasMultiSplitPayments
+                          ? 'bg-blue-500 text-white border-blue-300 shadow-xs'
+                          : 'bg-white/10 text-blue-200 border-slate-600 hover:bg-white/20'
+                      }`}
+                      title="تقسيم المبلغ على أكثر من وسيلة دفع"
+                    >
+                      {hasMultiSplitPayments ? `مقسم (${activeCustomPaymentRows.length})` : '+ دفع مقسم'}
+                    </button>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -3077,7 +3236,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         </div>
                       )}
                       {matches.map(p => {
-                    const bp = getProductForBranch(p, invoiceBranchId);
+                    const liveQty = getTrueRemainingStock(p);
+                    const lastBuy = getLastPurchaseInfo(p);
+                    const activeRowPrice = resolveAutoUnitPrice(p);
                     return (
                       <div
                         key={p.id}
@@ -3092,16 +3253,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           <div className="font-bold text-slate-900 truncate">
                             {p.name}
                           </div>
-                          <div className="text-[8px] text-slate-500 flex items-center gap-2 mt-0.5 font-mono">
+                          <div className="text-[8px] text-slate-500 flex flex-wrap items-center gap-2 mt-0.5 font-mono">
                             <span>كود: {p.code}</span>
-                            <span className={bp.currentQty <= 0 ? 'text-rose-600 font-bold' : 'text-blue-600'}>
-                              متاح بالفرع: {bp.currentQty}
+                            <span className={liveQty <= 0 ? 'text-amber-700 font-bold' : 'text-emerald-700 font-bold'}>
+                              المتبقي بالمخزن: {liveQty} {p.unit || ''}
+                              {liveQty <= 0 && (mode === 'sale' || mode === 'wholesale') ? ' (متاح بالسالب)' : ''}
+                            </span>
+                            <span className="text-blue-700 font-bold bg-blue-50 px-1 rounded border border-blue-200">
+                              آخر شراء: {lastBuy.price.toFixed(2)}
                             </span>
                           </div>
                         </div>
                         <div className="text-left shrink-0 mr-2">
                           <span className="font-bold text-emerald-700 font-mono text-[10px]">
-                            {mode === 'purchase' ? bp.buyPrice.toFixed(2) : (mode === 'wholesale' ? bp.wholesalePrice.toFixed(2) : bp.sellPrice.toFixed(2))}
+                            {activeRowPrice.toFixed(2)}
                           </span>
                           <span className="block text-[7.5px] text-blue-600 font-bold">+ إضافة</span>
                         </div>
@@ -3268,21 +3433,42 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               type="button"
               onClick={() => {
                 if (invoiceItems.length === 0) return alert('الفاتورة فارغة');
+                const previewMethod: PaymentMethod =
+                  settlementType === 'credit'
+                    ? 'آجل'
+                    : (activeCustomPaymentRows.length > 0 ? activeCustomPaymentRows[0].method : selectedPaymentMethod);
+                const previewPayments: InvoicePaymentLine[] =
+                  settlementType === 'credit'
+                    ? []
+                    : activeCustomPaymentRows.length > 1
+                    ? activeCustomPaymentRows
+                    : (paidTotal > 0 ? [{ method: previewMethod, amount: paidTotal }] : []);
                 onPreviewInvoice({
-                  id: 'temp',
+                  id: editingInvoice?.id || 'temp',
                   number: invNum,
-                  type: mode === 'purchase' ? 'purchase' : 'sale',
+                  type: mode === 'purchase' || mode === 'purchase_return' ? 'purchase' : 'sale',
+                  invoiceKind: mode,
                   date: invDate,
-                  partyName: custSearchInput || 'عميل نقدي',
+                  time: invTime,
+                  jobSite,
+                  partyName: custSearchInput || (mode === 'purchase' ? 'مورد نقدي' : 'عميل نقدي'),
+                  partyCode: custCode,
+                  partyPhone: custPhone,
                   warehouseId: 'wh_main',
-                  paymentMethod: 'نقدي',
+                  branchId: invoiceBranchId,
+                  branchName: invoiceBranch.name,
+                  createdBy: editingInvoice?.createdBy || currentUserName,
+                  paymentMethod: previewMethod,
+                  payments: previewPayments,
                   subtotal: itemsSubTotal,
                   discount: globalDiscCalculated,
                   tax: globalTaxCalculated,
+                  extraIncomeName: extraIncome > 0 ? extraIncomeName : undefined,
+                  extraIncomeVal: extraIncome > 0 ? extraIncome : undefined,
                   total: netTotal,
                   paid: paidTotal,
                   remaining: remainTotal,
-                  status: remainTotal === 0 ? 'مدفوع' : 'آجل',
+                  status: paidTotal <= 0 ? 'آجل' : remainTotal > 0 ? 'جزئي' : 'مدفوع',
                   items: invoiceItems
                 });
               }}
@@ -3444,8 +3630,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   <label className="font-bold text-slate-700">طرق الدفع المتعددة</label>
                   <button
                     type="button"
-                    onClick={() => addPaymentRow('نقدي', Math.max(0, netTotal - paidTotal))}
-                    className="px-2 py-0.5 text-[8.5px] bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold"
+                    onClick={() => addPaymentRow(selectedPaymentMethod, Math.max(0, netTotal - paidTotal))}
+                    className="px-2 py-0.5 text-[8.5px] bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold cursor-pointer"
                   >
                     + إضافة دفع
                   </button>
@@ -3485,8 +3671,22 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
               <button
                 type="button"
-                onClick={() => setShowOptionsModal(false)}
-                className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[10px] mt-2"
+                onClick={() => {
+                  const cleanActive = paymentRows.filter(r => r.method !== 'آجل' && roundMoney(Number(r.amount) || 0) > 0);
+                  if (cleanActive.length > 0) {
+                    setSelectedPaymentMethod(cleanActive[0].method);
+                    const splitSum = roundMoney(cleanActive.reduce((s, r) => s + roundMoney(Number(r.amount) || 0), 0));
+                    if (splitSum > 0 && toCents(splitSum) < toCents(netTotal)) {
+                      setSettlementType('partial');
+                      setPartialPaidInput(String(splitSum));
+                    } else if (toCents(splitSum) >= toCents(netTotal)) {
+                      setSettlementType('cash');
+                      setPartialPaidInput('');
+                    }
+                  }
+                  setShowOptionsModal(false);
+                }}
+                className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-bold text-[10px] mt-2 cursor-pointer"
               >
                 ✓ تم وحفظ الخيارات
               </button>
@@ -3522,7 +3722,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       type="button"
                       onClick={() => {
                         setNewItemName('');
-                        setNewItemCode(`1${String(db.products.length + 1).padStart(3, '0')}`);
+                        setNewItemCode(generateUniqueProductCode(db));
                         setNewBuyPrice('');
                         setShowEditItemModal(true);
                       }}
@@ -3627,7 +3827,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                         {visible.map(rawItem => {
                           const item = getProductForBranch(rawItem, invoiceBranchId);
-                          const isLow = item.currentQty <= item.minStock;
+                          const liveQty = getTrueRemainingStock(rawItem);
+                          const lastBuy = getLastPurchaseInfo(rawItem);
+                          const isLow = liveQty <= item.minStock;
                           const inInvoiceItems = invoiceItems.filter(it => it.productId === rawItem.id);
                           const inInvoiceQty = inInvoiceItems.reduce((acc, it) => acc + it.qty, 0);
 
@@ -3655,10 +3857,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                               <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 text-[8px] text-center pt-0.5">
                                 <div className="bg-slate-50 p-0.5 rounded border border-slate-200">
-                                  <span className="block text-[6.5px] text-slate-500">متاح بالفرع</span>
-                                  <strong className={`font-mono text-[9px] ${item.currentQty <= 0 ? 'text-rose-600' : 'text-blue-600'}`}>
-                                    {item.currentQty} {item.unit || ''}
+                                  <span className="block text-[6.5px] text-slate-500">المتبقي بالمخزن</span>
+                                  <strong className={`font-mono text-[9px] ${liveQty <= 0 ? 'text-amber-700' : 'text-blue-600'}`}>
+                                    {liveQty} {item.unit || ''}
                                   </strong>
+                                  {liveQty <= 0 && (mode === 'sale' || mode === 'wholesale') && (
+                                    <span className="block text-[6px] text-amber-700 font-bold">متاح بالسالب</span>
+                                  )}
                                 </div>
                                 <div className={`p-0.5 rounded border ${mode === 'sale' && priceType === 'cash' ? 'bg-emerald-50 border-emerald-400 font-bold' : 'bg-slate-50 border-slate-200'}`}>
                                   <span className="block text-[6.5px] text-slate-500">نقدي</span>
@@ -3669,8 +3874,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                                   <strong className="font-mono text-amber-600">{item.wholesalePrice.toFixed(2)}</strong>
                                 </div>
                                 <div className={`p-0.5 rounded border ${mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy' ? 'bg-blue-50 border-blue-400 font-bold' : 'bg-slate-50 border-slate-200'}`}>
-                                  <span className="block text-[6.5px] text-slate-500">شراء</span>
-                                  <strong className="font-mono text-blue-600">{item.buyPrice.toFixed(2)}</strong>
+                                  <span className="block text-[6.5px] text-slate-500">آخر شراء</span>
+                                  <strong className="font-mono text-blue-600">{lastBuy.price.toFixed(2)}</strong>
                                 </div>
                               </div>
 
@@ -3932,11 +4137,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       {/* MODAL 5: Detailed Product Card Modal for Adding to Invoice */}
       {showItemCardModal && selectedCardProduct && (() => {
         const branchProd = getProductForBranch(selectedCardProduct, invoiceBranchId);
+        const liveCardStock = getTrueRemainingStock(selectedCardProduct);
+        const lastBuyInfo = getLastPurchaseInfo(selectedCardProduct);
         const qtyNum = parseFloat(itemCardQty) || 0;
         const priceNum = parseFloat(itemCardPrice) || 0;
         const lineTotal = Math.max(0, qtyNum * priceNum);
         const isPriceModified = Math.abs(priceNum - itemCardDefaultPrice) >= 0.01;
-        const isNegativeStock = (mode === 'sale' || mode === 'wholesale') && branchProd.currentQty < qtyNum;
+        const isNegativeStock = (mode === 'sale' || mode === 'wholesale') && liveCardStock < qtyNum;
 
         // Existing quantity in invoice
         const existingRow = invoiceItems.find(
@@ -4018,12 +4225,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     {/* Stock badge */}
                     <div className="text-left shrink-0">
                       <div className={`px-2.5 py-1 rounded-md text-[10px] font-bold border ${
-                        branchProd.currentQty <= 0 
-                          ? 'bg-rose-50 text-rose-700 border-rose-300' 
+                        liveCardStock <= 0
+                          ? 'bg-amber-50 text-amber-800 border-amber-300'
                           : 'bg-emerald-50 text-emerald-700 border-emerald-300'
                       }`}>
-                        <span className="block text-[8px] text-slate-500 font-normal">الرصيد المتاح بالفرع</span>
-                        <span className="font-mono text-xs">{branchProd.currentQty}</span> {selectedCardProduct.unit || 'قطعة'}
+                        <span className="block text-[8px] text-slate-500 font-normal">الرصيد المتبقي بالمخزن</span>
+                        <span className="font-mono text-xs">{liveCardStock}</span> {selectedCardProduct.unit || 'قطعة'}
                       </div>
                       {existingRow && (
                         <div className="mt-1 text-[8.5px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-center">
@@ -4034,9 +4241,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   </div>
 
                   {isNegativeStock && (
-                    <div className="mt-2 text-[10px] bg-rose-100 text-rose-800 p-2 rounded-md border border-rose-300 flex items-center gap-1.5 font-bold">
-                      <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600" />
-                      <span>تنبيه: الرصيد المتاح غير كافٍ للكمية المطلوبة (سيتم البيع بالسالب إذا أكدت الإضافة).</span>
+                    <div className="mt-2 text-[10px] bg-amber-50 text-amber-900 p-2 rounded-md border border-amber-300 flex items-center gap-1.5 font-bold">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 text-amber-600" />
+                      <span>رصيد الصنف نفذ ({liveCardStock}) — سيتم إضافته والبيع بالسالب عادي لحين شرائه وتسويته تلقائياً.</span>
                     </div>
                   )}
                 </div>
@@ -4044,13 +4251,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 {/* Preset System Prices quick clickable pills */}
                 <div>
                   <div className="text-[10px] font-bold text-slate-600 mb-1 flex items-center justify-between">
-                    <span>الأسعار المسجلة في النظام (اضغط لاختيار سعر فوري):</span>
-                    <span className="text-[9px] text-slate-400">السعر المحدد: {itemCardPrice || 0} {db.settings.currency}</span>
+                    <span>الأسعار المسجلة (مثبت على السعر المختار لحين تعديله):</span>
+                    <span className="text-[9px] text-slate-500 font-mono">السعر الحالي: {itemCardPrice || 0} {db.settings.currency}</span>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     <button
                       type="button"
-                      onClick={() => setItemCardPrice(branchProd.sellPrice.toString())}
+                      onClick={() => setItemCardPrice(String(branchProd.sellPrice))}
                       className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
                         Math.abs(priceNum - branchProd.sellPrice) < 0.001
                           ? 'bg-emerald-50 border-emerald-500 ring-2 ring-emerald-500/20 shadow-xs'
@@ -4065,7 +4272,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                     <button
                       type="button"
-                      onClick={() => setItemCardPrice(branchProd.wholesalePrice.toString())}
+                      onClick={() => setItemCardPrice(String(branchProd.wholesalePrice))}
                       className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
                         Math.abs(priceNum - branchProd.wholesalePrice) < 0.001
                           ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20 shadow-xs'
@@ -4080,16 +4287,21 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                     <button
                       type="button"
-                      onClick={() => setItemCardPrice(branchProd.buyPrice.toString())}
+                      onClick={() => setItemCardPrice(String(lastBuyInfo.price))}
                       className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
-                        Math.abs(priceNum - branchProd.buyPrice) < 0.001
+                        Math.abs(priceNum - lastBuyInfo.price) < 0.001
                           ? 'bg-blue-50 border-blue-500 ring-2 ring-blue-500/20 shadow-xs'
                           : 'bg-white border-slate-200 hover:bg-slate-50'
                       }`}
                     >
-                      <span className="text-[9px] text-slate-500 font-semibold">سعر الشراء (التكلفة)</span>
+                      <span className="text-[9px] text-slate-500 font-semibold flex items-center justify-between gap-1">
+                        <span>آخر سعر شراء</span>
+                        {lastBuyInfo.invoiceNumber && (
+                          <span className="text-[7.5px] font-mono text-blue-600">#{lastBuyInfo.invoiceNumber}</span>
+                        )}
+                      </span>
                       <span className="font-mono font-bold text-xs text-blue-700">
-                        {branchProd.buyPrice.toFixed(2)} <small className="text-[8px] font-normal">{db.settings.currency}</small>
+                        {lastBuyInfo.price.toFixed(2)} <small className="text-[8px] font-normal">{db.settings.currency}</small>
                       </span>
                     </button>
                   </div>
@@ -4547,30 +4759,195 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
             {/* Modal Form Content */}
             <div className="p-3.5 space-y-2.5 text-xs">
-              {/* Item Name */}
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between">
-                  <span>اسم الصنف (يبحث بدليل الأصناف أو يثبت صنفاً جديداً) *</span>
-                </label>
-                <input
-                  ref={rapidNameRef}
-                  type="text"
-                  value={rapidItemName}
-                  list="rapidProductsDatalist"
-                  placeholder="أدخل اسم الصنف..."
-                  onChange={e => onRapidItemNameChange(e.target.value)}
-                  onKeyDown={e => handleRapidKeyDown(e, rapidDescRef)}
-                  className="bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1.5 rounded-md text-xs outline-none focus:border-blue-500 font-bold"
-                  autoFocus
-                />
-                <datalist id="rapidProductsDatalist">
-                  {db.products.map(p => (
-                    <option key={p.id} value={p.name}>
-                      {p.code}
-                    </option>
-                  ))}
-                </datalist>
-              </div>
+              {/* Item Name with Live Searchable Dropdown & Original Remaining Stock Display */}
+              {(() => {
+                const trimmedQ = rapidItemName.trim();
+                const rapidMatchRes = trimmedQ ? matchProductStrictly(db, { name: trimmedQ, code: trimmedQ }) : { exactMatch: undefined };
+                const rapidMatchedProduct = rapidMatchRes.exactMatch;
+                const liveOriginalRemaining = rapidMatchedProduct ? getTrueRemainingStock(rapidMatchedProduct) : null;
+                const alreadyInDraftQty = rapidMatchedProduct
+                  ? roundQty(
+                      invoiceItems
+                        .filter((it, i) => i !== rapidEditingIndex && (it.productId === rapidMatchedProduct.id || normalizeArabicText(it.productName) === normalizeArabicText(rapidMatchedProduct.name)))
+                        .reduce((s, it) => s + (Number(it.qty) || 0), 0)
+                    )
+                  : 0;
+                const liveNetAfterDraft = liveOriginalRemaining !== null
+                  ? roundQty(
+                      liveOriginalRemaining +
+                      (mode === 'purchase' || mode === 'sale_return' ? alreadyInDraftQty : (mode === 'sale' || mode === 'wholesale' || mode === 'purchase_return' ? -alreadyInDraftQty : 0))
+                    )
+                  : null;
+                const rapidSearchLower = trimmedQ.toLowerCase();
+                const rapidCandidates = db.products
+                  .filter(p =>
+                    !rapidSearchLower ||
+                    p.name.toLowerCase().includes(rapidSearchLower) ||
+                    p.code.toLowerCase().includes(rapidSearchLower) ||
+                    (p.barcode && p.barcode.toLowerCase().includes(rapidSearchLower))
+                  )
+                  .slice(0, 25);
+
+                return (
+                  <div className="flex flex-col gap-1.5 relative">
+                    <label className="text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between">
+                      <span>اسم الصنف (يبحث بدليل الأصناف أو يثبت صنفاً جديداً) *</span>
+                    </label>
+                    <div className="relative flex items-center">
+                      <input
+                        ref={rapidNameRef}
+                        type="text"
+                        value={rapidItemName}
+                        placeholder="ابحث باسم الصنف أو الكود..."
+                        onFocus={() => setShowRapidDropdown(true)}
+                        onBlur={() => setTimeout(() => setShowRapidDropdown(false), 120)}
+                        onChange={e => onRapidItemNameChange(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter' && showRapidDropdown && !rapidMatchedProduct && rapidCandidates.length > 0) {
+                            e.preventDefault();
+                            applyRapidMatchedProduct(rapidCandidates[0]);
+                            rapidDescRef.current?.focus();
+                            return;
+                          }
+                          if (e.key === 'Enter') setShowRapidDropdown(false);
+                          handleRapidKeyDown(e, rapidDescRef);
+                        }}
+                        className="w-full bg-[#1a263d] border border-[#273754] text-white pl-8 pr-2.5 py-1.5 rounded-md text-xs outline-none focus:border-blue-500 font-bold"
+                        autoFocus
+                      />
+                      {rapidItemName ? (
+                        <button
+                          type="button"
+                          onMouseDown={e => {
+                            e.preventDefault();
+                            setRapidItemName('');
+                            setRapidItemPrice('');
+                            setRapidItemTotal('');
+                            setShowRapidDropdown(true);
+                            rapidNameRef.current?.focus();
+                          }}
+                          className="absolute left-2 text-[#94a3b8] hover:text-white p-0.5 cursor-pointer"
+                          title="مسح والبحث عن صنف آخر"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      ) : (
+                        <Search className="w-3.5 h-3.5 text-[#94a3b8] absolute left-2 pointer-events-none" />
+                      )}
+                    </div>
+
+                    {/* Searchable Candidates Dropdown with Live Remaining Stock & Last Purchase Price */}
+                    {showRapidDropdown && (
+                      <div className="absolute top-[56px] right-0 left-0 z-50 bg-[#0f172a] border border-blue-500/70 rounded-lg shadow-2xl max-h-52 overflow-y-auto divide-y divide-[#1e293b]">
+                        {rapidCandidates.length === 0 ? (
+                          <div className="p-2.5 text-center text-[10px] text-slate-400">
+                            لا يوجد صنف مسجل بهذا الاسم — سيتم {mode === 'purchase' ? 'تسجيله بكود فريد تلقائياً' : 'التحقق قبل الإدراج'}
+                          </div>
+                        ) : (
+                          rapidCandidates.map(cand => {
+                            const candStock = getTrueRemainingStock(cand);
+                            const lastBuy = getLastPurchaseInfo(cand);
+                            const candPrice = resolveAutoUnitPrice(cand);
+                            const activePriceLabel = (mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy')
+                              ? 'سعر الشراء'
+                              : ((mode === 'wholesale' || priceType === 'wholesale') ? 'سعر الجملة' : 'سعر البيع');
+                            return (
+                              <button
+                                key={cand.id}
+                                type="button"
+                                onMouseDown={e => {
+                                  e.preventDefault();
+                                  applyRapidMatchedProduct(cand);
+                                }}
+                                className="w-full text-right px-2.5 py-2 hover:bg-blue-900/40 flex items-center justify-between gap-2 transition-colors cursor-pointer"
+                              >
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-[11px] font-bold text-white truncate">{cand.name}</div>
+                                  <div className="text-[9px] text-slate-400 font-mono flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
+                                    <span>كود: {cand.code}</span>
+                                    <span className={candStock <= 0 ? 'text-amber-300 font-bold' : 'text-emerald-400 font-bold'}>
+                                      المتبقي: {candStock} {cand.unit || 'قطعة'}
+                                      {candStock <= 0 && (mode === 'sale' || mode === 'wholesale') ? ' (بيع بالسالب)' : ''}
+                                    </span>
+                                    <span className="text-sky-300 font-bold bg-sky-950/70 px-1.5 py-0.2 rounded border border-sky-700/50">
+                                      آخر شراء: {lastBuy.price.toFixed(2)} {db.settings.currency}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="text-left shrink-0 font-mono">
+                                  <span className="text-[11px] font-bold text-emerald-400 block">
+                                    {candPrice.toFixed(2)} {db.settings.currency}
+                                  </span>
+                                  <span className="text-[8px] text-slate-400 block">{activePriceLabel}</span>
+                                </div>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+
+                    {/* Live Original Remaining Stock & Last Purchase Price Banner for Selected Product */}
+                    {rapidMatchedProduct && liveOriginalRemaining !== null && (() => {
+                      const matchedLastBuy = getLastPurchaseInfo(rapidMatchedProduct);
+                      const isBuyLockedMode = mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy';
+                      return (
+                        <div className={`rounded-lg px-2.5 py-2 border flex flex-wrap items-center justify-between gap-2 text-[10px] ${
+                          liveOriginalRemaining <= 0
+                            ? 'bg-amber-950/40 border-amber-500/60 text-amber-100'
+                            : 'bg-emerald-950/40 border-emerald-500/50 text-emerald-100'
+                        }`}>
+                          <div className="flex flex-col gap-1 flex-1 min-w-0">
+                            <span className="text-[9px] text-slate-300 font-semibold">
+                              المخزون الأصلي المتبقي بالمخزن وآخر سعر شراء:
+                            </span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className={`font-mono text-[11px] font-black px-2 py-0.5 rounded ${
+                                liveOriginalRemaining <= 0 ? 'bg-amber-600/90 text-white' : 'bg-emerald-600/80 text-white'
+                              }`}>
+                                المتبقي: {liveOriginalRemaining} {rapidMatchedProduct.unit || 'قطعة'}
+                              </span>
+                              {liveOriginalRemaining <= 0 && (mode === 'sale' || mode === 'wholesale') && (
+                                <span className="text-[9px] font-bold text-amber-200 bg-amber-900/60 px-1.5 py-0.5 rounded border border-amber-500/40">
+                                  نفذ — يُسمح بالبيع بالسالب لحين الشراء
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (matchedLastBuy.price > 0) {
+                                    setRapidItemPrice(String(matchedLastBuy.price));
+                                    calculateRapidItemTotal('forward', { overridePrice: String(matchedLastBuy.price) });
+                                  }
+                                }}
+                                title="اضغط لتثبيت السعر على آخر سعر شراء"
+                                className="font-mono text-[10px] font-bold text-sky-200 bg-sky-900/70 hover:bg-sky-800/80 px-2 py-0.5 rounded border border-sky-500/50 cursor-pointer flex items-center gap-1"
+                              >
+                                <span>آخر شراء: {matchedLastBuy.price.toFixed(2)} {db.settings.currency}</span>
+                                {matchedLastBuy.invoiceNumber && (
+                                  <span className="text-[8.5px] text-sky-300/90">(ف#{matchedLastBuy.invoiceNumber})</span>
+                                )}
+                                {isBuyLockedMode && (
+                                  <span className="text-[8px] text-emerald-300 font-sans">• مثبت لحين تعديله</span>
+                                )}
+                              </button>
+                              <span className="font-mono text-[9.5px] text-blue-300 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-700/50">
+                                كود: {rapidMatchedProduct.code}
+                              </span>
+                            </div>
+                          </div>
+                          {alreadyInDraftQty > 0 && liveNetAfterDraft !== null && (
+                            <div className="text-left font-mono text-[9.5px] bg-black/30 px-2 py-1 rounded border border-white/10 shrink-0">
+                              <span className="block text-slate-300">مدرج بالفاتورة: {alreadyInDraftQty}</span>
+                              <span className="font-bold text-amber-300">المتبقي الصافي: {liveNetAfterDraft}</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                );
+              })()}
 
               {/* Item Description / Spec */}
               <div className="flex flex-col gap-1">
@@ -4611,8 +4988,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <label className="text-[10px] text-[#94a3b8] font-semibold">
-                    السعر (للقطعة) *
+                  <label className="text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between gap-1">
+                    <span>السعر (للقطعة) *</span>
+                    {(mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy') && (
+                      <span className="text-[8.5px] text-sky-400 font-bold">آخر سعر شراء (مثبت)</span>
+                    )}
                   </label>
                   <input
                     ref={rapidPriceRef}
