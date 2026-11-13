@@ -87,11 +87,13 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
   };
 
-  // Eligible unpaid / partially paid invoices for linking installments
-  const expectedInvoiceType = isReceipt ? 'sale' : 'purchase';
+  // Eligible unpaid / partially paid invoices for linking installments (aligned with voucher cash direction)
   const linkableInvoices = (db.invoices || []).filter(inv => {
-    if (inv.type !== expectedInvoiceType) return false;
-    if (inv.invoiceKind === 'quote') return false;
+    if (inv.invoiceKind === 'quote' || (inv.invoiceKind as string) === 'order') return false;
+    const isInvReceipt =
+      inv.invoiceKind === 'purchase_return' ||
+      (inv.invoiceKind !== 'sale_return' && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale'));
+    if (isInvReceipt !== isReceipt) return false;
     if (partyId && inv.partyId !== partyId) return false;
     const isCurrentlyLinked = editingVoucher?.invoiceId === inv.id;
     return isCurrentlyLinked || (Number(inv.remaining) || 0) > 0.009;

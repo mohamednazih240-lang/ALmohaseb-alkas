@@ -314,7 +314,14 @@ export default function App() {
               return !cloudInv || (inv.items?.length || 0) > (cloudInv.items?.length || 0);
             });
             const needsCloudLogoRepair = Boolean(safeSettings.logo && !ensuredCloud.settings?.logo);
-            if (hasRicherLocal || needsCloudLogoRepair || verifiedStartup.report.correctedProductsCount > 0 || verifiedStartup.report.missingMovementsAdded > 0) {
+            if (
+              hasRicherLocal ||
+              needsCloudLogoRepair ||
+              verifiedStartup.report.correctedProductsCount > 0 ||
+              verifiedStartup.report.missingMovementsAdded > 0 ||
+              verifiedStartup.report.treasuryDiscrepanciesFixed > 0 ||
+              (verifiedStartup.report.vouchersReconciledCount || 0) > 0
+            ) {
               pushDatabaseToCloud(merged, true);
             }
 

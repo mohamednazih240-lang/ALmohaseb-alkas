@@ -7,7 +7,8 @@ import {
   StockMovement,
   Product,
   SimpleRecord,
-  ReturnInvoice
+  ReturnInvoice,
+  PaymentMethod
 } from '../types/accounting';
 import {
   formatMoney,
@@ -29,6 +30,7 @@ import {
   buildProductFifoLedger,
   matchProductStrictly,
   generateUniqueProductCode,
+  getTodayDate,
   RAHMA_INVOICE_17_ITEMS
 } from './accountingStorage';
 
@@ -280,10 +282,10 @@ export function postInvoiceTransaction(
 
   const invoiceId = workingInvoice.id;
   const invoiceNumber = workingInvoice.number;
-  const isPurchase = workingInvoice.type === 'purchase' || workingInvoice.invoiceKind === 'purchase';
-  const isSale = workingInvoice.type === 'sale' || workingInvoice.invoiceKind === 'sale' || workingInvoice.invoiceKind === 'wholesale';
-  const isSaleReturn = workingInvoice.invoiceKind === 'sale_return';
-  const isPurchaseReturn = workingInvoice.invoiceKind === 'purchase_return';
+  const isSaleReturn = workingInvoice.invoiceKind === 'sale_return' || (workingInvoice.type as string) === 'sale_return';
+  const isPurchaseReturn = workingInvoice.invoiceKind === 'purchase_return' || (workingInvoice.type as string) === 'purchase_return';
+  const isPurchase = !isSaleReturn && !isPurchaseReturn && (workingInvoice.type === 'purchase' || workingInvoice.invoiceKind === 'purchase');
+  const isSale = !isSaleReturn && !isPurchaseReturn && (workingInvoice.type === 'sale' || workingInvoice.invoiceKind === 'sale' || workingInvoice.invoiceKind === 'wholesale');
   const branchId = workingInvoice.branchId || 'br_mawan';
   const warehouseId = workingInvoice.warehouseId || updated.warehouses[0]?.id || 'wh_mawan';
 
@@ -296,7 +298,11 @@ export function postInvoiceTransaction(
         : 'sale';
   const expectedTrPrefix = isPurchase
     ? `فاتورة مشتريات رقم ${invoiceNumber}`
-    : `فاتورة مبيعات رقم ${invoiceNumber}`;
+    : isSaleReturn
+      ? `مرتجع مبيعات رقم ${invoiceNumber}`
+      : isPurchaseReturn
+        ? `مرتجع مشتريات رقم ${invoiceNumber}`
+        : `فاتورة مبيعات رقم ${invoiceNumber}`;
 
   // Guarantee strictly monotonic createdAt on same-date operations so FIFO preserves exact event order
   if (!workingInvoice.createdAt) {
@@ -502,7 +508,11 @@ export function postInvoiceTransaction(
 
         const trDescription = isPurchase
           ? `سداد فاتورة مشتريات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`
-          : `تحصيل فاتورة مبيعات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`;
+          : isSaleReturn
+            ? `صرف استرداد مرتجع مبيعات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`
+            : isPurchaseReturn
+              ? `استرداد مرتجع مشتريات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`
+              : `تحصيل فاتورة مبيعات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`;
 
         const trEntry: TreasuryEntry = {
           id: deterministicTrId,
@@ -543,9 +553,13 @@ export function postInvoiceTransaction(
         )
       );
 
-      const voucherDesc = voucherType === 'receipt'
+      const voucherDesc = isSale
         ? `سند قبض مقابل فاتورة مبيعات رقم ${invoiceNumber} (${workingInvoice.partyName})`
-        : `سند صرف مقابل فاتورة مشتريات رقم ${invoiceNumber} (${workingInvoice.partyName})`;
+        : isPurchaseReturn
+          ? `سند قبض استرداد مرتجع مشتريات رقم ${invoiceNumber} (${workingInvoice.partyName})`
+          : isSaleReturn
+            ? `سند صرف استرداد مرتجع مبيعات رقم ${invoiceNumber} (${workingInvoice.partyName})`
+            : `سند صرف مقابل فاتورة مشتريات رقم ${invoiceNumber} (${workingInvoice.partyName})`;
 
       if (linkedVoucher) {
         linkedVoucher.id = deterministicVoucherId;
@@ -1063,155 +1077,542 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   duplicateVouchersRemoved: number;
   duplicateTreasuryRemoved: number;
   fixedInvoicesCount: number;
+  fixedDiscrepanciesCount: number;
+  vouchersReconciledCount: number;
 } {
-  if (!db) return { db, duplicateVouchersRemoved: 0, duplicateTreasuryRemoved: 0, fixedInvoicesCount: 0 };
+  if (!db) {
+    return {
+      db,
+      duplicateVouchersRemoved: 0,
+      duplicateTreasuryRemoved: 0,
+      fixedInvoicesCount: 0,
+      fixedDiscrepanciesCount: 0,
+      vouchersReconciledCount: 0
+    };
+  }
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
   if (!updated.invoices) updated.invoices = [];
   if (!updated.vouchers) updated.vouchers = [];
   if (!updated.treasury) updated.treasury = [];
+  if (!updated.expenses) updated.expenses = [];
+  if (!updated.revenues) updated.revenues = [];
   if (!updated.products) updated.products = [];
   if (!updated.stockMovements) updated.stockMovements = [];
+  if (!updated.customers) updated.customers = [];
+  if (!updated.suppliers) updated.suppliers = [];
 
   let duplicateVouchersRemoved = 0;
   let duplicateTreasuryRemoved = 0;
   let fixedInvoicesCount = 0;
+  let fixedDiscrepanciesCount = 0;
+  let vouchersReconciledCount = 0;
 
-  // 1. Audit each invoice
+  const defaultBranchId = updated.branches?.[0]?.id || 'br_mawan';
+  const defaultBranchName = updated.branches?.[0]?.name || 'الفرع الرئيسي - شركة الموان';
+
+  const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matchesInvNumberText = (text: string | undefined, invNum: string): boolean => {
+    if (!text || !invNum) return false;
+    const cleanNum = String(invNum).trim();
+    if (!cleanNum) return false;
+    const re = new RegExp(`(?:رقم|#)\\s*${escapeRegex(cleanNum)}(?![0-9A-Za-z])`);
+    return re.test(text);
+  };
+
+  const isAutoV = (v: Voucher): boolean => !v.isManualInstallment && (Boolean(v.isAutoFromInvoice) || v.id.startsWith('vch_'));
+
+  // 1. Audit & reconcile every posted invoice against its Vouchers (receipt/payment) and Treasury entries (in/out)
   updated.invoices.forEach(inv => {
-    const paid = Number(inv.paid) || 0;
-    const isPurchase = inv.type === 'purchase' || inv.invoiceKind === 'purchase';
-    const isSale = inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale';
-    const expectedVoucherType: 'receipt' | 'payment' = (isSale || inv.invoiceKind === 'purchase_return') ? 'receipt' : 'payment';
-    const expectedTrDirection: 'in' | 'out' = (isPurchase || inv.invoiceKind === 'sale_return') ? 'out' : 'in';
+    if (!inv) return;
+    const kind = (inv.invoiceKind || inv.type) as string;
+    const rawType = inv.type as string;
+    if (kind === 'quote' || kind === 'order' || rawType === 'quote' || rawType === 'order') return;
 
-    // 1.1 Find all AUTO vouchers linked to this invoice (NEVER delete manual installment vouchers!)
-    const isAutoV = (v: Voucher) => !v.isManualInstallment && (v.isAutoFromInvoice || v.id.startsWith('vch_'));
+    const isSaleReturn = kind === 'sale_return';
+    const isPurchaseReturn = kind === 'purchase_return';
+    const isPurchase = !isSaleReturn && !isPurchaseReturn && (inv.type === 'purchase' || kind === 'purchase');
+    const isSale = !isSaleReturn && !isPurchaseReturn && (inv.type === 'sale' || kind === 'sale' || kind === 'wholesale');
+    if (!isPurchase && !isSale && !isSaleReturn && !isPurchaseReturn) return;
+
+    // Receipt ('receipt' / 'in') for Sales, Wholesale, and Purchase Returns
+    // Payment ('payment' / 'out') for Purchases and Sale Returns
+    const expectedVoucherType: 'receipt' | 'payment' = (isSale || isPurchaseReturn) ? 'receipt' : 'payment';
+    const expectedTrDirection: 'in' | 'out' = (isPurchase || isSaleReturn) ? 'out' : 'in';
+    const expectedSourceType = isSaleReturn
+      ? 'sale_return'
+      : isPurchaseReturn
+        ? 'purchase_return'
+        : isPurchase
+          ? 'purchase'
+          : (inv.invoiceKind === 'wholesale' ? 'wholesale' : 'sale');
+
+    const branchId = inv.branchId || defaultBranchId;
+    const branchName = inv.branchName || updated.branches?.find(b => b.id === branchId)?.name || defaultBranchName;
+    const invDate = inv.date || getTodayDate();
+    const partyDefaultName = (expectedVoucherType === 'receipt')
+      ? (isPurchaseReturn ? 'مورد عام' : 'عميل نقدي')
+      : (isSaleReturn ? 'عميل نقدي' : 'مورد عام');
+    const partyName = inv.partyName || partyDefaultName;
+
+    const nonCreditSplits = (inv.payments || []).filter(p => p && p.method && p.method !== 'آجل' && Number(p.amount) > 0);
+    const resolvedMethod: PaymentMethod = (nonCreditSplits[0]?.method as PaymentMethod)
+      || (inv.paymentMethod && inv.paymentMethod !== 'آجل' ? inv.paymentMethod : 'نقدي');
+
+    const rawPaid = Number(inv.paid) || 0;
+    const total = Number(inv.total) || 0;
+    const effectivePaid = rawPaid > 0
+      ? Math.min(total > 0 ? total : rawPaid, rawPaid)
+      : (inv.status === 'مدفوع' && inv.paymentMethod && inv.paymentMethod !== 'آجل' && total > 0 ? total : 0);
+
+    // Ensure manual installment vouchers linked to this invoice have the right type & invoice binding
+    const manualInstallments = updated.vouchers.filter(v =>
+      !isAutoV(v) && (
+        v.invoiceId === inv.id ||
+        ((v as any).referenceNumber && String((v as any).referenceNumber).trim() === String(inv.number).trim() && v.type === expectedVoucherType)
+      )
+    );
+    manualInstallments.forEach(mv => {
+      if (mv.invoiceId === inv.id && mv.type !== expectedVoucherType) {
+        mv.type = expectedVoucherType;
+        vouchersReconciledCount++;
+        fixedDiscrepanciesCount++;
+      }
+      if (!mv.invoiceId) mv.invoiceId = inv.id;
+      if (!mv.referenceNumber) mv.referenceNumber = inv.number;
+      if (!mv.branchId) {
+        mv.branchId = branchId;
+        mv.branchName = branchName;
+      }
+    });
+
+    const manualInstallmentsPaid = manualInstallments.reduce((s, v) => s + (Number(v.amount) || 0), 0);
+    const autoExpectedPaid = roundMoney(Math.max(0, effectivePaid - manualInstallmentsPaid));
+
+    // 1.1 Find ALL auto vouchers linked to this invoice (even if previously misclassified with wrong v.type!)
+    const matchesInvoiceDescForVoucher = (v: Voucher): boolean => {
+      if (!v.description || !inv.number) return false;
+      if (!matchesInvNumberText(v.description, inv.number)) return false;
+      if (isSale && (v.description.includes('مبيعات') || v.description.includes('بيع'))) return !v.description.includes('مرتجع');
+      if (isPurchase && (v.description.includes('مشتريات') || v.description.includes('شراء'))) return !v.description.includes('مرتجع');
+      if (isSaleReturn && v.description.includes('مرتجع') && v.description.includes('مبيع')) return true;
+      if (isPurchaseReturn && v.description.includes('مرتجع') && v.description.includes('مشتر')) return true;
+      return false;
+    };
+
     const autoLinkedVouchers = updated.vouchers.filter(v =>
       isAutoV(v) && (
         v.invoiceId === inv.id ||
         (v as any).sourceId === inv.id ||
-        ((v as any).referenceNumber === inv.number && v.type === expectedVoucherType) ||
-        (v.description && v.description.includes(`رقم ${inv.number}`) && v.type === expectedVoucherType)
+        ((v as any).referenceNumber && String((v as any).referenceNumber).trim() === String(inv.number).trim() && (v.type === expectedVoucherType || matchesInvoiceDescForVoucher(v))) ||
+        matchesInvoiceDescForVoucher(v)
       )
     );
-    const manualInstallmentsPaid = updated.vouchers
-      .filter(v => v.invoiceId === inv.id && !isAutoV(v))
-      .reduce((s, v) => s + (Number(v.amount) || 0), 0);
-    const autoExpectedPaid = Math.max(0, Number((paid - manualInstallmentsPaid).toFixed(2)));
+
+    const expectedVoucherDesc = isSale
+      ? `سند قبض مقابل فاتورة مبيعات رقم ${inv.number} (${partyName}) عبر ${resolvedMethod}`
+      : isPurchaseReturn
+        ? `سند قبض استرداد مرتجع مشتريات رقم ${inv.number} (${partyName}) عبر ${resolvedMethod}`
+        : isSaleReturn
+          ? `سند صرف استرداد مرتجع مبيعات رقم ${inv.number} (${partyName}) عبر ${resolvedMethod}`
+          : `سند صرف مقابل فاتورة مشتريات رقم ${inv.number} (${partyName}) عبر ${resolvedMethod}`;
+
+    const detVoucherId = getDeterministicVoucherId(inv.id, 0, expectedVoucherType);
 
     if (autoExpectedPaid <= 0) {
       if (autoLinkedVouchers.length > 0) {
         duplicateVouchersRemoved += autoLinkedVouchers.length;
+        vouchersReconciledCount += autoLinkedVouchers.length;
         const removeIds = new Set(autoLinkedVouchers.map(v => v.id));
         updated.vouchers = updated.vouchers.filter(v => !removeIds.has(v.id));
       }
     } else {
-      if (autoLinkedVouchers.length > 1) {
-        const primary = autoLinkedVouchers[0];
-        primary.amount = autoExpectedPaid;
-        primary.id = getDeterministicVoucherId(inv.id, 0, expectedVoucherType);
-        primary.invoiceId = inv.id;
-        primary.referenceNumber = inv.number;
-        primary.isAutoFromInvoice = true;
+      if (autoLinkedVouchers.length === 0) {
+        const { number: vNum, nextSeq } = getNextUniqueVoucherNumber(updated, expectedVoucherType);
+        const settingKey = expectedVoucherType === 'receipt' ? 'nextReceipt' : 'nextPayment';
+        updated.settings[settingKey] = Math.max(updated.settings[settingKey] || 1, nextSeq + 1);
 
-        const duplicates = autoLinkedVouchers.slice(1);
-        const dupIds = new Set(duplicates.map(d => d.id));
-        updated.vouchers = updated.vouchers.filter(v => !dupIds.has(v.id));
-        duplicateVouchersRemoved += duplicates.length;
+        updated.vouchers.unshift({
+          id: detVoucherId,
+          number: vNum,
+          type: expectedVoucherType,
+          date: invDate,
+          partyId: inv.partyId,
+          partyName,
+          amount: autoExpectedPaid,
+          paymentMethod: resolvedMethod,
+          description: expectedVoucherDesc,
+          referenceNumber: inv.number,
+          invoiceId: inv.id,
+          isAutoFromInvoice: true,
+          branchId,
+          branchName,
+          journalEntryId: inv.journalEntryId,
+          createdAt: inv.createdAt || new Date().toISOString(),
+          createdBy: inv.createdBy || updated.currentUser?.name || 'مدير النظام'
+        });
+        vouchersReconciledCount++;
         fixedInvoicesCount++;
-      } else if (autoLinkedVouchers.length === 1) {
-        const v = autoLinkedVouchers[0];
-        v.id = getDeterministicVoucherId(inv.id, 0, expectedVoucherType);
-        v.invoiceId = inv.id;
-        v.referenceNumber = inv.number;
-        v.isAutoFromInvoice = true;
-        v.amount = autoExpectedPaid;
+      } else {
+        const primary = autoLinkedVouchers[0];
+        const needsUpdate =
+          primary.id !== detVoucherId ||
+          primary.type !== expectedVoucherType ||
+          Math.abs((Number(primary.amount) || 0) - autoExpectedPaid) > 0.01 ||
+          primary.invoiceId !== inv.id ||
+          primary.referenceNumber !== inv.number ||
+          primary.paymentMethod !== resolvedMethod ||
+          primary.date !== invDate ||
+          primary.partyName !== partyName ||
+          !primary.isAutoFromInvoice;
+
+        if (needsUpdate) {
+          primary.id = detVoucherId;
+          primary.type = expectedVoucherType;
+          primary.amount = autoExpectedPaid;
+          primary.date = invDate;
+          primary.partyId = inv.partyId;
+          primary.partyName = partyName;
+          primary.paymentMethod = resolvedMethod;
+          primary.description = expectedVoucherDesc;
+          primary.invoiceId = inv.id;
+          primary.referenceNumber = inv.number;
+          primary.isAutoFromInvoice = true;
+          primary.branchId = branchId;
+          primary.branchName = branchName;
+          vouchersReconciledCount++;
+          fixedDiscrepanciesCount++;
+        }
+
+        if (autoLinkedVouchers.length > 1) {
+          const dupIds = new Set(autoLinkedVouchers.slice(1).map(d => d.id));
+          updated.vouchers = updated.vouchers.filter(v => !dupIds.has(v.id));
+          duplicateVouchersRemoved += dupIds.size;
+          vouchersReconciledCount += dupIds.size;
+          fixedInvoicesCount++;
+        }
       }
     }
 
-    // 1.2 Find all treasury entries linked to this invoice
+    // 1.2 Find ALL treasury entries linked to this invoice (by sourceId, deterministic ID, or exact description match)
+    const matchesTreasuryDescForInv = (tr: TreasuryEntry): boolean => {
+      if (!tr.description || !inv.number) return false;
+      if (!matchesInvNumberText(tr.description, inv.number)) return false;
+      if (isSale && (tr.description.includes('فاتورة مبيعات') || tr.description.includes('تحصيل فاتورة مبيعات'))) return !tr.description.includes('مرتجع');
+      if (isPurchase && (tr.description.includes('فاتورة مشتريات') || tr.description.includes('سداد فاتورة مشتريات'))) return !tr.description.includes('مرتجع');
+      if (isSaleReturn && tr.description.includes('مرتجع مبيعات')) return true;
+      if (isPurchaseReturn && tr.description.includes('مرتجع مشتريات')) return true;
+      return false;
+    };
+
     const linkedTreasury = updated.treasury.filter(tr =>
       tr.sourceId === inv.id ||
       (tr as any).invoiceId === inv.id ||
       tr.id.startsWith(`tr_purchase_${inv.id}`) ||
       tr.id.startsWith(`tr_sale_${inv.id}`) ||
-      (inv.number && tr.description && (
-        tr.description.includes(`سداد فاتورة مشتريات رقم ${inv.number}`) ||
-        tr.description.includes(`تحصيل فاتورة مبيعات رقم ${inv.number}`) ||
-        tr.description.includes(`فاتورة مشتريات رقم ${inv.number}`) ||
-        tr.description.includes(`فاتورة مبيعات رقم ${inv.number}`)
-      ))
+      tr.id.startsWith(`tr_wholesale_${inv.id}`) ||
+      tr.id.startsWith(`tr_sale_return_${inv.id}`) ||
+      tr.id.startsWith(`tr_purchase_return_${inv.id}`) ||
+      matchesTreasuryDescForInv(tr)
     );
+
+    const buildExpectedTrDesc = (methodLabel: PaymentMethod): string => {
+      if (isPurchase) return `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${partyName} عبر ${methodLabel}`;
+      if (isSaleReturn) return `صرف استرداد مرتجع مبيعات رقم ${inv.number} (${branchName}) - ${partyName} عبر ${methodLabel}`;
+      if (isPurchaseReturn) return `استرداد مرتجع مشتريات رقم ${inv.number} (${branchName}) - ${partyName} عبر ${methodLabel}`;
+      return `تحصيل فاتورة مبيعات رقم ${inv.number} (${branchName}) - ${partyName} عبر ${methodLabel}`;
+    };
 
     if (autoExpectedPaid <= 0) {
       if (linkedTreasury.length > 0) {
         duplicateTreasuryRemoved += linkedTreasury.length;
+        fixedDiscrepanciesCount += linkedTreasury.length;
         const removeIds = new Set(linkedTreasury.map(t => t.id));
         updated.treasury = updated.treasury.filter(t => !removeIds.has(t.id));
       }
     } else {
-      // Check if linkedTreasury consists of valid distinct split-payment rows (_p0, _p1, ...)
-      // whose sum matches autoExpectedPaid cleanly
-      const hasSplitIndices = linkedTreasury.every(t => /_p\d+/.test(t.id));
-      const uniqueSplitIds = new Set(linkedTreasury.map(t => t.id)).size === linkedTreasury.length;
+      const splitInvSumCents = nonCreditSplits.reduce((s, p) => s + toCents(p.amount), 0);
+      const hasValidInvoiceSplits = nonCreditSplits.length > 1 && Math.abs(splitInvSumCents - toCents(autoExpectedPaid)) <= 2;
+
+      const hasSplitIndices = linkedTreasury.length > 1 && linkedTreasury.every(t => /_p\d+/.test(t.id));
+      const uniqueSplitIds = hasSplitIndices && new Set(linkedTreasury.map(t => t.id)).size === linkedTreasury.length;
       const splitSumCents = linkedTreasury.reduce((s, t) => s + toCents(t.amount), 0);
       const isLegitimateSplit =
-        linkedTreasury.length > 1 &&
         hasSplitIndices &&
         uniqueSplitIds &&
-        Math.abs(splitSumCents - toCents(autoExpectedPaid)) <= 1;
+        Math.abs(splitSumCents - toCents(autoExpectedPaid)) <= 2;
 
-      if (isLegitimateSplit) {
-        linkedTreasury.forEach(t => {
-          t.direction = expectedTrDirection;
-          t.sourceId = inv.id;
+      if (hasValidInvoiceSplits) {
+        const expectedIds = new Set(nonCreditSplits.map((_, pIdx) => getDeterministicTreasuryId(expectedSourceType, inv.id, pIdx, expectedTrDirection)));
+        const alreadyExact =
+          linkedTreasury.length === nonCreditSplits.length &&
+          linkedTreasury.every(t =>
+            expectedIds.has(t.id) &&
+            t.direction === expectedTrDirection &&
+            t.sourceType === expectedSourceType &&
+            t.sourceId === inv.id
+          );
+        if (!alreadyExact) {
+          const rmIds = new Set(linkedTreasury.map(t => t.id));
+          updated.treasury = updated.treasury.filter(t => !rmIds.has(t.id));
+          nonCreditSplits.forEach((pLine, pIdx) => {
+            updated.treasury.unshift({
+              id: getDeterministicTreasuryId(expectedSourceType, inv.id, pIdx, expectedTrDirection),
+              date: invDate,
+              direction: expectedTrDirection,
+              amount: roundMoney(Number(pLine.amount)),
+              method: pLine.method,
+              description: buildExpectedTrDesc(pLine.method),
+              sourceType: expectedSourceType,
+              sourceId: inv.id,
+              branchId,
+              branchName
+            });
+          });
+          fixedDiscrepanciesCount++;
+        }
+      } else if (isLegitimateSplit) {
+        linkedTreasury.forEach((t, idx) => {
+          const targetId = getDeterministicTreasuryId(expectedSourceType, inv.id, idx, expectedTrDirection);
+          if (
+            t.direction !== expectedTrDirection ||
+            t.sourceType !== expectedSourceType ||
+            t.sourceId !== inv.id ||
+            t.id !== targetId ||
+            !t.branchId
+          ) {
+            t.id = targetId;
+            t.direction = expectedTrDirection;
+            t.sourceType = expectedSourceType;
+            t.sourceId = inv.id;
+            t.date = invDate;
+            t.branchId = branchId;
+            t.branchName = branchName;
+            fixedDiscrepanciesCount++;
+          }
         });
-      } else if (linkedTreasury.length > 1) {
+      } else if (linkedTreasury.length >= 1) {
         const primaryTr = linkedTreasury[0];
-        primaryTr.amount = autoExpectedPaid;
-        primaryTr.direction = expectedTrDirection;
-        primaryTr.id = getDeterministicTreasuryId(isPurchase ? 'purchase' : 'sale', inv.id, 0, expectedTrDirection);
-        primaryTr.sourceId = inv.id;
+        const targetTrId = getDeterministicTreasuryId(expectedSourceType, inv.id, 0, expectedTrDirection);
+        const trDesc = buildExpectedTrDesc(resolvedMethod);
 
-        const duplicates = linkedTreasury.slice(1);
-        const dupIds = new Set(duplicates.map(d => d.id));
-        updated.treasury = updated.treasury.filter(t => !dupIds.has(t.id));
-        duplicateTreasuryRemoved += duplicates.length;
+        const changed =
+          primaryTr.id !== targetTrId ||
+          primaryTr.direction !== expectedTrDirection ||
+          primaryTr.sourceType !== expectedSourceType ||
+          primaryTr.sourceId !== inv.id ||
+          Math.abs((Number(primaryTr.amount) || 0) - autoExpectedPaid) > 0.01 ||
+          primaryTr.method !== resolvedMethod ||
+          primaryTr.date !== invDate ||
+          !primaryTr.branchId;
+
+        if (changed) {
+          primaryTr.id = targetTrId;
+          primaryTr.direction = expectedTrDirection;
+          primaryTr.sourceType = expectedSourceType;
+          primaryTr.sourceId = inv.id;
+          primaryTr.amount = autoExpectedPaid;
+          primaryTr.method = resolvedMethod;
+          primaryTr.date = invDate;
+          primaryTr.branchId = branchId;
+          primaryTr.branchName = branchName;
+          primaryTr.description = trDesc;
+          fixedDiscrepanciesCount++;
+        }
+
+        if (linkedTreasury.length > 1) {
+          const dupIds = new Set(linkedTreasury.slice(1).map(d => d.id));
+          updated.treasury = updated.treasury.filter(t => !dupIds.has(t.id));
+          duplicateTreasuryRemoved += dupIds.size;
+          fixedDiscrepanciesCount += dupIds.size;
+          fixedInvoicesCount++;
+        }
+      } else {
+        // Missing treasury entry for a paid invoice -> restore it cleanly
+        updated.treasury.unshift({
+          id: getDeterministicTreasuryId(expectedSourceType, inv.id, 0, expectedTrDirection),
+          date: invDate,
+          direction: expectedTrDirection,
+          amount: autoExpectedPaid,
+          method: resolvedMethod,
+          description: buildExpectedTrDesc(resolvedMethod),
+          sourceType: expectedSourceType,
+          sourceId: inv.id,
+          branchId,
+          branchName
+        });
+        fixedDiscrepanciesCount++;
         fixedInvoicesCount++;
-      } else if (linkedTreasury.length === 1) {
-        const t = linkedTreasury[0];
-        t.amount = autoExpectedPaid;
-        t.direction = expectedTrDirection;
-        t.id = getDeterministicTreasuryId(isPurchase ? 'purchase' : 'sale', inv.id, 0, expectedTrDirection);
-        t.sourceId = inv.id;
       }
     }
   });
 
-  // 2. Global deduplication of treasury entries (preserving legitimate split-payment entries indexed by _pN):
+  // 2. Reconcile ALL Vouchers (manual/installment vs auto-from-invoice) against Treasury entries
+  const autoVoucherIds = new Set<string>(
+    updated.vouchers.filter(v => isAutoV(v)).map(v => v.id)
+  );
+
+  // Remove any accidental tr_voucher_* duplicate belonging to an auto-from-invoice voucher (prevents treasury double-counting)
+  const beforeAutoTrFilter = updated.treasury.length;
+  updated.treasury = updated.treasury.filter(tr => {
+    if (tr.sourceId && autoVoucherIds.has(tr.sourceId)) return false;
+    return true;
+  });
+  if (updated.treasury.length !== beforeAutoTrFilter) {
+    const removed = beforeAutoTrFilter - updated.treasury.length;
+    duplicateTreasuryRemoved += removed;
+    fixedDiscrepanciesCount += removed;
+  }
+
+  // Ensure every manual / standalone voucher has exactly ONE matching Treasury entry with exact direction
+  updated.vouchers.forEach(v => {
+    if (!v || isAutoV(v)) return;
+    if (v.status === 'ملغي') return;
+    const amt = roundMoney(Number(v.amount) || 0);
+    if (amt <= 0) return;
+
+    const expectedDir: 'in' | 'out' = v.type === 'receipt' ? 'in' : 'out';
+    const expectedSrcType = v.type === 'receipt' ? 'receipt' : 'payment';
+    const branchId = v.branchId || defaultBranchId;
+    const branchName = v.branchName || updated.branches?.find(b => b.id === branchId)?.name || defaultBranchName;
+    const cleanVId = cleanIdPart(v.id);
+    const detTrId = `tr_voucher_${cleanVId}_${expectedDir}`;
+
+    const matchedEntries = updated.treasury.filter(tr =>
+      tr.sourceId === v.id ||
+      tr.id === detTrId ||
+      tr.id.startsWith(`tr_voucher_${cleanVId}_`)
+    );
+
+    const expectedDesc = `${v.type === 'receipt' ? 'سند قبض' : 'سند صرف'} ${v.number} - ${v.partyName}${v.description ? ': ' + v.description : ''}`;
+
+    if (matchedEntries.length === 0) {
+      updated.treasury.unshift({
+        id: detTrId,
+        date: v.date || getTodayDate(),
+        direction: expectedDir,
+        amount: amt,
+        method: (v.paymentMethod && v.paymentMethod !== 'آجل' ? v.paymentMethod : 'نقدي') as PaymentMethod,
+        description: expectedDesc,
+        sourceType: expectedSrcType,
+        sourceId: v.id,
+        branchId,
+        branchName
+      });
+      fixedDiscrepanciesCount++;
+    } else {
+      const primary = matchedEntries[0];
+      const safeMethod = (v.paymentMethod && v.paymentMethod !== 'آجل' ? v.paymentMethod : primary.method || 'نقدي') as PaymentMethod;
+      const changed =
+        primary.direction !== expectedDir ||
+        Math.abs((Number(primary.amount) || 0) - amt) > 0.01 ||
+        primary.method !== safeMethod ||
+        primary.date !== v.date ||
+        primary.sourceType !== expectedSrcType;
+
+      if (changed) {
+        if (!primary.id.startsWith('tr_fee')) {
+          primary.id = detTrId;
+        }
+        primary.direction = expectedDir;
+        primary.amount = amt;
+        primary.method = safeMethod;
+        primary.date = v.date || primary.date;
+        primary.sourceType = expectedSrcType;
+        primary.sourceId = v.id;
+        primary.branchId = branchId;
+        primary.branchName = branchName;
+        fixedDiscrepanciesCount++;
+      }
+
+      if (matchedEntries.length > 1) {
+        const dupIds = new Set(matchedEntries.slice(1).map(d => d.id));
+        updated.treasury = updated.treasury.filter(t => !dupIds.has(t.id));
+        duplicateTreasuryRemoved += dupIds.size;
+        fixedDiscrepanciesCount += dupIds.size;
+      }
+    }
+  });
+
+  // 3. Reconcile Expenses ('out'), Revenues ('in'), and any remaining Treasury entries by sourceType / description
+  const expenseIds = new Set((updated.expenses || []).map(e => e.id));
+  const revenueIds = new Set((updated.revenues || []).map(r => r.id));
+
+  (updated.treasury || []).forEach(tr => {
+    if (!tr) return;
+    let targetDir: 'in' | 'out' | null = null;
+    if (tr.sourceType === 'expense' || (tr.sourceId && expenseIds.has(tr.sourceId))) {
+      targetDir = 'out';
+      tr.sourceType = 'expense';
+    } else if (tr.sourceType === 'revenue' || (tr.sourceId && revenueIds.has(tr.sourceId))) {
+      targetDir = 'in';
+      tr.sourceType = 'revenue';
+    } else if (
+      tr.sourceType === 'sale' ||
+      tr.sourceType === 'wholesale' ||
+      tr.sourceType === 'purchase_return' ||
+      tr.sourceType === 'receipt'
+    ) {
+      targetDir = 'in';
+    } else if (
+      tr.sourceType === 'purchase' ||
+      tr.sourceType === 'sale_return' ||
+      tr.sourceType === 'payment'
+    ) {
+      targetDir = 'out';
+    } else if (tr.description) {
+      if (
+        tr.description.includes('تحصيل فاتورة مبيعات') ||
+        tr.description.includes('استرداد مرتجع مشتريات') ||
+        tr.description.includes('تحويل وارد') ||
+        tr.description.startsWith('سند قبض')
+      ) {
+        targetDir = 'in';
+      } else if (
+        tr.description.includes('سداد فاتورة مشتريات') ||
+        tr.description.includes('صرف استرداد مرتجع مبيعات') ||
+        tr.description.includes('تحويل صادر') ||
+        tr.description.startsWith('سند صرف') ||
+        tr.description.includes('عمولة بنكية')
+      ) {
+        targetDir = 'out';
+      }
+    }
+
+    if (targetDir && tr.direction !== targetDir) {
+      tr.direction = targetDir;
+      fixedDiscrepanciesCount++;
+    }
+  });
+
+  // 4. Global deduplication of treasury entries (preserving transfers' in+out pair and _pN split payments)
   const seenTreasuryKeys = new Set<string>();
   const cleanTreasury: TreasuryEntry[] = [];
   (updated.treasury || []).forEach(tr => {
     let key = tr.id;
-    if (tr.sourceId && tr.sourceType && !tr.id.includes('_p')) {
-      key = `${tr.sourceType}_${tr.sourceId}_${tr.direction}_${tr.method || 'cash'}`;
+    const splitMatch = tr.id.match(/_p(\d+)_/);
+    if (tr.sourceId && tr.sourceType === 'transfer') {
+      key = `transfer_${tr.sourceId}_${tr.direction}_${tr.method || 'cash'}`;
+    } else if (tr.sourceId && tr.sourceType && splitMatch) {
+      key = `${tr.sourceType}_${tr.sourceId}_p${splitMatch[1]}_${tr.method || 'cash'}`;
+    } else if (tr.sourceId && tr.sourceType && tr.sourceType !== 'manual' && tr.sourceType !== 'adjustment') {
+      key = `${tr.sourceType}_${tr.sourceId}_${tr.method || 'cash'}`;
     }
     if (!seenTreasuryKeys.has(key)) {
       seenTreasuryKeys.add(key);
       cleanTreasury.push(tr);
     } else {
       duplicateTreasuryRemoved++;
+      fixedDiscrepanciesCount++;
     }
   });
   updated.treasury = cleanTreasury;
 
-  // 3. Global deduplication of vouchers (preserve distinct manual installment vouchers on same invoice):
+  // 5. Global deduplication of vouchers (preserving distinct manual installment vouchers on same invoice)
   const seenVoucherKeys = new Set<string>();
   const cleanVouchers: Voucher[] = [];
   (updated.vouchers || []).forEach(v => {
     let key = v.id;
-    const isAuto = !v.isManualInstallment && (v.isAutoFromInvoice || v.id.startsWith('vch_'));
-    if (v.invoiceId && isAuto) {
+    if (v.invoiceId && isAutoV(v)) {
       key = `vch_auto_inv_${v.invoiceId}_${v.type}`;
     }
     if (!seenVoucherKeys.has(key)) {
@@ -1219,14 +1620,25 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
       cleanVouchers.push(v);
     } else {
       duplicateVouchersRemoved++;
+      vouchersReconciledCount++;
     }
   });
   updated.vouchers = cleanVouchers;
+
+  // 6. Recompute Customer & Supplier cached balances cleanly
+  updated.customers.forEach(c => {
+    c.balance = calculateCustomerBalance(updated, c.id);
+  });
+  updated.suppliers.forEach(s => {
+    s.balance = calculateSupplierBalance(updated, s.id);
+  });
 
   return {
     db: updated,
     duplicateVouchersRemoved,
     duplicateTreasuryRemoved,
-    fixedInvoicesCount
+    fixedInvoicesCount,
+    fixedDiscrepanciesCount,
+    vouchersReconciledCount
   };
 }

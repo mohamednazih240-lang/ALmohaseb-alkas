@@ -284,11 +284,11 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
       });
     }
 
-    // Invoices
+    // Invoices (exclude quotes, orders, and return invoices — returns are added cleanly from db.returns below)
     db.invoices
-      .filter(i => i.partyId === party.id)
+      .filter(i => i.partyId === party.id && i.invoiceKind !== 'quote' && (i.invoiceKind as string) !== 'order' && i.invoiceKind !== 'sale_return' && i.invoiceKind !== 'purchase_return')
       .forEach(inv => {
-        if (isCustomer && inv.type === 'sale') {
+        if (isCustomer && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale')) {
           const hasLinkedVoucher = db.vouchers.some(v => v.partyId === party.id && v.type === 'receipt' && (v.invoiceId === inv.id || v.referenceNumber === inv.number));
           if (hasLinkedVoucher) {
             running += inv.total;
@@ -312,7 +312,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
               balance: running
             });
           }
-        } else if (!isCustomer && inv.type === 'purchase') {
+        } else if (!isCustomer && (inv.type === 'purchase' || inv.invoiceKind === 'purchase')) {
           const hasLinkedVoucher = db.vouchers.some(v => v.partyId === party.id && v.type === 'payment' && (v.invoiceId === inv.id || v.referenceNumber === inv.number));
           if (hasLinkedVoucher) {
             running += inv.total;
@@ -367,17 +367,17 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
       });
 
     // Returns
-    db.returns
-      .filter(r => r.partyId === party.id)
+    (db.returns || [])
+      .filter(r => r.partyId === party.id && r.type === (isCustomer ? 'sale' : 'purchase'))
       .forEach(r => {
         if (r.paymentMethod === 'آجل') {
           running -= r.total;
           rows.push({
             date: r.date,
-            desc: `مرتجع رقم ${r.number}`,
+            desc: `مرتجع ${isCustomer ? 'مبيعات' : 'مشتريات'} رقم ${r.number}`,
             type: 'return',
-            debit: 0,
-            credit: r.total,
+            debit: isCustomer ? 0 : r.total,
+            credit: isCustomer ? r.total : 0,
             balance: running
           });
         }

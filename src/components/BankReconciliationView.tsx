@@ -91,8 +91,10 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
   const items: ReconcileItem[] = [];
   let calculatedBookBalance = 0;
 
-  // 1. Receipts (Deposits)
+  // 1. Standalone & Manual Installment Vouchers (skip auto-vouchers from invoices so step 4 never double-counts them)
   db.vouchers.forEach(v => {
+    const isAutoVoucher = !v.isManualInstallment && (v.isAutoFromInvoice || v.id.startsWith('vch_'));
+    if (isAutoVoucher) return;
     if (v.date <= statementDate && (!accountMethod || v.paymentMethod === accountMethod)) {
       if (v.type === 'receipt') {
         items.push({
@@ -156,35 +158,42 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
     }
   });
 
-  // 4. Paid Invoices
+  // 4. Paid Invoices (respecting split payments, return invoices, and isolating manual installment vouchers)
   db.invoices.forEach(inv => {
-    if (inv.date <= statementDate && inv.paid > 0 && (!accountMethod || inv.paymentMethod === accountMethod)) {
-      if (inv.type === 'sale') {
-        items.push({
-          id: `${inv.id}_paid`,
-          date: inv.date,
-          type: 'deposit',
-          source: 'سداد مبيعات كاش',
-          reference: inv.number,
-          partyName: inv.partyName,
-          amount: Number(inv.paid),
-          cleared: clearedIds.has(`${inv.id}_paid`)
-        });
-        calculatedBookBalance += Number(inv.paid);
-      } else if (inv.type === 'purchase') {
-        items.push({
-          id: `${inv.id}_paid`,
-          date: inv.date,
-          type: 'payment',
-          source: 'سداد مشتريات نقدي',
-          reference: inv.number,
-          partyName: inv.partyName,
-          amount: Number(inv.paid),
-          cleared: clearedIds.has(`${inv.id}_paid`)
-        });
-        calculatedBookBalance -= Number(inv.paid);
-      }
-    }
+    if (inv.invoiceKind === 'quote' || (inv.invoiceKind as string) === 'order') return;
+    if (inv.date > statementDate || (Number(inv.paid) || 0) <= 0) return;
+
+    const manualPaid = db.vouchers
+      .filter(v => v.invoiceId === inv.id && (v.isManualInstallment || (!v.isAutoFromInvoice && !v.id.startsWith('vch_'))))
+      .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+    const autoPaid = Math.max(0, roundMoney((Number(inv.paid) || 0) - manualPaid));
+    if (autoPaid <= 0) return;
+
+    const isSaleReturn = inv.invoiceKind === 'sale_return';
+    const isPurchaseReturn = inv.invoiceKind === 'purchase_return';
+    const isSale = !isSaleReturn && !isPurchaseReturn && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale');
+    const isInflow = isSale || isPurchaseReturn;
+
+    const activeSplits = (inv.payments || []).filter(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0);
+    const lines = activeSplits.length > 0
+      ? activeSplits.map((p, idx) => ({ key: `${inv.id}_paid_${idx}`, method: p.method, amount: Number(p.amount) }))
+      : [{ key: `${inv.id}_paid`, method: inv.paymentMethod, amount: autoPaid }];
+
+    lines.forEach(line => {
+      if (accountMethod && line.method !== accountMethod) return;
+      if (line.amount <= 0) return;
+      items.push({
+        id: line.key,
+        date: inv.date,
+        type: isInflow ? 'deposit' : 'payment',
+        source: isSale ? 'تحصيل مبيعات' : isPurchaseReturn ? 'استرداد مرتجع مشتريات' : isSaleReturn ? 'صرف مرتجع مبيعات' : 'سداد مشتريات',
+        reference: inv.number,
+        partyName: inv.partyName,
+        amount: line.amount,
+        cleared: clearedIds.has(line.key)
+      });
+      calculatedBookBalance += isInflow ? line.amount : -line.amount;
+    });
   });
 
   // Sort items by date descending
