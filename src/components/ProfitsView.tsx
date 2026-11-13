@@ -121,6 +121,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     const sales = db.invoices.filter(
       i =>
         (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+        i.invoiceKind !== 'quote' &&
+        i.invoiceKind !== 'sale_return' &&
         isDateMatch(i.date) &&
         isTargetBranch(i.branchId)
     );
@@ -129,6 +131,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       .map(inv => {
         let invoiceCost = 0;
         let verifiedRevenue = 0;
+        let invLinesSum = 0;
         let hasAnyVerifiedCost = false;
         let hasUndefinedCost = false;
 
@@ -136,6 +139,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           const alloc = fifoLedger.getSaleAllocation(inv.id, it.productId, it.productName, idx);
           const q = Number(it.qty) || 0;
           const lineTotal = Number(it.total) || q * (Number(it.unitPrice) || 0);
+          invLinesSum += lineTotal;
           if (alloc && alloc.hasVerifiedCost) {
             hasAnyVerifiedCost = true;
             invoiceCost += alloc.verifiedCostTotal;
@@ -150,14 +154,15 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         });
 
         const revenue = Number(inv.total) || 0;
-        const subtotal = Number(inv.subtotal) || inv.items.reduce((s, it) => s + (Number(it.total) || 0), 0);
-        const invoiceAdjustment = (Number(inv.extraIncomeVal) || 0) + (Number(inv.tax) || 0) - (Number(inv.discount) || 0);
+        const invNetAdjustment = revenue - invLinesSum;
         const cost = Number(invoiceCost.toFixed(2));
         // If NO items have verified purchase batches, profit is explicitly undefined ('غير محدد')
-        const effectiveVerifiedRev = hasUndefinedCost
-          ? Number((verifiedRevenue + (hasAnyVerifiedCost ? invoiceAdjustment : 0)).toFixed(2))
+        const rawEffectiveVerifiedRev = hasUndefinedCost
+          ? verifiedRevenue + (hasAnyVerifiedCost ? invNetAdjustment : 0)
           : revenue;
-        const profit = hasAnyVerifiedCost ? Number((effectiveVerifiedRev - cost).toFixed(2)) : 0;
+        const effectiveVerifiedRev = Number(rawEffectiveVerifiedRev.toFixed(2));
+        const rawProfit = hasAnyVerifiedCost ? (rawEffectiveVerifiedRev - invoiceCost) : 0;
+        const profit = hasAnyVerifiedCost ? Number(rawProfit.toFixed(2)) : 0;
         const margin = hasAnyVerifiedCost && effectiveVerifiedRev > 0 ? (profit / effectiveVerifiedRev) * 100 : 0;
 
         return {
@@ -170,7 +175,9 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           paymentMethod: inv.paymentMethod,
           itemsCount: inv.items.length,
           revenue,
+          invNetAdjustment,
           cost,
+          rawProfit,
           profit,
           margin,
           hasAnyVerifiedCost,
@@ -188,10 +195,10 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       });
   }, [db, fifoLedger, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
 
-  // Grand Total of Gross Invoice Profits (strictly sums verified profits displayed in table)
+  // Grand Total of Gross Invoice Profits (sums unrounded verified profits for zero rounding drift)
   const grandTotalInvoiceProfits = useMemo(() => {
     return Number(
-      invoiceProfitsData.reduce((sum, row) => sum + (row.hasAnyVerifiedCost ? row.profit : 0), 0).toFixed(2)
+      invoiceProfitsData.reduce((sum, row) => sum + (row.hasAnyVerifiedCost ? row.rawProfit : 0), 0).toFixed(2)
     );
   }, [invoiceProfitsData]);
 
@@ -212,6 +219,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     const sales = db.invoices.filter(
       i =>
         (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+        i.invoiceKind !== 'quote' &&
+        i.invoiceKind !== 'sale_return' &&
         isDateMatch(i.date) &&
         isTargetBranch(i.branchId)
     );
@@ -305,7 +314,8 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           : 0;
       const totalCost = item.hasVerifiedCost ? Number(item.totalCost.toFixed(2)) : 0;
       const verifiedRev = item.hasVerifiedCost ? Number(item.verifiedRevenue.toFixed(2)) : 0;
-      const profit = item.hasVerifiedCost ? Number((verifiedRev - totalCost).toFixed(2)) : 0;
+      const rawProfit = item.hasVerifiedCost ? (item.verifiedRevenue - item.totalCost) : 0;
+      const profit = item.hasVerifiedCost ? Number(rawProfit.toFixed(2)) : 0;
       const unitNetProfit = item.hasVerifiedCost ? Number((actualSellPrice - fifoUnitCost).toFixed(2)) : 0;
       const margin = item.hasVerifiedCost && verifiedRev > 0 ? (profit / verifiedRev) * 100 : 0;
 
@@ -316,6 +326,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         totalCost,
         actualSellPrice,
         unitNetProfit,
+        rawProfit,
         profit,
         margin
       };
@@ -332,23 +343,43 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     });
   }, [db, fifoLedger, dateFilter, fromDate, toDate, searchQuery, selectedBranchId]);
 
-  // Invoice-level discounts, extra income & taxes (for invoices with verified cost)
+  // Invoice-level discounts, extra income, taxes & total adjustments (for verified invoices matching date & branch)
   const salesAdjustments = useMemo(() => {
-    const verifiedSales = invoiceProfitsData.filter(r => r.hasAnyVerifiedCost).map(r => r.invoice);
+    const sales = db.invoices.filter(
+      i =>
+        (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+        i.invoiceKind !== 'quote' &&
+        i.invoiceKind !== 'sale_return' &&
+        isDateMatch(i.date) &&
+        isTargetBranch(i.branchId)
+    );
     let discounts = 0;
     let extraIncome = 0;
     let taxes = 0;
-    for (const inv of verifiedSales) {
+    let netAdjustment = 0;
+    for (const inv of sales) {
+      let hasAnyVerified = false;
+      let linesSum = 0;
+      inv.items.forEach((it, idx) => {
+        const q = Number(it.qty) || 0;
+        const lt = Number(it.total) || q * (Number(it.unitPrice) || 0);
+        linesSum += lt;
+        const alloc = fifoLedger.getSaleAllocation(inv.id, it.productId, it.productName, idx);
+        if (alloc && alloc.hasVerifiedCost) hasAnyVerified = true;
+      });
+      if (!hasAnyVerified) continue;
       discounts += Number(inv.discount) || 0;
       extraIncome += Number(inv.extraIncomeVal) || 0;
       taxes += Number(inv.tax) || 0;
+      netAdjustment += (Number(inv.total) || 0) - linesSum;
     }
     return {
       discounts: Number(discounts.toFixed(2)),
       extraIncome: Number(extraIncome.toFixed(2)),
-      taxes: Number(taxes.toFixed(2))
+      taxes: Number(taxes.toFixed(2)),
+      netAdjustment
     };
-  }, [invoiceProfitsData]);
+  }, [db, fifoLedger, dateFilter, fromDate, toDate, selectedBranchId]);
 
   const totalItemsRevenueSum = useMemo(
     () => Number(itemProfitsData.reduce((s, it) => s + (it.hasVerifiedCost ? it.verifiedRevenue : 0), 0).toFixed(2)),
@@ -359,24 +390,25 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     [itemProfitsData]
   );
 
-  // Grand Total of Item Profits (matches sum of item.profit directly)
+  // Grand Total of Item Profits (unadjusted item-line total)
   const grandTotalItemProfits = useMemo(() => {
-    return Number(itemProfitsData.reduce((s, it) => s + (it.hasVerifiedCost ? it.profit : 0), 0).toFixed(2));
+    return Number(itemProfitsData.reduce((s, it) => s + (it.hasVerifiedCost ? it.rawProfit : 0), 0).toFixed(2));
   }, [itemProfitsData]);
 
-  // Adjusted Item Profits (matches grandTotalInvoiceProfits identically when unfiltered)
+  // Adjusted Item Profits (reconciles 100.00% with grandTotalInvoiceProfits when unfiltered)
   const adjustedGrandTotalItemProfits = useMemo(() => {
     if (searchQuery.trim()) return grandTotalItemProfits;
-    return Number(
-      (grandTotalItemProfits - salesAdjustments.discounts + salesAdjustments.extraIncome + salesAdjustments.taxes).toFixed(2)
-    );
-  }, [grandTotalItemProfits, salesAdjustments, searchQuery]);
+    const rawSum = itemProfitsData.reduce((s, it) => s + (it.hasVerifiedCost ? it.rawProfit : 0), 0);
+    return Number((rawSum + salesAdjustments.netAdjustment).toFixed(2));
+  }, [itemProfitsData, grandTotalItemProfits, salesAdjustments, searchQuery]);
 
   // 3. TRANSACTION-BY-TRANSACTION SALE LINE PROFITS (Strict Non-Averaged Batch Costing)
   const saleTransactionProfitsData = useMemo(() => {
     const sales = db.invoices.filter(
       i =>
         (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+        i.invoiceKind !== 'quote' &&
+        i.invoiceKind !== 'sale_return' &&
         isDateMatch(i.date) &&
         isTargetBranch(i.branchId)
     );
@@ -400,6 +432,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
       verifiedUnitCost: number;
       verifiedCostTotal: number;
       unitNetProfit: number;
+      rawLineProfit: number;
       lineProfit: number;
       margin: number;
       invoice: Invoice;
@@ -421,11 +454,15 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
         const unitPrice = Number(it.unitPrice) || 0;
         const lineTotal = Number(it.total) || q * unitPrice;
         const hasVerifiedCost = Boolean(alloc && alloc.hasVerifiedCost);
+        const coveredQty = alloc ? alloc.coveredQty : 0;
+        const coveredRatio = q > 0 ? Math.min(1, coveredQty / q) : 0;
+        const verifiedLineRev = lineTotal * coveredRatio;
         const verifiedUnitCost = hasCostUnit(alloc);
         const verifiedCostTotal = hasVerifiedCost && alloc ? alloc.verifiedCostTotal : 0;
         const unitNetProfit = hasVerifiedCost ? Number((unitPrice - verifiedUnitCost).toFixed(2)) : 0;
-        const lineProfit = hasVerifiedCost ? Number((lineTotal - verifiedCostTotal).toFixed(2)) : 0;
-        const margin = hasVerifiedCost && lineTotal > 0 ? (lineProfit / lineTotal) * 100 : 0;
+        const rawLineProfit = hasVerifiedCost ? (verifiedLineRev - verifiedCostTotal) : 0;
+        const lineProfit = hasVerifiedCost ? Number(rawLineProfit.toFixed(2)) : 0;
+        const margin = hasVerifiedCost && verifiedLineRev > 0 ? (lineProfit / verifiedLineRev) * 100 : 0;
 
         rows.push({
           id: `${inv.id}_item_${idx}`,
@@ -446,6 +483,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
           verifiedUnitCost,
           verifiedCostTotal,
           unitNetProfit,
+          rawLineProfit,
           lineProfit,
           margin,
           invoice: inv
@@ -473,10 +511,10 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   }
 
   const grandTotalTransactionProfits = useMemo(() => {
-    return Number(
-      saleTransactionProfitsData.reduce((sum, r) => sum + (r.hasVerifiedCost ? r.lineProfit : 0), 0).toFixed(2)
-    );
-  }, [saleTransactionProfitsData]);
+    const rawSum = saleTransactionProfitsData.reduce((sum, r) => sum + (r.hasVerifiedCost ? r.rawLineProfit : 0), 0);
+    if (searchQuery.trim()) return Number(rawSum.toFixed(2));
+    return Number((rawSum + salesAdjustments.netAdjustment).toFixed(2));
+  }, [saleTransactionProfitsData, salesAdjustments, searchQuery]);
 
   const currentGrossProfit = useMemo(() => {
     if (profitTab === 'invoices') return grandTotalInvoiceProfits;
@@ -947,6 +985,11 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
                   ? 'عداد أرباح الأصناف المخرجة'
                   : 'عداد أرباح حركات البيع التفصيلية'}
               </span>
+              {!searchQuery.trim() && (profitTab === 'items' || profitTab === 'transactions') && Math.abs(salesAdjustments.netAdjustment) >= 0.01 && (
+                <span className="text-[10px] text-emerald-100/90 block">
+                  مطابق لإجمالي الفواتير (شامل خصومات/تسويات الفواتير: {formatMoney(salesAdjustments.netAdjustment, db.settings.currency)})
+                </span>
+              )}
             </div>
           </div>
 

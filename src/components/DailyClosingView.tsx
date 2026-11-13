@@ -23,16 +23,19 @@ import {
 } from 'lucide-react';
 import {
   AccountingDB,
-  DailyClosing
+  DailyClosing,
+  DailyClosingChannelSummary,
+  PaymentMethod
 } from '../types/accounting';
 import {
   formatMoney,
   generateId,
   getTodayDate,
   logAudit,
-  getProductForBranch,
   roundMoney,
-  isFiniteNonNegative
+  isFiniteNonNegative,
+  PAYMENT_METHODS,
+  buildProductFifoLedger
 } from '../services/accountingStorage';
 import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
@@ -63,8 +66,11 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const [selectedDate, setSelectedDate] = useState<string>(getTodayDate());
   const [shiftName, setShiftName] = useState<string>(`وردية ${currentBranch.name}`);
   const [startingCash, setStartingCash] = useState<number>(0);
+  const [startingCashEdited, setStartingCashEdited] = useState<boolean>(false);
   const [actualCash, setActualCash] = useState<number>(0);
+  const [actualCashEdited, setActualCashEdited] = useState<boolean>(false);
   const [shiftNotes, setShiftNotes] = useState<string>('');
+  const [justClosedRecord, setJustClosedRecord] = useState<DailyClosing | null>(null);
 
   // Editing state
   const [editingClosing, setEditingClosing] = useState<DailyClosing | null>(null);
@@ -81,61 +87,216 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
   };
 
-  // Calculate live shift statistics for selectedDate strictly for this branch
+  const addOneDay = (dateStr: string): string => {
+    const dt = new Date(`${dateStr}T12:00:00`);
+    if (isNaN(dt.getTime())) return getTodayDate();
+    dt.setDate(dt.getDate() + 1);
+    return dt.toISOString().slice(0, 10);
+  };
+
+  const nextDayDate = useMemo(() => addOneDay(selectedDate), [selectedDate]);
+  const treasuryMethods = useMemo<PaymentMethod[]>(
+    () => PAYMENT_METHODS.filter(m => m !== 'آجل'),
+    []
+  );
+
+  // Prior closing record for carried-over opening cash reference
+  const latestPriorClosing = useMemo(() => {
+    return (db.dailyClosings || [])
+      .filter(c => isTargetBranch(c.branchId) && c.date < selectedDate)
+      .sort((a, b) => (a.date === b.date ? (b.createdAt || '').localeCompare(a.createdAt || '') : b.date.localeCompare(a.date)))[0];
+  }, [db.dailyClosings, selectedDate, targetBranchId]);
+
+  // Cumulative treasury book opening balances prior to selectedDate across all 5 payment channels
+  const priorChannelBookBalances = useMemo(() => {
+    const map: Record<string, number> = {};
+    treasuryMethods.forEach(m => {
+      map[m] = 0;
+    });
+    db.treasury
+      .filter(t => t.date < selectedDate && isTargetBranch(t.branchId))
+      .forEach(t => {
+        if (!treasuryMethods.includes(t.method)) return;
+        const amt = Number(t.amount) || 0;
+        map[t.method] = roundMoney((map[t.method] || 0) + (t.direction === 'in' ? amt : -amt));
+      });
+
+    // If a prior closing explicitly carried forward next-day opening cash balances for exact consecutive day, preserve any physical drawer variance on نقدي
+    if (latestPriorClosing?.nextDayOpeningBalances) {
+      const priorDate = latestPriorClosing.date;
+      treasuryMethods.forEach(m => {
+        const carried = latestPriorClosing.nextDayOpeningBalances?.[m];
+        if (carried !== undefined && m === 'نقدي') {
+          const betweenNet = db.treasury
+            .filter(t => t.date > priorDate && t.date < selectedDate && t.method === m && isTargetBranch(t.branchId))
+            .reduce((s, t) => s + (t.direction === 'in' ? (Number(t.amount) || 0) : -(Number(t.amount) || 0)), 0);
+          map[m] = roundMoney(carried + betweenNet);
+        }
+      });
+    }
+    return map;
+  }, [db.treasury, selectedDate, targetBranchId, treasuryMethods, latestPriorClosing]);
+
+  // Reset manual edit flags and sync opening cash when date or branch switches
+  React.useEffect(() => {
+    setStartingCashEdited(false);
+    setActualCashEdited(false);
+    setStartingCash(roundMoney(priorChannelBookBalances['نقدي'] || 0));
+  }, [selectedDate, targetBranchId]);
+
+  React.useEffect(() => {
+    if (!startingCashEdited) {
+      setStartingCash(roundMoney(priorChannelBookBalances['نقدي'] || 0));
+    }
+  }, [priorChannelBookBalances, startingCashEdited]);
+
+  const fifoLedger = useMemo(
+    () => buildProductFifoLedger(db, targetBranchId),
+    [db, targetBranchId]
+  );
+
+  // Calculate live shift statistics & per-channel next-day opening balances for selectedDate strictly for this branch
   const liveStats = useMemo(() => {
-    // 1. Invoices on selected date for target branch
-    const daySalesInvoices = db.invoices.filter(i => i.date === selectedDate && i.type === 'sale' && isTargetBranch(i.branchId));
-    const dayPurchaseInvoices = db.invoices.filter(i => i.date === selectedDate && i.type === 'purchase' && isTargetBranch(i.branchId));
+    // 1. Invoices on selected date for target branch (exclude quotes and sale_return)
+    const daySalesInvoices = db.invoices.filter(
+      i =>
+        i.date === selectedDate &&
+        (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+        i.invoiceKind !== 'quote' &&
+        i.invoiceKind !== 'sale_return' &&
+        isTargetBranch(i.branchId)
+    );
+    const dayPurchaseInvoices = db.invoices.filter(
+      i => i.date === selectedDate && i.type === 'purchase' && i.invoiceKind !== 'purchase_return' && isTargetBranch(i.branchId)
+    );
     const dayReturns = (db.returns || []).filter(r => r.date === selectedDate && isTargetBranch(r.branchId));
 
     // Sales metrics
-    const salesTotal = daySalesInvoices.reduce((sum, i) => sum + i.total, 0);
-    const returnsTotal = dayReturns.reduce((sum, r) => sum + r.total, 0);
-    const netSales = Math.max(0, salesTotal - returnsTotal);
+    const salesTotal = roundMoney(daySalesInvoices.reduce((sum, i) => sum + (Number(i.total) || 0), 0));
+    const returnsTotal = roundMoney(dayReturns.reduce((sum, r) => sum + (Number(r.total) || 0), 0));
+    const netSales = roundMoney(Math.max(0, salesTotal - returnsTotal));
 
-    // Cash collections from sales
-    const salesCashIn = daySalesInvoices.reduce((sum, i) => sum + (i.paid || 0), 0);
-    const purchasesCashOut = dayPurchaseInvoices.reduce((sum, i) => sum + (i.paid || 0), 0);
-
-    // Vouchers on date for target branch
-    const receiptVouchers = db.vouchers.filter(v => v.date === selectedDate && v.type === 'receipt' && isTargetBranch(v.branchId));
-    const paymentVouchers = db.vouchers.filter(v => v.date === selectedDate && v.type === 'payment' && isTargetBranch(v.branchId));
-    const vouchersCashIn = receiptVouchers.reduce((sum, v) => sum + v.amount, 0);
-    const vouchersCashOut = paymentVouchers.reduce((sum, v) => sum + v.amount, 0);
-
-    // Treasury entries on date for target branch
+    // Authoritative Treasury movements on selected date for target branch (single source of truth - zero double counting)
     const dayTreasury = db.treasury.filter(t => t.date === selectedDate && isTargetBranch(t.branchId));
-    const manualTreasuryIn = dayTreasury.filter(t => t.direction === 'in' && !t.sourceType?.includes('invoice') && !t.sourceType?.includes('voucher')).reduce((sum, t) => sum + t.amount, 0);
-    const manualTreasuryOut = dayTreasury.filter(t => t.direction === 'out' && !t.sourceType?.includes('invoice') && !t.sourceType?.includes('voucher')).reduce((sum, t) => sum + t.amount, 0);
 
-    // Expenses & Revenues on date for target branch
-    const dayExpenses = db.expenses.filter(e => e.date === selectedDate && isTargetBranch(e.branchId)).reduce((sum, e) => sum + e.amount, 0);
-    const dayRevenues = db.revenues.filter(r => r.date === selectedDate && isTargetBranch(r.branchId)).reduce((sum, r) => sum + r.amount, 0);
+    const totalCashIn = roundMoney(
+      dayTreasury.filter(t => t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
+    const totalCashOut = roundMoney(
+      dayTreasury.filter(t => t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
 
-    // Total Cash In & Total Cash Out
-    const totalCashIn = salesCashIn + vouchersCashIn + manualTreasuryIn + dayRevenues;
-    const totalCashOut = purchasesCashOut + vouchersCashOut + manualTreasuryOut + dayExpenses;
+    const salesCashIn = roundMoney(
+      dayTreasury
+        .filter(t => t.direction === 'in' && (t.sourceType === 'sale' || t.sourceType === 'wholesale'))
+        .reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
+    const purchasesCashOut = roundMoney(
+      dayTreasury
+        .filter(t => t.direction === 'out' && t.sourceType === 'purchase')
+        .reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
+    const vouchersCashIn = roundMoney(
+      dayTreasury
+        .filter(t => t.direction === 'in' && (t.sourceType === 'receipt' || t.sourceType === 'voucher'))
+        .reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
+    const vouchersCashOut = roundMoney(
+      dayTreasury
+        .filter(t => t.direction === 'out' && (t.sourceType === 'payment' || t.sourceType === 'voucher'))
+        .reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
 
-    // Cost of Goods Sold (COGS)
-    let cogs = 0;
+    const dayExpenses = roundMoney(
+      db.expenses.filter(e => e.date === selectedDate && isTargetBranch(e.branchId)).reduce((sum, e) => sum + (Number(e.amount) || 0), 0)
+    );
+    const dayRevenues = roundMoney(
+      db.revenues.filter(r => r.date === selectedDate && isTargetBranch(r.branchId)).reduce((sum, r) => sum + (Number(r.amount) || 0), 0)
+    );
+
+    // Cash drawer ('نقدي') inflows/outflows specifically for drawer reconciliation
+    const drawerIn = roundMoney(
+      dayTreasury.filter(t => t.method === 'نقدي' && t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
+    const drawerOut = roundMoney(
+      dayTreasury.filter(t => t.method === 'نقدي' && t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
+
+    // Cost of Goods Sold (COGS) & Gross Profit strictly via FIFO ledger (reconciled with ProfitsView)
+    let rawVerifiedRev = 0;
+    let rawCogs = 0;
     daySalesInvoices.forEach(inv => {
-      inv.items.forEach(it => {
-        const product = db.products.find(p => p.id === it.productId);
-        const branchProd = product ? getProductForBranch(product, targetBranchId) : null;
-        const unitCost = it.costPrice || branchProd?.buyPrice || 0;
-        cogs += it.qty * unitCost;
+      let invVerifiedRev = 0;
+      let invCogs = 0;
+      let invLinesSum = 0;
+      let hasAnyVerified = false;
+      let hasUndefined = false;
+
+      inv.items.forEach((it, idx) => {
+        const q = Number(it.qty) || 0;
+        const lineTotal = Number(it.total) || q * (Number(it.unitPrice) || 0);
+        invLinesSum += lineTotal;
+        const alloc = fifoLedger.getSaleAllocation(inv.id, it.productId, it.productName, idx);
+        if (alloc && alloc.hasVerifiedCost) {
+          hasAnyVerified = true;
+          invCogs += alloc.verifiedCostTotal;
+          const coveredRatio = q > 0 ? Math.min(1, alloc.coveredQty / q) : 0;
+          invVerifiedRev += lineTotal * coveredRatio;
+          if (!alloc.hasFullVerifiedCost) hasUndefined = true;
+        } else {
+          hasUndefined = true;
+        }
       });
+
+      if (hasAnyVerified) {
+        const invNetAdj = (Number(inv.total) || 0) - invLinesSum;
+        const effRev = hasUndefined ? (invVerifiedRev + invNetAdj) : (Number(inv.total) || 0);
+        rawVerifiedRev += effRev;
+        rawCogs += invCogs;
+      }
     });
 
-    // Gross profit and profit margin % for this shift
-    const grossProfit = netSales - cogs;
-    const profitMargin = netSales > 0 ? (grossProfit / netSales) * 100 : 0;
+    const cogs = roundMoney(rawCogs);
+    const grossProfit = roundMoney(rawVerifiedRev - rawCogs - returnsTotal);
+    const profitMargin = rawVerifiedRev > 0 ? (grossProfit / rawVerifiedRev) * 100 : 0;
 
-    const expectedCash = startingCash + totalCashIn - totalCashOut;
-    const diff = actualCash - expectedCash;
+    // Expected cash in drawer ('نقدي')
+    const expectedCash = roundMoney(startingCash + drawerIn - drawerOut);
+    const effectiveActualCash = actualCashEdited ? actualCash : expectedCash;
+    const diff = roundMoney(effectiveActualCash - expectedCash);
+
+    // Per-channel summary & Next-Day Opening Balance for ALL treasury payment methods
+    const channelSummaries: DailyClosingChannelSummary[] = treasuryMethods.map(m => {
+      const opening = m === 'نقدي' ? roundMoney(startingCash) : roundMoney(priorChannelBookBalances[m] || 0);
+      const chIn = roundMoney(
+        dayTreasury.filter(t => t.method === m && t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+      );
+      const chOut = roundMoney(
+        dayTreasury.filter(t => t.method === m && t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+      );
+      const closing = roundMoney(opening + chIn - chOut);
+      const nextOpening = m === 'نقدي' ? roundMoney(effectiveActualCash) : closing;
+      return {
+        method: m,
+        openingBalance: opening,
+        cashIn: chIn,
+        cashOut: chOut,
+        closingBalance: closing,
+        nextDayOpeningBalance: nextOpening
+      };
+    });
+
+    const nextDayOpeningBalances: Record<string, number> = {};
+    channelSummaries.forEach(cs => {
+      nextDayOpeningBalances[cs.method] = cs.nextDayOpeningBalance;
+    });
+    const totalNextDayOpening = roundMoney(
+      channelSummaries.reduce((s, cs) => s + cs.nextDayOpeningBalance, 0)
+    );
 
     return {
       salesCount: daySalesInvoices.length,
+      purchasesCount: dayPurchaseInvoices.length,
       salesTotal,
       returnsTotal,
       netSales,
@@ -144,6 +305,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       profitMargin,
       totalCashIn,
       totalCashOut,
+      drawerIn,
+      drawerOut,
       salesCashIn,
       vouchersCashIn,
       dayRevenues,
@@ -151,12 +314,33 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       vouchersCashOut,
       dayExpenses,
       expectedCash,
-      diff
+      effectiveActualCash,
+      diff,
+      channelSummaries,
+      nextDayOpeningBalances,
+      totalNextDayOpening
     };
-  }, [db, selectedDate, startingCash, actualCash, targetBranchId]);
+  }, [db, fifoLedger, selectedDate, startingCash, actualCash, actualCashEdited, targetBranchId, treasuryMethods, priorChannelBookBalances]);
+
+  // Keep actualCash synced to expectedCash until cashier enters a manual drawer count
+  React.useEffect(() => {
+    if (!actualCashEdited) {
+      setActualCash(liveStats.expectedCash);
+    }
+  }, [liveStats.expectedCash, actualCashEdited]);
 
   // Convert a daily closing object into a MovementPrintBlock
   const buildClosingPrintBlock = (c: DailyClosing): MovementPrintBlock => {
+    const channelRows = (c.channelSummaries || []).map(cs => ({
+      cols: [
+        `الرصيد الافتتاحي لليوم التالي — ${cs.method}`,
+        `${formatCleanNumber(cs.nextDayOpeningBalance)} ${db.settings.currency}`,
+        `افتتاحي اليوم: ${formatCleanNumber(cs.openingBalance)} | وارد: +${formatCleanNumber(cs.cashIn)} | صادر: -${formatCleanNumber(cs.cashOut)}`
+      ],
+      isBold: true,
+      highlight: true
+    }));
+
     return {
       title: `تقفيل يومية (${c.shiftNumber})`,
       serialNo: `#${c.id.slice(-6).toUpperCase()}`,
@@ -165,60 +349,65 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       partyLabel: 'المسؤول',
       partyName: c.closedBy || c.openedBy || 'مدير النظام',
       partySubId: `الفرع: ${c.branchName || 'الرئيسي'}`,
-      statement: c.notes || 'تقرير إقفال حسابات الخزينة ومطابقة النقدية مع المبيعات والمصروفات',
+      statement: c.notes || 'تقرير إقفال حسابات الخزينة ومطابقة النقدية والأرصدة الافتتاحية لليوم التالي',
       badge: c.status || 'معتمد ومغلق',
       typeTitle: 'تقرير تقفيل وردية / يومية',
       tableHeaders: [
-        { label: 'البند / البيان المحاسبي', width: '45%', align: 'right' },
-        { label: 'القيمة المحاسبية', width: '25%', align: 'center' },
-        { label: 'ملاحظات وتفاصيل', width: '30%', align: 'right' }
+        { label: 'البند / البيان المحاسبي', width: '42%', align: 'right' },
+        { label: 'القيمة المحاسبية', width: '24%', align: 'center' },
+        { label: 'ملاحظات وتفاصيل', width: '34%', align: 'right' }
       ],
       tableRows: [
-        { cols: ['رصيد البداية (الافتتاحي)', `${formatCleanNumber(c.startingCash)} ${db.settings.currency}`, 'الرصيد المبدئي بالدرج'], isBold: true },
-        { cols: ['إجمالي ما دخل الخزينة (مقبوضات)', `${formatCleanNumber(c.cashIn)} ${db.settings.currency}`, 'مبيعات نقدية، سندات قبض، إيرادات'], isBold: true },
-        { cols: ['إجمالي ما خرج من الخزينة (مدفوعات)', `${formatCleanNumber(c.cashOut)} ${db.settings.currency}`, 'مشتريات نقدية، سندات صرف، مصروفات'], isBold: true },
+        { cols: ['رصيد بداية الدرج (نقدي)', `${formatCleanNumber(c.startingCash)} ${db.settings.currency}`, 'الرصيد الافتتاحي بالدرج'], isBold: true },
+        { cols: ['إجمالي الوارد لكل الخزائن', `${formatCleanNumber(c.cashIn)} ${db.settings.currency}`, 'مبيعات، سندات قبض، إيرادات'], isBold: true },
+        { cols: ['إجمالي الصادر من كل الخزائن', `${formatCleanNumber(c.cashOut)} ${db.settings.currency}`, 'مشتريات، سندات صرف، مصروفات'], isBold: true },
         { cols: ['إجمالي المبيعات للوردية', `${formatCleanNumber(c.salesTotal)} ${db.settings.currency}`, 'قيمة الفواتير المصدرة'] },
         { cols: ['إجمالي المرتجعات', `${formatCleanNumber(c.returnsTotal)} ${db.settings.currency}`, 'مرتجعات المبيعات'] },
         { cols: ['صافي المبيعات', `${formatCleanNumber(c.netSales)} ${db.settings.currency}`, 'المبيعات - المرتجعات'] },
-        { cols: ['تكلفة البضاعة المباعة (COGS)', `${formatCleanNumber(c.cogs)} ${db.settings.currency}`, 'تكلفة شراء الأصناف المباعة'] },
-        { cols: ['مجمل أرباح الوردية', `${formatCleanNumber(c.grossProfit)} ${db.settings.currency}`, 'صافي المبيعات - تكلفة البضاعة'], isBold: true, highlight: true },
+        { cols: ['تكلفة البضاعة المباعة (FIFO)', `${formatCleanNumber(c.cogs)} ${db.settings.currency}`, 'تكلفة الدفعات الفعلية'], },
+        { cols: ['مجمل أرباح الوردية', `${formatCleanNumber(c.grossProfit)} ${db.settings.currency}`, 'وفق دفعات FIFO الموثقة'], isBold: true, highlight: true },
         { cols: ['نسبة الأرباح للوردية %', `${c.profitMargin.toFixed(1)}%`, 'هامش الربح المحقق'], isBold: true, highlight: true },
-        { cols: ['النقد الفعلي المسلّم بالدرج', `${formatCleanNumber(c.actualCash)} ${db.settings.currency}`, 'الجرد اليدوي للدرج'] },
-        { cols: ['النقد المتوقع حسب النظام', `${formatCleanNumber(c.expectedCash)} ${db.settings.currency}`, 'رصيد البداية + الداخل - الخارج'] },
-        { cols: ['العجز / الفائض', `${formatCleanNumber(c.difference)} ${db.settings.currency}`, c.difference === 0 ? 'مطابق تماماً' : c.difference > 0 ? 'فائض بالدرج' : 'عجز بالدرج'], isBold: true }
+        { cols: ['النقد الفعلي بالدرج (نقدي)', `${formatCleanNumber(c.actualCash)} ${db.settings.currency}`, 'الجرد الفعلي للدرج'] },
+        { cols: ['النقد المتوقع بالدرج (نقدي)', `${formatCleanNumber(c.expectedCash)} ${db.settings.currency}`, 'بداية الدرج + وارد الكاش - صادر الكاش'] },
+        { cols: ['العجز / الفائض بالدرج', `${formatCleanNumber(c.difference)} ${db.settings.currency}`, c.difference === 0 ? 'مطابق تماماً' : c.difference > 0 ? 'فائض بالدرج' : 'عجز بالدرج'], isBold: true },
+        ...channelRows
       ],
       summaryLines: [
-        { label: 'إجمالي دخل الخزينة', value: `${formatCleanNumber(c.cashIn)} ${db.settings.currency}` },
-        { label: 'إجمالي خرج الخزينة', value: `${formatCleanNumber(c.cashOut)} ${db.settings.currency}` },
+        { label: 'إجمالي دخل الخزائن', value: `${formatCleanNumber(c.cashIn)} ${db.settings.currency}` },
+        { label: 'إجمالي خرج الخزائن', value: `${formatCleanNumber(c.cashOut)} ${db.settings.currency}` },
         { label: 'مجمل الربح المحقق', value: `${formatCleanNumber(c.grossProfit)} ${db.settings.currency}`, isTotal: true },
-        { label: 'نسبة أرباح الوردية', value: `${c.profitMargin.toFixed(1)}%`, highlight: true }
+        ...(c.channelSummaries || []).map(cs => ({
+          label: `افتتاحي ${c.nextDayDate || 'اليوم التالي'} (${cs.method})`,
+          value: `${formatCleanNumber(cs.nextDayOpeningBalance)} ${db.settings.currency}`,
+          highlight: true
+        }))
       ],
-      footerNotes: c.notes || 'تم اعتماد تقفيل الوردية ومطابقة النقدية مع الحسابات بنجاح.',
+      footerNotes: c.notes || 'تم اعتماد تقفيل الوردية وترحيل الأرصدة الافتتاحية لليوم التالي لجميع وسائل الخزينة.',
       createdBy: c.closedBy || c.openedBy
     };
   };
 
-  // Save current shift closing
+  // Save current shift closing with full next-day opening balances for all payment methods
   const handleSaveClosing = () => {
     runWithLock(() => {
       const cleanStarting = roundMoney(startingCash);
-      const cleanActual = roundMoney(actualCash);
-      if (!isFiniteNonNegative(cleanStarting) || !isFiniteNonNegative(cleanActual)) {
-        alert('رصيد البداية والنقد الفعلي يجب أن يكونا قيماً غير سالبة.');
+      const cleanActual = roundMoney(liveStats.effectiveActualCash);
+      if (cleanActual < 0) {
+        alert('النقد الفعلي يجب أن يكون قيمة غير سالبة.');
         return;
       }
       if (!shiftName.trim()) {
         alert('يرجى كتابة اسم أو رقم الوردية.');
         return;
       }
-      if (!confirm(`هل أنت متأكد من حفظ واعتماد تقفيل "${shiftName}" لتاريخ ${selectedDate}؟`)) {
+      if (!confirm(`هل أنت متأكد من حفظ واعتماد تقفيل "${shiftName}" لتاريخ ${selectedDate} وترحيل الرصيد الافتتاحي لليوم التالي (${nextDayDate})؟`)) {
         return;
       }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       if (!updated.dailyClosings) updated.dailyClosings = [];
 
-      const expected = roundMoney(cleanStarting + liveStats.totalCashIn - liveStats.totalCashOut);
+      const expected = roundMoney(liveStats.expectedCash);
       const diff = roundMoney(cleanActual - expected);
 
       const newClosing: DailyClosing = {
@@ -244,15 +433,21 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         notes: shiftNotes,
         branchId: targetBranchId,
         branchName: currentBranch.name,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        nextDayDate,
+        channelSummaries: liveStats.channelSummaries,
+        nextDayOpeningBalances: liveStats.nextDayOpeningBalances
       };
 
       updated.dailyClosings.unshift(newClosing);
-      logAudit(updated, 'تقفيل يومية ووردية', `تم تقفيل ${shiftName} لفرع ${currentBranch.name} بتاريخ ${selectedDate} بنسبة أرباح ${liveStats.profitMargin.toFixed(1)}%`);
+      logAudit(
+        updated,
+        'تقفيل يومية ووردية',
+        `تم تقفيل ${shiftName} لفرع ${currentBranch.name} بتاريخ ${selectedDate} وترحيل الأرصدة الافتتاحية ليوم ${nextDayDate}`
+      );
 
       onUpdateDb(updated);
-      alert('تم حفظ تقفيل الوردية بنجاح!');
-      setActiveTab('history');
+      setJustClosedRecord(newClosing);
     });
   };
 
@@ -438,6 +633,70 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
       {activeTab === 'current' ? (
         <div className="space-y-4">
+          {/* Post-Closing Confirmation Banner with Next-Day Opening Balances for ALL Channels */}
+          {justClosedRecord && (
+            <div className="bg-emerald-950 text-white rounded-xl p-4 border-2 border-emerald-400 shadow-lg space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-emerald-800 pb-2.5">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                  <div>
+                    <h3 className="text-sm font-black text-white">
+                      ✓ تم اعتماد وتقفيل "{justClosedRecord.shiftNumber}" بنجاح
+                    </h3>
+                    <p className="text-[11px] text-emerald-200">
+                      الأرصدة الافتتاحية المرحلة لليوم التالي ({justClosedRecord.nextDayDate || nextDayDate}) في جميع وسائل الخزينة:
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handlePrintSingle(justClosedRecord)}
+                    className="px-3 py-1.5 bg-white text-emerald-950 hover:bg-emerald-100 rounded-lg text-xs font-black flex items-center gap-1 cursor-pointer"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>طباعة التقفيل</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('history')}
+                    className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-bold cursor-pointer"
+                  >
+                    سجل التقفيلات
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setJustClosedRecord(null)}
+                    className="p-1 text-emerald-300 hover:text-white cursor-pointer"
+                    title="إغلاق الإشعار"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 text-center">
+                {(justClosedRecord.channelSummaries || []).map(cs => (
+                  <div key={cs.method} className="bg-emerald-900/70 border border-emerald-500/40 rounded-lg p-2">
+                    <span className="text-[10px] text-emerald-200 font-bold block truncate">{cs.method}</span>
+                    <span className="text-xs sm:text-sm font-black font-mono text-white block mt-0.5">
+                      {formatMoney(cs.nextDayOpeningBalance, db.settings.currency)}
+                    </span>
+                  </div>
+                ))}
+                <div className="bg-emerald-500 text-emerald-950 rounded-lg p-2 font-black">
+                  <span className="text-[10px] block">إجمالي الخزينة</span>
+                  <span className="text-xs sm:text-sm font-mono block mt-0.5">
+                    {formatMoney(
+                      (justClosedRecord.channelSummaries || []).reduce((s, c) => s + c.nextDayOpeningBalance, 0),
+                      db.settings.currency
+                    )}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Shift Configuration Bar */}
           <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
@@ -447,7 +706,10 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
               <input
                 type="date"
                 value={selectedDate}
-                onChange={e => setSelectedDate(e.target.value)}
+                onChange={e => {
+                  setSelectedDate(e.target.value);
+                  setJustClosedRecord(null);
+                }}
                 className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-50 border border-slate-300 rounded-lg outline-none focus:border-blue-600"
               />
             </div>
@@ -466,28 +728,53 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
             </div>
 
             <div>
-              <label className="text-[11px] font-bold text-slate-600 block mb-1">
-                رصيد البداية بالدرج ({db.settings.currency})
+              <label className="text-[11px] font-bold text-slate-600 flex items-center justify-between mb-1">
+                <span>رصيد بداية الدرج (نقدي)</span>
+                {startingCashEdited && (
+                  <button
+                    type="button"
+                    onClick={() => setStartingCashEdited(false)}
+                    className="text-[10px] text-blue-600 hover:underline font-bold cursor-pointer"
+                  >
+                    تلقائي
+                  </button>
+                )}
               </label>
               <input
                 type="number"
-                min="0"
-                value={startingCash || ''}
-                onChange={e => setStartingCash(Number(e.target.value) || 0)}
+                value={startingCash}
+                onChange={e => {
+                  setStartingCashEdited(true);
+                  setStartingCash(Number(e.target.value) || 0);
+                }}
                 placeholder="0"
                 className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-50 border border-slate-300 rounded-lg outline-none focus:border-blue-600"
               />
             </div>
 
             <div>
-              <label className="text-[11px] font-bold text-slate-600 block mb-1">
-                النقد الفعلي بالدرج ({db.settings.currency})
+              <label className="text-[11px] font-bold text-slate-600 flex items-center justify-between mb-1">
+                <span>النقد الفعلي بالدرج (نقدي)</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActualCashEdited(false);
+                    setActualCash(liveStats.expectedCash);
+                  }}
+                  className="text-[10px] text-emerald-700 hover:underline font-bold cursor-pointer"
+                  title="مطابقة الجرد الفعلي مع الرصيد المتوقع بالنظام"
+                >
+                  مطابقة بالمتوقع
+                </button>
               </label>
               <input
                 type="number"
                 min="0"
-                value={actualCash || ''}
-                onChange={e => setActualCash(Number(e.target.value) || 0)}
+                value={actualCash}
+                onChange={e => {
+                  setActualCashEdited(true);
+                  setActualCash(Number(e.target.value) || 0);
+                }}
                 placeholder="0"
                 className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-50 border border-emerald-400 rounded-lg outline-none focus:border-emerald-600"
               />
@@ -598,19 +885,19 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
                 <div className="space-y-2 bg-slate-50 p-3 rounded-lg border border-slate-200">
                   <div className="font-bold text-slate-900 border-b border-slate-200 pb-1">
-                    مطابقة الخزينة والنقد الفعلي
+                    مطابقة درج النقدية (الكاش فقط)
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-600">رصيد الافتتاح (البداية):</span>
                     <strong className="font-mono">{formatMoney(startingCash, db.settings.currency)}</strong>
                   </div>
                   <div className="flex justify-between text-emerald-700">
-                    <span>(+) المقبوضات النقدية:</span>
-                    <strong className="font-mono">{formatMoney(liveStats.totalCashIn, db.settings.currency)}</strong>
+                    <span>(+) وارد الكاش للدرج:</span>
+                    <strong className="font-mono">{formatMoney(liveStats.drawerIn, db.settings.currency)}</strong>
                   </div>
                   <div className="flex justify-between text-rose-700">
-                    <span>(-) المدفوعات والمصروفات:</span>
-                    <strong className="font-mono">{formatMoney(liveStats.totalCashOut, db.settings.currency)}</strong>
+                    <span>(-) صادر الكاش من الدرج:</span>
+                    <strong className="font-mono">{formatMoney(liveStats.drawerOut, db.settings.currency)}</strong>
                   </div>
                   <div className="flex justify-between font-bold border-t border-slate-200 pt-1">
                     <span className="text-slate-800">النقد المتوقع بالدرج:</span>
@@ -618,7 +905,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                   </div>
                   <div className="flex justify-between font-bold text-slate-950">
                     <span>النقد الفعلي المسجل بالدرج:</span>
-                    <strong className="font-mono">{formatMoney(actualCash, db.settings.currency)}</strong>
+                    <strong className="font-mono">{formatMoney(liveStats.effectiveActualCash, db.settings.currency)}</strong>
                   </div>
                   <div className={`flex justify-between font-black border-t border-slate-200 pt-1.5 ${
                     liveStats.diff === 0 ? 'text-emerald-700' : liveStats.diff > 0 ? 'text-blue-700' : 'text-rose-700'
@@ -628,6 +915,58 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                       {liveStats.diff === 0 ? 'مطابق تماماً' : formatMoney(liveStats.diff, db.settings.currency)}
                     </span>
                   </div>
+                </div>
+              </div>
+
+              {/* Next-Day Opening Balances Across ALL Treasury Channels */}
+              <div className="bg-slate-900 text-white rounded-xl p-3.5 border border-slate-700 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 pb-2">
+                  <div className="flex items-center gap-2">
+                    <Wallet className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div>
+                      <h4 className="text-xs font-black text-white">
+                        الرصيد الافتتاحي لليوم التالي ({nextDayDate}) في جميع وسائل الخزينة
+                      </h4>
+                      <p className="text-[10px] text-slate-300">
+                        يُرحّل تلقائياً كرصيد افتتاحي لكل قناة دفع في خزينة الفرع عند إغلاق اليومية
+                      </p>
+                    </div>
+                  </div>
+                  <div className="bg-emerald-500/20 border border-emerald-400/50 px-2.5 py-1 rounded-lg text-left">
+                    <span className="text-[9.5px] text-emerald-200 block">إجمالي الافتتاحي لليوم التالي</span>
+                    <span className="text-xs font-black font-mono text-emerald-300">
+                      {formatMoney(liveStats.totalNextDayOpening, db.settings.currency)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-center text-[11px] border-collapse">
+                    <thead>
+                      <tr className="bg-slate-800 text-slate-300 font-bold border-b border-slate-700">
+                        <th className="py-1.5 px-2 text-right">وسيلة الدفع / الخزينة</th>
+                        <th className="py-1.5 px-2">افتتاحي اليوم</th>
+                        <th className="py-1.5 px-2 text-emerald-300">الوارد (+)</th>
+                        <th className="py-1.5 px-2 text-rose-300">الصادر (-)</th>
+                        <th className="py-1.5 px-2 text-amber-300 font-black">الرصيد الافتتاحي لليوم التالي</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800 font-mono">
+                      {liveStats.channelSummaries.map(cs => (
+                        <tr key={cs.method} className="hover:bg-slate-800/60">
+                          <td className="py-1.5 px-2 text-right font-sans font-bold text-white">{cs.method}</td>
+                          <td className="py-1.5 px-2 text-slate-300">{formatCleanNumber(cs.openingBalance)}</td>
+                          <td className="py-1.5 px-2 text-emerald-400">+{formatCleanNumber(cs.cashIn)}</td>
+                          <td className="py-1.5 px-2 text-rose-400">-{formatCleanNumber(cs.cashOut)}</td>
+                          <td className="py-1.5 px-2">
+                            <span className="inline-block bg-emerald-600/30 border border-emerald-400/50 text-emerald-200 font-black px-2 py-0.5 rounded">
+                              {formatMoney(cs.nextDayOpeningBalance, db.settings.currency)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
 
@@ -666,12 +1005,17 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                       cogs: liveStats.cogs,
                       grossProfit: liveStats.grossProfit,
                       profitMargin: liveStats.profitMargin,
-                      actualCash,
+                      actualCash: liveStats.effectiveActualCash,
                       expectedCash: liveStats.expectedCash,
                       difference: liveStats.diff,
                       status: 'مفتوح',
                       notes: shiftNotes,
-                      createdAt: new Date().toISOString()
+                      createdAt: new Date().toISOString(),
+                      branchId: targetBranchId,
+                      branchName: currentBranch.name,
+                      nextDayDate,
+                      channelSummaries: liveStats.channelSummaries,
+                      nextDayOpeningBalances: liveStats.nextDayOpeningBalances
                     });
                     setPrintDocuments([block]);
                     setPrintDocTitle(`معاينة_تقفيل_${shiftName}`);
@@ -794,6 +1138,22 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                         {c.difference === 0 ? 'مطابق' : formatMoney(c.difference, db.settings.currency)}
                       </strong>
                     </div>
+
+                    {c.channelSummaries && c.channelSummaries.length > 0 && (
+                      <div className="bg-slate-900 text-white p-2 rounded-lg space-y-1 text-[10px]">
+                        <div className="font-bold text-emerald-300 border-b border-slate-700 pb-0.5">
+                          الافتتاحي لليوم التالي ({c.nextDayDate || addOneDay(c.date)}):
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono">
+                          {c.channelSummaries.map(cs => (
+                            <div key={cs.method} className="flex justify-between items-center">
+                              <span className="font-sans text-slate-300 truncate">{cs.method}:</span>
+                              <span className="font-bold text-emerald-200">{formatCleanNumber(cs.nextDayOpeningBalance)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     {c.notes && (
                       <div className="text-[10px] text-slate-500 bg-slate-50 p-1.5 rounded truncate">

@@ -387,6 +387,15 @@ export interface FiscalPeriod {
   retainedEarningsAccountId?: string;
 }
 
+export interface DailyClosingChannelSummary {
+  method: PaymentMethod;
+  openingBalance: number;
+  cashIn: number;
+  cashOut: number;
+  closingBalance: number;
+  nextDayOpeningBalance: number;
+}
+
 export interface DailyClosing {
   id: string;
   shiftNumber: string;
@@ -411,6 +420,9 @@ export interface DailyClosing {
   createdAt: string;
   branchId?: string;
   branchName?: string;
+  nextDayDate?: string;
+  channelSummaries?: DailyClosingChannelSummary[];
+  nextDayOpeningBalances?: Record<string, number>;
 }
 
 export interface CostCenter {

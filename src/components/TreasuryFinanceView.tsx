@@ -900,20 +900,78 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           {/* Branch Isolation Filter Bar */}
           {renderBranchFilterBar('حركات وخزينة الفرع')}
 
-          {/* Cards for each method */}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            {PAYMENT_METHODS.filter(m => m !== 'آجل').map(m => {
-              const bal = calculateTreasuryBalance(db, m, branchFilter === 'current' ? targetBranchId : undefined);
-              return (
-                <div key={m} className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
-                  <span className="text-xs font-bold text-slate-600 block mb-1">{m}</span>
-                  <span className="text-base sm:text-lg font-black font-mono text-slate-950">
-                    {formatMoney(bal, db.settings.currency)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
+          {/* Cards for each method (with carried-over Next-Day Opening Balance from Daily Closing) */}
+          {(() => {
+            const cashMethods = PAYMENT_METHODS.filter(m => m !== 'آجل');
+            const sortByDateDesc = (a: { date: string; createdAt?: string }, b: { date: string; createdAt?: string }) =>
+              a.date === b.date ? (b.createdAt || '').localeCompare(a.createdAt || '') : b.date.localeCompare(a.date);
+
+            const getNextDayForMethod = (method: PaymentMethod): { value: number; nextDate: string; closingDate: string } | null => {
+              if (branchFilter === 'current') {
+                const latest = (db.dailyClosings || [])
+                  .filter(c => isBranchMatch(c.branchId, targetBranchId) && c.nextDayOpeningBalances && c.nextDayOpeningBalances[method] !== undefined)
+                  .sort(sortByDateDesc)[0];
+                if (!latest) return null;
+                const dt = new Date(`${latest.date}T12:00:00`);
+                if (!isNaN(dt.getTime())) dt.setDate(dt.getDate() + 1);
+                return {
+                  value: Number(latest.nextDayOpeningBalances![method]) || 0,
+                  nextDate: latest.nextDayDate || (!isNaN(dt.getTime()) ? dt.toISOString().slice(0, 10) : ''),
+                  closingDate: latest.date
+                };
+              } else {
+                let sum = 0;
+                let hasAny = false;
+                let latestNextDate = '';
+                let latestClosingDate = '';
+                branches.forEach(b => {
+                  const latest = (db.dailyClosings || [])
+                    .filter(c => isBranchMatch(c.branchId, b.id) && c.nextDayOpeningBalances && c.nextDayOpeningBalances[method] !== undefined)
+                    .sort(sortByDateDesc)[0];
+                  if (latest) {
+                    hasAny = true;
+                    sum += Number(latest.nextDayOpeningBalances![method]) || 0;
+                    if (!latestClosingDate || latest.date > latestClosingDate) {
+                      latestClosingDate = latest.date;
+                      const dt = new Date(`${latest.date}T12:00:00`);
+                      if (!isNaN(dt.getTime())) dt.setDate(dt.getDate() + 1);
+                      latestNextDate = latest.nextDayDate || (!isNaN(dt.getTime()) ? dt.toISOString().slice(0, 10) : '');
+                    }
+                  }
+                });
+                return hasAny ? { value: roundMoney(sum), nextDate: latestNextDate, closingDate: latestClosingDate } : null;
+              }
+            };
+
+            return (
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                {cashMethods.map(m => {
+                  const bal = calculateTreasuryBalance(db, m, branchFilter === 'current' ? targetBranchId : undefined);
+                  const nextOpening = getNextDayForMethod(m);
+                  return (
+                    <div key={m} className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between gap-2">
+                      <div>
+                        <span className="text-xs font-bold text-slate-600 block mb-1">{m}</span>
+                        <span className="text-base sm:text-lg font-black font-mono text-slate-950">
+                          {formatMoney(bal, db.settings.currency)}
+                        </span>
+                      </div>
+                      {nextOpening && (
+                        <div className="pt-1.5 border-t border-slate-100 text-[10px]">
+                          <span className="text-emerald-700 font-bold block">
+                            الافتتاحي لليوم التالي ({nextOpening.nextDate}):
+                          </span>
+                          <span className="font-mono font-black text-emerald-900 text-xs">
+                            {formatMoney(nextOpening.value, db.settings.currency)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
 
           {/* Treasury Log (Responsive Card System) */}
           <div className="space-y-3">

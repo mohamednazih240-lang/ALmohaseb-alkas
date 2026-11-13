@@ -2613,49 +2613,72 @@ export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
   const branchExpenses = db.expenses.filter(e => isTargetBranch(e.branchId));
   const branchRevenues = db.revenues.filter(r => isTargetBranch(r.branchId));
 
+  const salesInvoices = branchInvoices.filter(
+    i => (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') && i.invoiceKind !== 'quote' && i.invoiceKind !== 'sale_return'
+  );
+
   const totalSalesAll = roundMoney(
-    branchInvoices
-      .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote')
-      .reduce((acc, i) => acc + (Number(i.total) || 0), 0)
+    salesInvoices.reduce((acc, i) => acc + (Number(i.total) || 0), 0)
   );
 
   const salesToday = roundMoney(
-    branchInvoices
-      .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote' && i.date === today)
+    salesInvoices
+      .filter(i => i.date === today)
       .reduce((acc, i) => acc + (Number(i.total) || 0), 0)
   );
 
   const totalPurchasesAll = roundMoney(
     branchInvoices
-      .filter(i => i.type === 'purchase')
+      .filter(i => i.type === 'purchase' && i.invoiceKind !== 'purchase_return')
       .reduce((acc, i) => acc + (Number(i.total) || 0), 0)
   );
 
   const purchasesToday = roundMoney(
     branchInvoices
-      .filter(i => i.type === 'purchase' && i.date === today)
+      .filter(i => i.type === 'purchase' && i.invoiceKind !== 'purchase_return' && i.date === today)
       .reduce((acc, i) => acc + (Number(i.total) || 0), 0)
   );
 
-  const totalCOGS = roundMoney(
-    branchInvoices
-      .filter(i => i.type === 'sale' && i.invoiceKind !== 'quote' && i.invoiceKind !== 'sale_return')
-      .reduce((acc, i) => {
-        const invoiceCogs = i.items.reduce((s, it, idx) => {
-          const alloc = fifoLedger.getSaleAllocation(i.id, it.productId, it.productName, idx);
-          if (alloc && alloc.hasVerifiedCost) {
-            return s + alloc.verifiedCostTotal;
-          }
-          return s;
-        }, 0);
-        return acc + invoiceCogs;
-      }, 0)
-  );
+  let rawVerifiedSalesRev = 0;
+  let rawTotalCogs = 0;
+
+  salesInvoices.forEach(i => {
+    let invVerifiedRev = 0;
+    let invCogs = 0;
+    let invLinesSum = 0;
+    let hasAnyVerifiedCost = false;
+    let hasUndefinedCost = false;
+
+    i.items.forEach((it, idx) => {
+      const q = Number(it.qty) || 0;
+      const lineTotal = Number(it.total) || q * (Number(it.unitPrice) || 0);
+      invLinesSum += lineTotal;
+      const alloc = fifoLedger.getSaleAllocation(i.id, it.productId, it.productName, idx);
+      if (alloc && alloc.hasVerifiedCost) {
+        hasAnyVerifiedCost = true;
+        invCogs += alloc.verifiedCostTotal;
+        const coveredRatio = q > 0 ? Math.min(1, alloc.coveredQty / q) : 0;
+        invVerifiedRev += lineTotal * coveredRatio;
+        if (!alloc.hasFullVerifiedCost) hasUndefinedCost = true;
+      } else {
+        hasUndefinedCost = true;
+      }
+    });
+
+    if (hasAnyVerifiedCost) {
+      const invNetAdjustment = (Number(i.total) || 0) - invLinesSum;
+      const effectiveInvRev = hasUndefinedCost ? (invVerifiedRev + invNetAdjustment) : (Number(i.total) || 0);
+      rawVerifiedSalesRev += effectiveInvRev;
+      rawTotalCogs += invCogs;
+    }
+  });
+
+  const totalCOGS = roundMoney(rawTotalCogs);
 
   const totalExpenses = roundMoney(branchExpenses.reduce((acc, e) => acc + (Number(e.amount) || 0), 0));
   const totalOtherRevenues = roundMoney(branchRevenues.reduce((acc, r) => acc + (Number(r.amount) || 0), 0));
 
-  const grossProfit = roundMoney(totalSalesAll - totalCOGS);
+  const grossProfit = roundMoney(rawVerifiedSalesRev - rawTotalCogs);
   const netProfit = roundMoney(grossProfit + totalOtherRevenues - totalExpenses);
 
   const totalCustomerReceivables = db.customers.reduce((acc, c) => acc + Math.max(0, calculateCustomerBalance(db, c.id, branchId)), 0);
