@@ -442,6 +442,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const rapidDiscRef = useRef<HTMLInputElement>(null);
   const rapidTaxRef = useRef<HTMLInputElement>(null);
   const rapidTotalRef = useRef<HTMLInputElement>(null);
+  const suppressRapidFocusRef = useRef<boolean>(false);
 
   useEffect(() => {
     if (showItemCardModal) {
@@ -885,13 +886,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
 
   const applyRapidMatchedProduct = (matched: Product) => {
-    setRapidItemName(matched.name);
+    suppressRapidFocusRef.current = true;
     setShowRapidDropdown(false);
+    setRapidItemName(matched.name);
     const pPrice = resolveAutoUnitPrice(matched);
+    const qtyNum = parseNum(rapidItemQty) > 0 ? parseNum(rapidItemQty) : 1;
+    if (!rapidItemQty || parseNum(rapidItemQty) <= 0) {
+      setRapidItemQty(String(qtyNum));
+    }
 
     // Pre-fill and keep fixed on the resolved price (last purchase price in purchase/buy modes) until user modifies it
     setRapidItemPrice(pPrice > 0 ? String(pPrice) : '');
-    const qtyNum = parseNum(rapidItemQty) || 1;
     const baseTotal = qtyNum * pPrice;
     const rawDisc = parseNum(rapidItemDiscount);
     const discVal = rapidItemDiscountType === 'percent' ? (baseTotal * rawDisc / 100) : rawDisc;
@@ -899,6 +904,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const taxVal = rapidItemTaxType === 'percent' ? (baseTotal * rawTax / 100) : rawTax;
     const tot = Math.max(0, baseTotal - discVal + taxVal);
     setRapidItemTotal(tot > 0 ? tot.toFixed(2) : '');
+
+    setTimeout(() => {
+      setShowRapidDropdown(false);
+      rapidQtyRef.current?.focus();
+      setTimeout(() => {
+        suppressRapidFocusRef.current = false;
+      }, 250);
+    }, 10);
   };
 
   const onRapidItemNameChange = (val: string) => {
@@ -971,7 +984,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             buyPrice: 0,
             sellPrice: 0,
             wholesalePrice: 0,
-            minStock: 5,
+            minStock: 1,
             currentQty: 0,
             branchesData: {
               [invoiceBranchId]: {
@@ -979,7 +992,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 buyPrice: 0,
                 sellPrice: 0,
                 wholesalePrice: 0,
-                minStock: 5
+                minStock: 1
               }
             }
           };
@@ -1342,7 +1355,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         buyPrice: 0,
         sellPrice: 0,
         wholesalePrice: 0,
-        minStock: 5,
+        minStock: 1,
         currentQty: initialQty,
         branchesData: {
           [invoiceBranchId]: {
@@ -1350,7 +1363,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             buyPrice: 0,
             sellPrice: 0,
             wholesalePrice: 0,
-            minStock: 5
+            minStock: 1
           }
         }
       };
@@ -1562,7 +1575,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         buyPrice: invoiceBranchId === 'br_main' ? buy : 0,
         sellPrice: invoiceBranchId === 'br_main' ? cash : 0,
         wholesalePrice: invoiceBranchId === 'br_main' ? wholesale : 0,
-        minStock: 5,
+        minStock: 1,
         currentQty: invoiceBranchId === 'br_main' ? stock : 0,
         branchesData: {
           [invoiceBranchId]: {
@@ -1570,7 +1583,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             buyPrice: buy,
             sellPrice: cash,
             wholesalePrice: wholesale,
-            minStock: 5
+            minStock: 1
           }
         }
       };
@@ -2076,7 +2089,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           buyPrice: unitBuy,
           sellPrice: 0,
           wholesalePrice: 0,
-          minStock: 5,
+          minStock: 1,
           currentQty: 0,
           branchesData: {
             [invoiceBranchId]: {
@@ -2084,7 +2097,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               buyPrice: unitBuy,
               sellPrice: 0,
               wholesalePrice: 0,
-              minStock: 5
+              minStock: 1
             }
           }
         };
@@ -3131,6 +3144,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 placeholder="بحث ديناميكي لإضافة صنف فوراً بالاسم أو الكود (أكثر من 1000 صنف)..."
                 value={inlineProductSearch}
                 onFocus={() => setShowInlineDropdown(true)}
+                onBlur={() => setTimeout(() => setShowInlineDropdown(false), 180)}
                 onChange={e => {
                   setInlineProductSearch(e.target.value);
                   setShowInlineDropdown(true);
@@ -4733,7 +4747,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         >
           <div
             className="bg-[#151e32] border border-[#273754] text-[#f8fafc] rounded-xl w-full max-w-[430px] shadow-2xl overflow-hidden flex flex-col"
-            onClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (showRapidDropdown) setShowRapidDropdown(false);
+            }}
           >
             {/* Modal Header */}
             <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-[#273754] bg-[#0b1120]/70">
@@ -4789,7 +4806,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   .slice(0, 25);
 
                 return (
-                  <div className="flex flex-col gap-1.5 relative">
+                  <div className="flex flex-col gap-1.5 relative" onClick={e => e.stopPropagation()}>
                     <label className="text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between">
                       <span>اسم الصنف (يبحث بدليل الأصناف أو يثبت صنفاً جديداً) *</span>
                     </label>
@@ -4799,14 +4816,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         type="text"
                         value={rapidItemName}
                         placeholder="ابحث باسم الصنف أو الكود..."
-                        onFocus={() => setShowRapidDropdown(true)}
-                        onBlur={() => setTimeout(() => setShowRapidDropdown(false), 120)}
+                        onFocus={() => {
+                          if (!suppressRapidFocusRef.current) setShowRapidDropdown(true);
+                        }}
+                        onBlur={() => setTimeout(() => setShowRapidDropdown(false), 180)}
                         onChange={e => onRapidItemNameChange(e.target.value)}
                         onKeyDown={e => {
                           if (e.key === 'Enter' && showRapidDropdown && !rapidMatchedProduct && rapidCandidates.length > 0) {
                             e.preventDefault();
                             applyRapidMatchedProduct(rapidCandidates[0]);
-                            rapidDescRef.current?.focus();
                             return;
                           }
                           if (e.key === 'Enter') setShowRapidDropdown(false);
@@ -4857,6 +4875,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                                 type="button"
                                 onMouseDown={e => {
                                   e.preventDefault();
+                                }}
+                                onClick={e => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
                                   applyRapidMatchedProduct(cand);
                                 }}
                                 className="w-full text-right px-2.5 py-2 hover:bg-blue-900/40 flex items-center justify-between gap-2 transition-colors cursor-pointer"

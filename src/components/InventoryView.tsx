@@ -205,11 +205,19 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       if (sortBy === 'code_asc') return a.code.localeCompare(b.code);
       if (sortBy === 'qty_desc') return b.currentQty - a.currentQty;
       if (sortBy === 'qty_asc') return a.currentQty - b.currentQty;
-      if (sortBy === 'price_desc') return b.sellPrice - a.sellPrice;
-      if (sortBy === 'price_asc') return a.sellPrice - b.sellPrice;
+      if (sortBy === 'price_desc') {
+        const ca = fifoLedger.getProductSummary(a.id, a.name).latestBuyPrice || a.buyPrice || 0;
+        const cb = fifoLedger.getProductSummary(b.id, b.name).latestBuyPrice || b.buyPrice || 0;
+        return cb - ca;
+      }
+      if (sortBy === 'price_asc') {
+        const ca = fifoLedger.getProductSummary(a.id, a.name).latestBuyPrice || a.buyPrice || 0;
+        const cb = fifoLedger.getProductSummary(b.id, b.name).latestBuyPrice || b.buyPrice || 0;
+        return ca - cb;
+      }
       return 0;
     });
-  }, [branchProducts, searchTerm, stockStatusFilter, sortBy]);
+  }, [branchProducts, searchTerm, stockStatusFilter, sortBy, fifoLedger]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / itemsPerPage));
   const currentSafePage = Math.min(currentPage, totalPages);
@@ -516,26 +524,25 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       alert('لا توجد أصناف للتصدير');
       return;
     }
-    const headers = ['كود الصنف', 'اسم الصنف', 'الباركود', 'الوحدة', 'الرصيد الحالي', 'آخر تكلفة موثقة', 'سعر البيع', 'سعر الجملة', 'الحد الأدنى', 'تقييم FIFO'];
+    const headers = ['كود الصنف', 'اسم الصنف', 'الباركود', 'الوحدة', 'الرصيد الحالي', 'سعر التكلفة (آخر شراء)', 'الحد الأدنى', 'تقييم المخزون (FIFO)'];
     const rows = filteredProducts.map(p => {
       const fifo = fifoLedger.getProductSummary(p.id, p.name);
+      const unitCost = fifo.hasVerifiedPurchase ? fifo.latestBuyPrice : (p.buyPrice || 0);
       return [
         p.code,
         p.name,
         p.barcode || '',
         p.unit,
         p.currentQty.toString(),
-        fifo.hasVerifiedPurchase ? fifo.latestBuyPrice.toString() : 'غير محدد',
-        p.sellPrice.toString(),
-        (p.wholesalePrice || p.sellPrice).toString(),
-        p.minStock.toString(),
+        unitCost > 0 ? unitCost.toString() : 'غير محدد',
+        (p.minStock ?? 1).toString(),
         fifo.batchValuation.toString()
       ];
     });
     exportTableToCsv(`inventory_products_${getTodayDate()}.csv`, headers, rows);
   };
 
-  // Print Products Catalog & Prices
+  // Print Products Catalog (Cost Prices Only)
   const handlePrintCatalog = () => {
     if (filteredProducts.length === 0) {
       alert('لا توجد أصناف للطباعة');
@@ -544,42 +551,46 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     const today = getTodayDate();
     const curr = db.settings.currency;
     const doc: MovementPrintBlock = {
-      title: 'كتالوج وقائمة أسعار الأصناف المعتمدة',
+      title: 'دليل الأصناف وأسعار التكلفة المعتمدة',
       serialNo: `#CAT-${today}`,
       date: today,
       partyLabel: 'عدد الأصناف',
       partyName: `${filteredProducts.length} صنف مسجل`,
-      badge: 'كتالوج أسعار',
+      badge: 'دليل التكاليف',
       tableHeaders: [
         { label: 'الكود', width: '12%', align: 'center' },
         { label: 'اسم الصنف والمواصفات', width: '38%', align: 'right' },
         { label: 'الوحدة', width: '10%', align: 'center' },
         { label: 'الرصيد', width: '10%', align: 'center' },
-        { label: 'سعر التجزئة', width: '15%', align: 'center' },
-        { label: 'سعر الجملة', width: '15%', align: 'center' }
+        { label: 'سعر التكلفة (آخر شراء)', width: '15%', align: 'center' },
+        { label: 'قيمة الرصيد بالتكلفة', width: '15%', align: 'center' }
       ],
-      tableRows: filteredProducts.map(p => ({
-        cols: [
-          p.code,
-          p.name,
-          p.unit,
-          `${p.currentQty}`,
-          p.sellPrice > 0 ? formatMoney(p.sellPrice, curr) : 'غير محدد',
-          p.wholesalePrice > 0 ? formatMoney(p.wholesalePrice, curr) : '—'
-        ]
-      })),
+      tableRows: filteredProducts.map(p => {
+        const fifo = fifoLedger.getProductSummary(p.id, p.name);
+        const unitCost = fifo.hasVerifiedPurchase ? fifo.latestBuyPrice : (p.buyPrice || 0);
+        return {
+          cols: [
+            p.code,
+            p.name,
+            p.unit,
+            `${p.currentQty}`,
+            unitCost > 0 ? formatMoney(unitCost, curr) : 'غير محدد',
+            formatMoney(fifo.batchValuation, curr)
+          ]
+        };
+      }),
       summaryLines: [
         { label: 'إجمالي عدد الأصناف المعروضة', value: `${filteredProducts.length} صنف` },
-        { label: 'إجمالي قيمة المخزون (FIFO)', value: formatMoney(totalStockValue, curr), isTotal: true, highlight: true }
+        { label: 'إجمالي قيمة المخزون بالتكلفة (FIFO)', value: formatMoney(totalStockValue, curr), isTotal: true, highlight: true }
       ],
-      footerNotes: 'الأسعار شاملة الضريبة إن وجدت وقابلة للتعديل بحسب تحديثات الإدارة.'
+      footerNotes: 'الأسعار المعروضة هي أسعار التكلفة الفعلية وفق آخر فواتير شراء موثقة.'
     };
-    setPrintDocTitle('كتالوج وقائمة الأسعار');
+    setPrintDocTitle('دليل الأصناف وأسعار التكلفة');
     setPrintDocuments([doc]);
     setPrintModalOpen(true);
   };
 
-  // Print Stock Valuation & Physical Count
+  // Print Stock Valuation & Physical Count (Cost Only)
   const handlePrintStockValuation = () => {
     if (filteredProducts.length === 0) {
       alert('لا توجد أصناف للطباعة');
@@ -587,44 +598,40 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     }
     const today = getTodayDate();
     const curr = db.settings.currency;
-    const totalSell = filteredProducts.reduce((s, p) => s + p.currentQty * p.sellPrice, 0);
     const totalCost = filteredProducts.reduce((s, p) => s + fifoLedger.getProductSummary(p.id, p.name).batchValuation, 0);
 
     const doc: MovementPrintBlock = {
-      title: 'تقرير جرد وتقييم المخزون المالي',
+      title: 'تقرير جرد وتقييم المخزون بالتكلفة الفعلية',
       serialNo: `#VAL-${today}`,
       date: today,
       partyLabel: 'عدد الأصناف',
       partyName: `${filteredProducts.length} صنف`,
-      badge: 'تقييم مخزون',
+      badge: 'تقييم مخزون بالتكلفة',
       tableHeaders: [
-        { label: 'الكود', width: '12%', align: 'center' },
-        { label: 'اسم الصنف', width: '30%', align: 'right' },
-        { label: 'الرصيد', width: '12%', align: 'center' },
-        { label: 'آخر تكلفة موثقة', width: '14%', align: 'center' },
-        { label: 'قيمة الدفعات (FIFO)', width: '16%', align: 'center' },
-        { label: 'قيمة البيع', width: '16%', align: 'center' }
+        { label: 'الكود', width: '14%', align: 'center' },
+        { label: 'اسم الصنف', width: '36%', align: 'right' },
+        { label: 'الرصيد', width: '14%', align: 'center' },
+        { label: 'سعر التكلفة (آخر شراء)', width: '18%', align: 'center' },
+        { label: 'قيمة الدفعات (FIFO)', width: '18%', align: 'center' }
       ],
       tableRows: filteredProducts.map(p => {
         const fifo = fifoLedger.getProductSummary(p.id, p.name);
+        const unitCost = fifo.hasVerifiedPurchase ? fifo.latestBuyPrice : (p.buyPrice || 0);
         return {
           cols: [
             p.code,
             p.name,
             `${p.currentQty} ${p.unit}`,
-            fifo.hasVerifiedPurchase ? formatMoney(fifo.latestBuyPrice, curr) : 'غير محدد',
-            formatMoney(fifo.batchValuation, curr),
-            formatMoney(p.currentQty * p.sellPrice, curr)
+            unitCost > 0 ? formatMoney(unitCost, curr) : 'غير محدد',
+            formatMoney(fifo.batchValuation, curr)
           ],
           highlight: p.currentQty <= p.minStock
         };
       }),
       summaryLines: [
-        { label: 'إجمالي قيمة المخزون بدفعات FIFO', value: formatMoney(totalCost, curr) },
-        { label: 'إجمالي قيمة المخزون بالبيع', value: formatMoney(totalSell, curr) },
-        { label: 'الأرباح المتوقعة للمخزون', value: formatMoney(totalSell - totalCost, curr), isTotal: true, highlight: true }
+        { label: 'إجمالي قيمة المخزون بدفعات FIFO', value: formatMoney(totalCost, curr), isTotal: true, highlight: true }
       ],
-      footerNotes: 'تم تقييم المخزون الفعلي على أساس دفعات الشراء الفعلية (FIFO) بدون أي متوسط مرجح.'
+      footerNotes: 'تم تقييم المخزون الفعلي على أساس دفعات الشراء الفعلية (FIFO) بالتكلفة فقط.'
     };
     setPrintDocTitle('تقرير تقييم المخزون والجرد');
     setPrintDocuments([doc]);
@@ -861,7 +868,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 </span>
               </h1>
               <p className="text-xs text-slate-500 font-medium mt-0.5">
-                كتالوج الأصناف الكامل، المشتريات، باركودات الأصناف، الأسعار ومتابعة الأرصدة
+                كتالوج الأصناف الكامل، المشتريات، باركودات الأصناف، أسعار التكلفة ومتابعة الأرصدة
               </p>
             </div>
 
@@ -1017,8 +1024,8 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   <option value="code_asc">الكود التسلسلي</option>
                   <option value="qty_desc">الأعلى رصيداً</option>
                   <option value="qty_asc">الأقل رصيداً</option>
-                  <option value="price_desc">الأعلى سعراً</option>
-                  <option value="price_asc">الأقل سعراً</option>
+                  <option value="price_desc">الأعلى تكلفةً</option>
+                  <option value="price_asc">الأقل تكلفةً</option>
                 </select>
 
                 <select
@@ -1197,7 +1204,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               {paginatedProducts.map(p => {
                 const isZero = p.currentQty === 0;
                 const isLow = !isZero && p.currentQty <= p.minStock;
-                const val = fifoLedger.getProductSummary(p.id, p.name).batchValuation;
+                const fifoSummary = fifoLedger.getProductSummary(p.id, p.name);
+                const unitCost = fifoSummary.hasVerifiedPurchase ? fifoSummary.latestBuyPrice : (p.buyPrice || 0);
+                const val = fifoSummary.batchValuation;
                 const isSelected = selectedProductIds.has(p.id);
 
                 return (
@@ -1241,32 +1250,17 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                                 : 'bg-emerald-50 text-emerald-800 border-emerald-300'
                         }`}
                       >
-                        {p.currentQty < 0 ? `بالسالب (${p.currentQty}) - بانتظار الشراء` : isZero ? 'رصيد صفر (جاهز للتوريد)' : isLow ? 'منخفض الرصيد' : 'متوفر بالمستودع'}
+                        {p.currentQty < 0 ? `بالسالب (${p.currentQty}) - بانتظار الشراء` : isZero ? 'رصيد صفر (جاهز للتوريد)' : isLow ? 'قارب على النفاد' : 'متوفر بالمستودع'}
                       </span>
                     </div>
 
-                    {/* Card Body */}
+                    {/* Card Body (Cost Prices Only) */}
                     <div className="py-2.5 space-y-2 text-xs">
-                      {/* Price Grid */}
-                      <div className="grid grid-cols-3 gap-1.5 text-center bg-slate-50 p-2 rounded-lg border border-slate-100">
-                        <div>
-                          <span className="text-[10px] text-slate-500 block">سعر القطاعي</span>
-                          <span className="font-bold font-mono text-slate-950">
-                            {p.sellPrice > 0 ? formatMoney(p.sellPrice, db.settings.currency) : '—'}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-[10px] text-slate-500 block">سعر الجملة</span>
-                          <span className="font-bold font-mono text-slate-700">
-                            {p.wholesalePrice > 0 ? formatMoney(p.wholesalePrice, db.settings.currency) : '—'}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-[10px] text-slate-500 block">التكلفة / شراء</span>
-                          <span className="font-bold font-mono text-slate-600">
-                            {p.buyPrice > 0 ? formatMoney(p.buyPrice, db.settings.currency) : '—'}
-                          </span>
-                        </div>
+                      <div className="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-lg border border-slate-100">
+                        <span className="text-[11px] font-bold text-slate-600">سعر التكلفة (آخر شراء):</span>
+                        <span className="font-black font-mono text-sm text-slate-950">
+                          {unitCost > 0 ? formatMoney(unitCost, db.settings.currency) : 'غير محدد'}
+                        </span>
                       </div>
 
                       {/* Stock & Valuation */}
@@ -1663,7 +1657,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         <span className="text-xs font-bold text-slate-500">{product.unit || 'قطعة'}</span>
                       </div>
                       <span className="text-[9.5px] text-slate-400 block mt-0.5">
-                        حد الطلب الأدنى: {bp.minStock || 5}
+                        حد الطلب الأدنى: {bp.minStock ?? 1}
                       </span>
                     </div>
 
@@ -1699,21 +1693,21 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
                     <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
                       <span className="text-[11px] font-bold text-slate-500 block mb-1">
-                        أسعار الصنف بالفرع
+                        تكلفة الصنف بالفرع
                       </span>
-                      <div className="text-[10px] space-y-0.5 font-bold">
+                      <div className="text-[11px] space-y-1 font-bold">
                         <div className="flex justify-between text-slate-700">
-                          <span>سعر البيع:</span>
-                          <span className="font-mono text-emerald-700">{formatMoney(bp.sellPrice, db.settings.currency)}</span>
+                          <span>سعر التكلفة (الشراء):</span>
+                          <span className="font-mono text-blue-700">
+                            {bp.buyPrice > 0 ? formatMoney(bp.buyPrice, db.settings.currency) : 'غير محدد'}
+                          </span>
                         </div>
-                        <div className="flex justify-between text-slate-700">
-                          <span>سعر الشراء:</span>
-                          <span className="font-mono text-blue-700">{formatMoney(bp.buyPrice, db.settings.currency)}</span>
-                        </div>
-                        <div className="flex justify-between text-slate-700">
-                          <span>سعر الجملة:</span>
-                          <span className="font-mono text-amber-700">{formatMoney(bp.wholesalePrice, db.settings.currency)}</span>
-                        </div>
+                        {bp.sellPrice > 0 && (
+                          <div className="flex justify-between text-slate-500 text-[10px]">
+                            <span>قطاعي مسجل:</span>
+                            <span className="font-mono text-emerald-700">{formatMoney(bp.sellPrice, db.settings.currency)}</span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -2039,7 +2033,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
                             <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100">
                               <span className="text-[10px] text-slate-500 font-mono">
-                                بيع: {formatMoney(bp.sellPrice, db.settings.currency)}
+                                التكلفة: {bp.buyPrice > 0 ? formatMoney(bp.buyPrice, db.settings.currency) : 'غير محدد'}
                               </span>
                               <span className="text-blue-600 font-bold flex items-center gap-1 group-hover:translate-x-[-3px] transition-transform text-[11px]">
                                 <span>عرض كارت التحركات والفواتير</span>

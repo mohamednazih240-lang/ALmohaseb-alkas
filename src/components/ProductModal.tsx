@@ -60,7 +60,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   const [buyPrice, setBuyPrice] = useState<number>(0);
   const [sellPrice, setSellPrice] = useState<number>(0);
   const [wholesalePrice, setWholesalePrice] = useState<number>(0);
-  const [minStock, setMinStock] = useState<number>(5);
+  const [minStock, setMinStock] = useState<number>(1);
   const [initialQty, setInitialQty] = useState<number>(0);
 
   // Success Notification for continuous entry
@@ -110,7 +110,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       setBuyPrice(0);
       setSellPrice(0);
       setWholesalePrice(0);
-      setMinStock(5);
+      setMinStock(1);
       setInitialQty(0);
     }
   }, [product, isOpen, db.products.length, selectedBranchId]);
@@ -297,7 +297,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
         buyPrice: isPrimaryBranch ? buyPrice : 0,
         sellPrice: isPrimaryBranch ? sellPrice : 0,
         wholesalePrice: isPrimaryBranch ? wholesalePrice : 0,
-        minStock: minStock || 5,
+        minStock: minStock ?? 1,
         currentQty: isPrimaryBranch ? initialQty : 0,
         avgCost: buyPrice,
         sellingPriceUpdatedAt: hasInitialSellPrice ? nowIso : undefined,
@@ -324,7 +324,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             buyPrice,
             sellPrice,
             wholesalePrice,
-            minStock: minStock || 5,
+            minStock: minStock ?? 1,
             sellingPriceUpdatedAt: hasInitialSellPrice ? nowIso : undefined,
             sellingPriceUpdatedBy: hasInitialSellPrice ? actorName : undefined
           }
@@ -403,7 +403,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       setBuyPrice(0);
       setSellPrice(0);
       setWholesalePrice(0);
-      setMinStock(5);
+      setMinStock(1);
       setInitialQty(0);
       setShowReverseCalc(false);
       setCartonTotalCost('');
@@ -745,26 +745,26 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر البيع قطاعي</label>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر البيع قطاعي (اتركه فارغاً)</label>
                 <input
                   type="number"
                   min="0"
                   step="any"
                   value={sellPrice === 0 ? '' : sellPrice}
-                  placeholder="0.00"
+                  placeholder="فارغ"
                   onFocus={e => e.target.select()}
                   onChange={e => setSellPrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                   className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center text-emerald-700 focus:bg-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر الجملة</label>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر الجملة (اتركه فارغاً)</label>
                 <input
                   type="number"
                   min="0"
                   step="any"
                   value={wholesalePrice === 0 ? '' : wholesalePrice}
-                  placeholder="0.00"
+                  placeholder="فارغ"
                   onFocus={e => e.target.select()}
                   onChange={e => setWholesalePrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
                   className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
@@ -794,14 +794,14 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               />
             </div>
             <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">الحد الأدنى للطلب بالمخزن</label>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">الحد الأدنى للطلب بالمخزن (قارب على النفاد)</label>
               <input
                 type="number"
                 min="0"
-                value={minStock === 0 || minStock === 5 ? '' : minStock}
-                placeholder="5"
+                value={minStock === 0 || minStock === 1 ? '' : minStock}
+                placeholder="1"
                 onFocus={e => e.target.select()}
-                onChange={e => setMinStock(e.target.value === '' ? 5 : parseInt(e.target.value) || 0)}
+                onChange={e => setMinStock(e.target.value === '' ? 1 : parseInt(e.target.value) || 0)}
                 className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
@@ -827,10 +827,10 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setInitialQty(prev => prev + Math.abs(prev) + 5)}
+                  onClick={() => setInitialQty(prev => prev + Math.abs(prev) + 1)}
                   className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10.5px] font-bold cursor-pointer transition-colors"
                 >
-                  + شراء ({Math.abs(initialQty) + 5}) ليصبح الرصيد (+5)
+                  + شراء ({Math.abs(initialQty) + 1}) ليصبح الرصيد (+1)
                 </button>
               </div>
             </div>

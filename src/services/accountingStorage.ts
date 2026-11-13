@@ -376,7 +376,7 @@ export function defaultSettings(): AppSettings {
     address: 'المقر الرئيسي',
     currency: 'ج.م',
     invoiceTitle: 'بيان',
-    low: 5,
+    low: 1,
     cost: 'fifo',
     tax: 'disabled',
     taxRate: 0,
@@ -1542,7 +1542,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
           buyPrice: unitBuy,
           sellPrice: 0,
           wholesalePrice: 0,
-          minStock: 5,
+          minStock: 1,
           currentQty: 0,
           avgCost: unitBuy,
           branchesData: {}
@@ -1773,7 +1773,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       buyPrice: latestBuy,
       sellPrice: p.sellPrice,
       wholesalePrice: p.wholesalePrice,
-      minStock: p.minStock || 5,
+      minStock: p.minStock ?? 1,
       avgCost: p.avgCost || 0,
       sellingPriceUpdatedAt: p.sellingPriceUpdatedAt,
       sellingPriceUpdatedBy: p.sellingPriceUpdatedBy
@@ -1870,10 +1870,32 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   if (!db.settings.companyPin) {
     db.settings.companyPin = '2919';
   }
+  if (!db.settings.low || db.settings.low === 5) {
+    db.settings.low = 1;
+  }
 
   // Ensure modern clean state without ever wiping user-entered products, invoices, or parties
   if (!db.cleanGeneration) db.cleanGeneration = 5;
   if (!db.products) db.products = [];
+
+  // One-time safe migration: convert system-default minStock=5 to 1 across existing catalog products
+  if (!(db.settings as any).minStockOneApplied) {
+    (db.settings as any).minStockOneApplied = true;
+    db.settings.low = 1;
+    db.products.forEach(p => {
+      if (p.minStock === 5 || p.minStock === undefined || p.minStock === null) {
+        p.minStock = 1;
+      }
+      if (p.branchesData) {
+        Object.keys(p.branchesData).forEach(bKey => {
+          const bd = p.branchesData![bKey];
+          if (bd && (bd.minStock === 5 || bd.minStock === undefined || bd.minStock === null)) {
+            bd.minStock = 1;
+          }
+        });
+      }
+    });
+  }
   if (!db.customers) db.customers = [];
   if (!db.suppliers) db.suppliers = [];
   if (!db.invoices) db.invoices = [];
@@ -3185,7 +3207,7 @@ export function getProductForBranch(product: Product, branchId?: string): Produc
       buyPrice: bData.buyPrice !== undefined && bData.buyPrice > 0 ? bData.buyPrice : (product.buyPrice || 0),
       sellPrice: bData.sellPrice !== undefined && bData.sellPrice > 0 ? bData.sellPrice : (product.sellPrice || 0),
       wholesalePrice: bData.wholesalePrice !== undefined && bData.wholesalePrice > 0 ? bData.wholesalePrice : (product.wholesalePrice || 0),
-      minStock: bData.minStock ?? (product.minStock || 5),
+      minStock: bData.minStock ?? (product.minStock ?? 1),
       avgCost: bData.avgCost ?? (bData.buyPrice || product.avgCost || product.buyPrice || 0),
       branchQty: bData.currentQty ?? 0,
     };
@@ -3206,7 +3228,7 @@ export function getProductForBranch(product: Product, branchId?: string): Produc
     buyPrice: product.buyPrice || 0,
     sellPrice: product.sellPrice || 0,
     wholesalePrice: product.wholesalePrice || 0,
-    minStock: product.minStock || 5,
+    minStock: product.minStock ?? 1,
     avgCost: product.avgCost || product.buyPrice || 0,
     branchQty: 0,
   };
@@ -3231,7 +3253,7 @@ export function updateProductBranchData(
     buyPrice: isPrimaryBranch ? (product.buyPrice || 0) : 0,
     sellPrice: isPrimaryBranch ? (product.sellPrice || 0) : 0,
     wholesalePrice: isPrimaryBranch ? (product.wholesalePrice || 0) : 0,
-    minStock: isPrimaryBranch ? (product.minStock || 5) : 5,
+    minStock: isPrimaryBranch ? (product.minStock ?? 1) : 1,
     avgCost: isPrimaryBranch ? (product.avgCost || product.buyPrice || 0) : 0,
   };
 

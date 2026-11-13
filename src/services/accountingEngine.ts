@@ -388,7 +388,7 @@ export function postInvoiceTransaction(
         buyPrice: unitBuy,
         sellPrice: 0,
         wholesalePrice: 0,
-        minStock: 5,
+        minStock: 1,
         currentQty: 0,
         avgCost: unitBuy,
         branchesData: {
@@ -397,7 +397,7 @@ export function postInvoiceTransaction(
             buyPrice: unitBuy,
             sellPrice: 0,
             wholesalePrice: 0,
-            minStock: 5,
+            minStock: 1,
             avgCost: unitBuy
           }
         }
