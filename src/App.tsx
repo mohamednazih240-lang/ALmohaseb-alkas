@@ -174,86 +174,159 @@ export default function App() {
   useModalBackHandler(showLoginView, () => setShowLoginView(false), 'login_view_modal');
   useModalBackHandler(!!branchPinTarget, () => setBranchPinTarget(null), 'branch_pin_modal');
 
-  // Hydrate database from IndexedDB on startup (handles large databases up to gigabytes)
+  const mergeSafeSettings = useCallback((prevSettings: AppSettings | undefined, cloudSettings: AppSettings | undefined): AppSettings => {
+    const prevLogo = prevSettings?.logo?.trim() ? prevSettings.logo : '';
+    const cloudLogo = cloudSettings?.logo?.trim() ? cloudSettings.logo : '';
+    const prevLogoTs = Number(prevSettings?.logoUpdatedAt || 0);
+    const cloudLogoTs = Number(cloudSettings?.logoUpdatedAt || 0);
+    const cloudRemovedTs = Number(cloudSettings?.logoRemovedAt || 0);
+    const prevRemovedTs = Number(prevSettings?.logoRemovedAt || 0);
+
+    let resolvedLogo = '';
+    let resolvedLogoUpdatedAt: number | undefined = prevSettings?.logoUpdatedAt;
+    let resolvedLogoRemovedAt: number | undefined = prevSettings?.logoRemovedAt;
+
+    if (cloudRemovedTs > prevLogoTs && cloudRemovedTs >= cloudLogoTs) {
+      resolvedLogo = '';
+      resolvedLogoRemovedAt = cloudRemovedTs;
+      resolvedLogoUpdatedAt = undefined;
+    } else if (prevRemovedTs > cloudLogoTs && !prevLogo) {
+      resolvedLogo = '';
+      resolvedLogoRemovedAt = prevRemovedTs;
+      resolvedLogoUpdatedAt = undefined;
+    } else if (prevLogo && (!cloudLogo || prevLogoTs > cloudLogoTs)) {
+      resolvedLogo = prevLogo;
+      resolvedLogoUpdatedAt = prevSettings?.logoUpdatedAt || cloudSettings?.logoUpdatedAt;
+      resolvedLogoRemovedAt = undefined;
+    } else if (cloudLogo) {
+      resolvedLogo = cloudLogo;
+      resolvedLogoUpdatedAt = cloudSettings?.logoUpdatedAt || prevSettings?.logoUpdatedAt;
+      resolvedLogoRemovedAt = undefined;
+    }
+
+    const base: AppSettings = {
+      ...(cloudSettings || {}),
+      ...(prevSettings || {}),
+      company: (cloudSettings?.company && cloudSettings.company.trim()) ? cloudSettings.company : (prevSettings?.company || 'شركة الموان'),
+      companyCode: (cloudSettings?.companyCode && cloudSettings.companyCode.trim()) ? cloudSettings.companyCode : (prevSettings?.companyCode || 'COMP-102'),
+      companyPin: (cloudSettings?.companyPin && cloudSettings.companyPin.trim()) ? cloudSettings.companyPin : (prevSettings?.companyPin || '2919'),
+      logo: resolvedLogo,
+      phone: (cloudSettings?.phone && cloudSettings.phone.trim()) ? cloudSettings.phone : (prevSettings?.phone || ''),
+      address: (cloudSettings?.address && cloudSettings.address.trim()) ? cloudSettings.address : (prevSettings?.address || 'المقر الرئيسي'),
+      invoiceTitle: (cloudSettings?.invoiceTitle && cloudSettings.invoiceTitle.trim()) ? cloudSettings.invoiceTitle : (prevSettings?.invoiceTitle || 'بيان'),
+      notes: (cloudSettings?.notes && cloudSettings.notes.trim()) ? cloudSettings.notes : (prevSettings?.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية'),
+      currency: (cloudSettings?.currency && cloudSettings.currency.trim()) ? cloudSettings.currency : (prevSettings?.currency || 'ج.م')
+    } as AppSettings;
+
+    if (resolvedLogoUpdatedAt) base.logoUpdatedAt = resolvedLogoUpdatedAt;
+    else delete base.logoUpdatedAt;
+
+    if (resolvedLogoRemovedAt && !resolvedLogo) base.logoRemovedAt = resolvedLogoRemovedAt;
+    else delete base.logoRemovedAt;
+
+    return base;
+  }, []);
+
+  // Hydrate database sequentially from IndexedDB first, then merge fresh cloud database cleanly
   useEffect(() => {
-    void testFirestoreConnection();
+    let isMounted = true;
 
-    // 1. Hydrate from IndexedDB on startup
-    loadFromIndexedDB().then(idbData => {
-      if (idbData && idbData.settings) {
-        let readyDb = sanitizeCompanyDatabase(idbData);
-        setDb(readyDb);
-        saveDatabase(readyDb);
-      }
-    });
+    const bootstrapDatabase = async () => {
+      void testFirestoreConnection();
 
-    // 2. Fetch fresh cloud database on startup
-    const initialCompanyCode = normalizeCompanyCode(db.settings.companyCode);
-    fetchDatabaseFromCloud(initialCompanyCode).then(cloudDb => {
-      if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
-        setDb(prevDb => {
-          let effectiveCloud = cloudDb;
-          if (!effectiveCloud.cleanGeneration) {
-            effectiveCloud.cleanGeneration = 5;
-          }
-
-          // If local has newly entered products and cloud does not have them yet, preserve and sync them to cloud
-          if (prevDb.products && prevDb.products.length > 0 && (!effectiveCloud.products || effectiveCloud.products.length === 0)) {
-            effectiveCloud.products = prevDb.products;
-            pushDatabaseToCloud(effectiveCloud, true);
-          }
-
-          const storedSession = getStoredAuthSession();
-          const currentLocalUser = storedSession?.user || prevDb.currentUser;
-          const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
-          const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
-          const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
-
-          // Safely merge invoices, vouchers, movements, and treasury while strictly respecting deleted tombstones!
-          const deletedIdsSet = new Set<string>([
-            ...PURGED_COMP101_INVOICE_IDS,
-            ...(prevDb.deletedInvoiceIds || []),
-            ...(ensuredCloud.deletedInvoiceIds || [])
-          ]);
-          const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || [], deletedIdsSet);
-          const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
-          const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
-          const validMergedInvIds = new Set(mergedInvoices.map(i => i.id));
-          const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || [])
-            .filter(sm => {
-              if (sm.sourceId && deletedIdsSet.has(sm.sourceId)) return false;
-              if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
-              return true;
-            });
-
-          const mergedProducts = mergeProducts(prevDb.products || [], ensuredCloud.products || []);
-          const rawMerged: AccountingDB = {
-            ...ensuredCloud,
-            products: mergedProducts,
-            invoices: mergedInvoices,
-            vouchers: mergedVouchers,
-            treasury: mergedTreasury,
-            stockMovements: mergedStockMovements,
-            deletedInvoiceIds: Array.from(deletedIdsSet),
-            currentUser: effectiveUser || prevDb.currentUser || ensuredCloud.currentUser || ensuredCloud.users[0]
-          };
-          const verifiedStartup = verifyAndCorrectStockMovements(rawMerged);
-          const merged = verifiedStartup.db;
-          saveDatabase(merged);
-
-          // If local had richer invoice data or product quantities/costs were repaired from movements, push merged state back to cloud immediately
-          const hasRicherLocal = mergedInvoices.some(inv => {
-            const cloudInv = (ensuredCloud.invoices || []).find(ci => ci.id === inv.id || (ci.number === inv.number && ci.type === inv.type));
-            return !cloudInv || (inv.items?.length || 0) > (cloudInv.items?.length || 0);
+      // 1. Hydrate from IndexedDB first so local logo & rich records are in state before cloud merge runs
+      let initialCompanyCode = normalizeCompanyCode(db.settings.companyCode);
+      try {
+        const idbData = await loadFromIndexedDB();
+        if (isMounted && idbData && idbData.settings) {
+          const readyDb = sanitizeCompanyDatabase(idbData);
+          initialCompanyCode = normalizeCompanyCode(readyDb.settings.companyCode);
+          setDb(prevDb => {
+            const safeSettings = mergeSafeSettings(readyDb.settings, prevDb.settings);
+            const hydrated: AccountingDB = { ...readyDb, settings: safeSettings };
+            saveDatabase(hydrated);
+            return hydrated;
           });
-          if (hasRicherLocal || verifiedStartup.report.correctedProductsCount > 0 || verifiedStartup.report.missingMovementsAdded > 0) {
-            pushDatabaseToCloud(merged, true);
-          }
-
-          return merged;
-        });
+        }
+      } catch (e) {
+        console.warn('IndexedDB startup hydration notice:', e);
       }
-    });
+
+      // 2. Fetch fresh cloud database on startup (never overwrites a saved local logo with empty string)
+      try {
+        const cloudDb = await fetchDatabaseFromCloud(initialCompanyCode);
+        if (isMounted && cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
+          setDb(prevDb => {
+            const effectiveCloud = cloudDb;
+            if (!effectiveCloud.cleanGeneration) {
+              effectiveCloud.cleanGeneration = 5;
+            }
+
+            // If local has newly entered products and cloud does not have them yet, preserve and sync them to cloud
+            if (prevDb.products && prevDb.products.length > 0 && (!effectiveCloud.products || effectiveCloud.products.length === 0)) {
+              effectiveCloud.products = prevDb.products;
+              pushDatabaseToCloud(effectiveCloud, true);
+            }
+
+            const storedSession = getStoredAuthSession();
+            const currentLocalUser = storedSession?.user || prevDb.currentUser;
+            const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
+            const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
+            const ensuredCloud = sanitizeCompanyDatabase(cloudDb);
+
+            // Safely merge invoices, vouchers, movements, and treasury while strictly respecting deleted tombstones!
+            const deletedIdsSet = new Set<string>([
+              ...PURGED_COMP101_INVOICE_IDS,
+              ...(prevDb.deletedInvoiceIds || []),
+              ...(ensuredCloud.deletedInvoiceIds || [])
+            ]);
+            const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || [], deletedIdsSet);
+            const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || []);
+            const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || []);
+            const validMergedInvIds = new Set(mergedInvoices.map(i => i.id));
+            const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || [])
+              .filter(sm => {
+                if (sm.sourceId && deletedIdsSet.has(sm.sourceId)) return false;
+                if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
+                return true;
+              });
+
+            const safeSettings = mergeSafeSettings(prevDb.settings, ensuredCloud.settings);
+            const mergedProducts = mergeProducts(prevDb.products || [], ensuredCloud.products || []);
+            const rawMerged: AccountingDB = {
+              ...ensuredCloud,
+              settings: safeSettings,
+              products: mergedProducts,
+              invoices: mergedInvoices,
+              vouchers: mergedVouchers,
+              treasury: mergedTreasury,
+              stockMovements: mergedStockMovements,
+              deletedInvoiceIds: Array.from(deletedIdsSet),
+              currentUser: effectiveUser || prevDb.currentUser || ensuredCloud.users[0]
+            };
+            const verifiedStartup = verifyAndCorrectStockMovements(rawMerged);
+            const merged = verifiedStartup.db;
+            saveDatabase(merged);
+
+            // If local had richer invoice data, product repairs, or a local logo missing from cloud, sync back immediately
+            const hasRicherLocal = mergedInvoices.some(inv => {
+              const cloudInv = (ensuredCloud.invoices || []).find(ci => ci.id === inv.id || (ci.number === inv.number && ci.type === inv.type));
+              return !cloudInv || (inv.items?.length || 0) > (cloudInv.items?.length || 0);
+            });
+            const needsCloudLogoRepair = Boolean(safeSettings.logo && !ensuredCloud.settings?.logo);
+            if (hasRicherLocal || needsCloudLogoRepair || verifiedStartup.report.correctedProductsCount > 0 || verifiedStartup.report.missingMovementsAdded > 0) {
+              pushDatabaseToCloud(merged, true);
+            }
+
+            return merged;
+          });
+        }
+      } catch (e) {
+        console.warn('Cloud startup hydration notice:', e);
+      }
+    };
+
+    void bootstrapDatabase();
 
     // 3. Subscribe to sync status
     const unsubStatus = subscribeToSyncStatus(state => {
@@ -261,6 +334,7 @@ export default function App() {
     });
 
     return () => {
+      isMounted = false;
       unsubStatus();
     };
   }, []);
@@ -335,19 +409,7 @@ export default function App() {
             return true;
           });
 
-        const safeSettings: AppSettings = {
-          ...ensuredCloud.settings,
-          ...prevDb.settings,
-          company: (ensuredCloud.settings?.company && ensuredCloud.settings.company.trim()) ? ensuredCloud.settings.company : (prevDb.settings?.company || 'شركة الموان'),
-          companyCode: (ensuredCloud.settings?.companyCode && ensuredCloud.settings.companyCode.trim()) ? ensuredCloud.settings.companyCode : (prevDb.settings?.companyCode || 'COMP-102'),
-          companyPin: (ensuredCloud.settings?.companyPin && ensuredCloud.settings.companyPin.trim()) ? ensuredCloud.settings.companyPin : (prevDb.settings?.companyPin || '2919'),
-          logo: (ensuredCloud.settings?.logo && ensuredCloud.settings.logo.trim()) ? ensuredCloud.settings.logo : (prevDb.settings?.logo || ''),
-          phone: (ensuredCloud.settings?.phone && ensuredCloud.settings.phone.trim()) ? ensuredCloud.settings.phone : (prevDb.settings?.phone || ''),
-          address: (ensuredCloud.settings?.address && ensuredCloud.settings.address.trim()) ? ensuredCloud.settings.address : (prevDb.settings?.address || 'المقر الرئيسي'),
-          invoiceTitle: (ensuredCloud.settings?.invoiceTitle && ensuredCloud.settings.invoiceTitle.trim()) ? ensuredCloud.settings.invoiceTitle : (prevDb.settings?.invoiceTitle || 'بيان'),
-          notes: (ensuredCloud.settings?.notes && ensuredCloud.settings.notes.trim()) ? ensuredCloud.settings.notes : (prevDb.settings?.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية'),
-          currency: (ensuredCloud.settings?.currency && ensuredCloud.settings.currency.trim()) ? ensuredCloud.settings.currency : (prevDb.settings?.currency || 'ج.م')
-        };
+        const safeSettings = mergeSafeSettings(prevDb.settings, ensuredCloud.settings);
 
         const mergedProducts = mergeProducts(prevDb.products || [], ensuredCloud.products || []);
         const rawMerged: AccountingDB = {
@@ -430,19 +492,7 @@ export default function App() {
                   return true;
                 });
 
-              const safeSettings: AppSettings = {
-                ...ensuredCloud.settings,
-                ...prevDb.settings,
-                company: (ensuredCloud.settings?.company && ensuredCloud.settings.company.trim()) ? ensuredCloud.settings.company : (prevDb.settings?.company || 'شركة الموان'),
-                companyCode: (ensuredCloud.settings?.companyCode && ensuredCloud.settings.companyCode.trim()) ? ensuredCloud.settings.companyCode : (prevDb.settings?.companyCode || 'COMP-102'),
-                companyPin: (ensuredCloud.settings?.companyPin && ensuredCloud.settings.companyPin.trim()) ? ensuredCloud.settings.companyPin : (prevDb.settings?.companyPin || '2919'),
-                logo: (ensuredCloud.settings?.logo && ensuredCloud.settings.logo.trim()) ? ensuredCloud.settings.logo : (prevDb.settings?.logo || ''),
-                phone: (ensuredCloud.settings?.phone && ensuredCloud.settings.phone.trim()) ? ensuredCloud.settings.phone : (prevDb.settings?.phone || ''),
-                address: (ensuredCloud.settings?.address && ensuredCloud.settings.address.trim()) ? ensuredCloud.settings.address : (prevDb.settings?.address || 'المقر الرئيسي'),
-                invoiceTitle: (ensuredCloud.settings?.invoiceTitle && ensuredCloud.settings.invoiceTitle.trim()) ? ensuredCloud.settings.invoiceTitle : (prevDb.settings?.invoiceTitle || 'بيان'),
-                notes: (ensuredCloud.settings?.notes && ensuredCloud.settings.notes.trim()) ? ensuredCloud.settings.notes : (prevDb.settings?.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً لحالتها الأصلية'),
-                currency: (ensuredCloud.settings?.currency && ensuredCloud.settings.currency.trim()) ? ensuredCloud.settings.currency : (prevDb.settings?.currency || 'ج.م')
-              };
+              const safeSettings = mergeSafeSettings(prevDb.settings, ensuredCloud.settings);
 
               const mergedProducts = mergeProducts(prevDb.products || [], ensuredCloud.products || []);
               const rawMerged: AccountingDB = {
@@ -487,10 +537,12 @@ export default function App() {
   }, [db.settings.companyCode]);
 
   // Save changes to IndexedDB, localStorage, and Firestore Cloud Realtime
-  const handleUpdateDb = useCallback((updated: AccountingDB) => {
+  const handleUpdateDb = useCallback((updated: AccountingDB, skipCloudPush?: boolean) => {
     setDb(updated);
     saveDatabase(updated);
-    pushDatabaseToCloud(updated, true); // Sync immediately to Firestore for all other phones!
+    if (!skipCloudPush) {
+      pushDatabaseToCloud(updated, true); // Sync immediately to Firestore for all other phones!
+    }
   }, []);
 
   const validPages: PageId[] = [
@@ -696,8 +748,10 @@ export default function App() {
                   return true;
                 });
               const mergedProducts = mergeProducts(db.products || [], cloudDb.products || []);
+              const safeSettings = mergeSafeSettings(db.settings, cloudDb.settings);
               const rawUnified: AccountingDB = {
                 ...cloudDb,
+                settings: safeSettings,
                 products: mergedProducts,
                 invoices: mergedInvoices,
                 vouchers: mergedVouchers,
@@ -781,10 +835,14 @@ export default function App() {
               onSelectBranch={handleRequestBranchSwitch}
               activeBranchId={activeBranchId}
               onManualSync={async () => {
-                const cloudDb = await fetchDatabaseFromCloud();
+                const cloudDb = await fetchDatabaseFromCloud(normalizeCompanyCode(db.settings.companyCode));
                 if (cloudDb) {
-                  setDb(cloudDb);
-                  saveDatabase(cloudDb);
+                  const unified = {
+                    ...cloudDb,
+                    settings: mergeSafeSettings(db.settings, cloudDb.settings)
+                  };
+                  setDb(unified);
+                  saveDatabase(unified);
                 } else {
                   await pushDatabaseToCloud(db, true);
                 }

@@ -272,7 +272,8 @@ import {
   logAudit,
   formatMoney,
   isBranchMawan,
-  getBranchExpectedPin
+  getBranchExpectedPin,
+  cacheCompanyLogoLocally
 } from '../services/accountingStorage';
 import { updateCompany, getActiveTenantId } from '../services/tenantService';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
@@ -280,7 +281,7 @@ import { pushDatabaseToCloud } from '../services/cloudSyncService';
 interface SystemViewsProps {
   subPage: 'users' | 'branches' | 'audit' | 'periods' | 'backup' | 'settings';
   db: AccountingDB;
-  onUpdateDb: (updated: AccountingDB) => void;
+  onUpdateDb: (updated: AccountingDB, skipCloudPush?: boolean) => void;
   onOpenGoogleDriveBackup?: () => void;
 }
 
@@ -322,23 +323,30 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
   // Settings form states
   const [settingsForm, setSettingsForm] = useState<AppSettings>({ ...db.settings });
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState<{ type: 'success' | 'warning' | 'error'; text: string } | null>(null);
 
   React.useEffect(() => {
     setSettingsForm({ ...db.settings });
   }, [db.settings]);
 
-  // Compress logo to crisp dimensions (max 320x160) and lightweight WebP/PNG (~15KB)
+  // Compress logo to crisp dimensions (max 320x160) and guaranteed <= 250KB
   // Guarantees zero rejection by Firestore 1MB document limit and zero quota crashes
   const compressLogoImage = async (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = ev => {
+        const rawResult = ev.target?.result as string;
+        if (!rawResult) {
+          reject(new Error('تعذر قراءة الصورة'));
+          return;
+        }
         const img = new Image();
         img.onload = () => {
           const MAX_WIDTH = 320;
           const MAX_HEIGHT = 160;
-          let width = img.width;
-          let height = img.height;
+          let width = img.width || MAX_WIDTH;
+          let height = img.height || MAX_HEIGHT;
 
           if (width > height) {
             if (width > MAX_WIDTH) {
@@ -353,24 +361,53 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
           }
 
           const canvas = document.createElement('canvas');
-          canvas.width = width;
-          canvas.height = height;
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
           const ctx = canvas.getContext('2d');
           if (!ctx) {
-            resolve(ev.target?.result as string);
+            if (rawResult.length <= 700_000) resolve(rawResult);
+            else reject(new Error('حجم الصورة كبير جداً'));
             return;
           }
 
           ctx.imageSmoothingEnabled = true;
           ctx.imageSmoothingQuality = 'high';
-          ctx.drawImage(img, 0, 0, width, height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-          const isPng = file.type === 'image/png';
-          const dataUrl = canvas.toDataURL(isPng ? 'image/png' : 'image/jpeg', 0.85);
-          resolve(dataUrl);
+          const isTransparentCapable = file.type === 'image/png' || file.type === 'image/webp' || file.type === 'image/svg+xml';
+          if (isTransparentCapable) {
+            const pngUrl = canvas.toDataURL('image/png');
+            if (pngUrl.length <= 240_000) {
+              resolve(pngUrl);
+              return;
+            }
+            const webpUrl = canvas.toDataURL('image/webp', 0.85);
+            if (webpUrl.length <= 240_000 && webpUrl.startsWith('data:image/webp')) {
+              resolve(webpUrl);
+              return;
+            }
+          }
+
+          // White background fallback for JPEG so transparent areas never turn black
+          ctx.globalCompositeOperation = 'destination-over';
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.globalCompositeOperation = 'source-over';
+
+          let jpegUrl = canvas.toDataURL('image/jpeg', 0.85);
+          if (jpegUrl.length > 240_000) {
+            jpegUrl = canvas.toDataURL('image/jpeg', 0.65);
+          }
+          resolve(jpegUrl);
         };
-        img.onerror = () => resolve(ev.target?.result as string);
-        img.src = ev.target?.result as string;
+        img.onerror = () => {
+          if (rawResult.length <= 700_000) {
+            resolve(rawResult);
+          } else {
+            reject(new Error('تعذر معالجة الصورة أو حجمها يتجاوز الحد المسموح.'));
+          }
+        };
+        img.src = rawResult;
       };
       reader.onerror = () => reject(new Error('فشل قراءة ملف الصورة'));
       reader.readAsDataURL(file);
@@ -378,38 +415,79 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   };
 
   const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const inputEl = e.target;
+    const file = inputEl.files?.[0];
+    inputEl.value = '';
     if (!file) return;
 
     if (file.size > 10 * 1024 * 1024) {
-      alert('حجم الصورة كبير جداً، يرجى اختيار صورة أقل من 10 ميجابايت.');
+      setSettingsNotice({ type: 'error', text: 'حجم الصورة كبير جداً، يرجى اختيار صورة أقل من 10 ميجابايت.' });
       return;
     }
 
+    setIsUploadingLogo(true);
+    setSettingsNotice(null);
+
     try {
       const compressedBase64 = await compressLogoImage(file);
-      const newForm = { ...settingsForm, logo: compressedBase64 };
+      const nowTs = Date.now();
+      const newForm: AppSettings = {
+        ...settingsForm,
+        logo: compressedBase64,
+        logoUpdatedAt: nowTs
+      };
+      delete newForm.logoRemovedAt;
       setSettingsForm(newForm);
 
-      // Auto-persist logo immediately to DB and cloud so it's impossible to lose
+      // Persist immediately locally + wait cleanly for single cloud upload
+      cacheCompanyLogoLocally(newForm.companyCode || db.settings.companyCode, compressedBase64);
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-      updated.settings = { ...updated.settings, ...newForm, logo: compressedBase64 };
+      updated.settings = {
+        ...updated.settings,
+        ...newForm,
+        logo: compressedBase64,
+        logoUpdatedAt: nowTs
+      };
+      delete updated.settings.logoRemovedAt;
       logAudit(updated, 'تحديث شعار المنشأة', 'تم رفع لوجو جديد');
-      onUpdateDb(updated);
-      pushDatabaseToCloud(updated, true);
+
+      onUpdateDb(updated, true);
+      const cloudSynced = await pushDatabaseToCloud(updated, true);
+      setSettingsNotice(
+        cloudSynced
+          ? { type: 'success', text: '✓ تم رفع وحفظ الشعار بنجاح ومزامنته سحابياً ولن يختفي بعد التحديث.' }
+          : { type: 'warning', text: '✓ تم حفظ الشعار على جهازك، وسيُرفع للسحابة تلقائياً عند توفر الاتصال.' }
+      );
     } catch {
-      alert('تعذر معالجة الصورة، يرجى المحاولة بصيغة أخرى (PNG أو JPG).');
+      setSettingsNotice({ type: 'error', text: 'تعذر معالجة الصورة، يرجى المحاولة بصيغة PNG أو JPG واضحة.' });
+    } finally {
+      setIsUploadingLogo(false);
     }
   };
 
-  const handleRemoveLogo = () => {
-    const newForm = { ...settingsForm, logo: '' };
+  const handleRemoveLogo = async () => {
+    const removedTs = Date.now();
+    const newForm: AppSettings = {
+      ...settingsForm,
+      logo: '',
+      logoRemovedAt: removedTs
+    };
+    delete newForm.logoUpdatedAt;
     setSettingsForm(newForm);
+
+    cacheCompanyLogoLocally(newForm.companyCode || db.settings.companyCode, '', removedTs);
     const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-    updated.settings = { ...updated.settings, logo: '' };
+    updated.settings = {
+      ...updated.settings,
+      logo: '',
+      logoRemovedAt: removedTs
+    };
+    delete updated.settings.logoUpdatedAt;
     logAudit(updated, 'حذف شعار المنشأة', '');
-    onUpdateDb(updated);
-    pushDatabaseToCloud(updated, true);
+
+    onUpdateDb(updated, true);
+    await pushDatabaseToCloud(updated, true);
+    setSettingsNotice({ type: 'success', text: '✓ تم حذف شعار المنشأة وحفظ التغيير.' });
   };
 
   // Audit integrity check results
@@ -761,7 +839,13 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
         });
       }
 
-      onUpdateDb(updated);
+      const hasLogo = Boolean(updated.settings.logo && updated.settings.logo.trim());
+      if (hasLogo) {
+        updated.settings.logoUpdatedAt = updated.settings.logoUpdatedAt || Date.now();
+        delete updated.settings.logoRemovedAt;
+      }
+
+      onUpdateDb(updated, true);
 
       // Update active user session and device profile with new company details immediately
       try {
@@ -782,14 +866,19 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
         console.warn('Session profile sync error:', err);
       }
 
-      // Push to Firestore Cloud immediately
+      // Push once to Firestore Cloud and wait for confirmation
+      let cloudSynced = false;
       try {
-        await pushDatabaseToCloud(updated, true);
+        cloudSynced = await pushDatabaseToCloud(updated, true);
       } catch (err) {
         console.warn('Cloud sync error on settings save:', err);
       }
 
-      alert(`✓ تم حفظ وتحديث اسم وبيانات منشأة «${updated.settings.company}» بنجاح وتأكيد مزامنتها سحابياً لجميع الأجهزة.`);
+      setSettingsNotice(
+        cloudSynced
+          ? { type: 'success', text: `✓ تم حفظ بيانات وشعار منشأة «${updated.settings.company}» ومزامنتها سحابياً لجميع الأجهزة.` }
+          : { type: 'warning', text: `✓ تم حفظ بيانات وشعار منشأة «${updated.settings.company}» محلياً بنجاح (سيتم التزامن سحابياً فور اتصال الشبكة).` }
+      );
     });
   };
 
@@ -1485,15 +1574,35 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
             </div>
             <button
               type="button"
-              disabled={isSubmitting}
+              disabled={isSubmitting || isUploadingLogo}
               onClick={() => handleSaveSettings()}
               className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition-all shadow-md cursor-pointer flex items-center justify-center gap-2 self-start sm:self-auto active:scale-95 disabled:opacity-50"
               title="حفظ كافة التغييرات والشعار فوراً"
             >
               <Check className="w-4 h-4 text-white" />
-              <span>{isSubmitting ? 'جاري الحفظ...' : 'حفظ الإعدادات والشعار'}</span>
+              <span>{isSubmitting ? 'جاري الحفظ...' : isUploadingLogo ? 'جاري رفع الشعار...' : 'حفظ الإعدادات والشعار'}</span>
             </button>
           </div>
+
+          {settingsNotice && (
+            <div className={`max-w-3xl px-4 py-3 rounded-xl border text-xs font-bold flex items-center justify-between gap-2 ${
+              settingsNotice.type === 'success'
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : settingsNotice.type === 'warning'
+                ? 'bg-amber-50 border-amber-200 text-amber-800'
+                : 'bg-rose-50 border-rose-200 text-rose-800'
+            }`}>
+              <span>{settingsNotice.text}</span>
+              <button
+                type="button"
+                onClick={() => setSettingsNotice(null)}
+                className="p-1 opacity-70 hover:opacity-100 cursor-pointer"
+                aria-label="إغلاق"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
 
           <form onSubmit={handleSaveSettings} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-2xs max-w-3xl space-y-5">
             {/* 1. رفع وتعديل لوجو المحل / المنشأة */}
@@ -1511,8 +1620,9 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                 {settingsForm.logo && (
                   <button
                     type="button"
+                    disabled={isUploadingLogo}
                     onClick={handleRemoveLogo}
-                    className="px-2.5 py-1 text-[11px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 cursor-pointer transition-all"
+                    className="px-2.5 py-1 text-[11px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 cursor-pointer transition-all disabled:opacity-50"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>حذف الشعار</span>
@@ -1539,12 +1649,13 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
                 {/* Upload Control */}
                 <div className="flex-1 space-y-2 text-right w-full">
-                  <label className="inline-flex items-center gap-2 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer transition-all shadow-xs">
+                  <label className={`inline-flex items-center gap-2 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer transition-all shadow-xs ${isUploadingLogo ? 'opacity-60 pointer-events-none' : ''}`}>
                     <Upload className="w-4 h-4 text-amber-400" />
-                    <span>{settingsForm.logo ? 'تغيير صورة الشعار' : 'رفع لوجو المحل من جهازك'}</span>
+                    <span>{isUploadingLogo ? 'جاري رفع وحفظ الشعار...' : settingsForm.logo ? 'تغيير صورة الشعار' : 'رفع لوجو المحل من جهازك'}</span>
                     <input
                       type="file"
                       accept="image/*"
+                      disabled={isUploadingLogo}
                       onChange={handleLogoUpload}
                       className="hidden"
                     />

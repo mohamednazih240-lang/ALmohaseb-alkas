@@ -619,6 +619,8 @@ export interface AppSettings {
   taxRate: number;
   notes: string;
   logo?: string;
+  logoUpdatedAt?: number;
+  logoRemovedAt?: number;
   nextSale: number;
   nextPurchase: number;
   nextSaleReturn?: number;

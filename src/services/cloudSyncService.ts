@@ -23,7 +23,9 @@ import {
   mergeProducts,
   verifyAndCorrectStockMovements,
   PURGED_COMP101_INVOICE_IDS,
-  isPurgedEkhwaInvoice
+  isPurgedEkhwaInvoice,
+  cacheCompanyLogoLocally,
+  getCachedCompanyLogoLocally
 } from './accountingStorage';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -154,6 +156,7 @@ let lastLocalSavedTimestamp = 0;
 // Incremental shard hash cache: only modified shards are uploaded on incremental saves (O(1) network writes at 10M+ scale)
 const uploadedShardHashCache = new Map<string, string>();
 let uploadedLogoHashCache = new Map<string, string>();
+let activePushChain: Promise<boolean> = Promise.resolve(true);
 
 const LOCAL_DEVICE_ID_KEY = 'hesabaty_device_instance_id';
 
@@ -265,12 +268,22 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
   const prefix = normalizeCompanyCode(docVal.shardPrefix || docVal.companyCode || fallbackCode);
   const shardCounts: Record<string, number> = docVal.shardCounts || {};
 
-  // Fetch separate logo asset if separated
-  const logoPromise = docVal.hasSeparateLogo
-    ? withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, `asset_${prefix}_logo`)), 3500)
-        .then(snap => (snap && snap.exists() ? (snap.data()?.logo || '') : ''))
-        .catch(() => '')
-    : Promise.resolve('');
+  // Fetch separate logo asset whenever logo wasn't explicitly deleted (even if an older/stale manifest didn't set hasSeparateLogo)
+  const isLogoExplicitlyRemoved = Boolean(baseDb.settings?.logoRemovedAt);
+  const shouldCheckSeparateLogo = !isLogoExplicitlyRemoved && (docVal.hasSeparateLogo !== false || !baseDb.settings?.logo);
+  const logoPromise = shouldCheckSeparateLogo
+    ? withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, `asset_${prefix}_logo`)), 9000)
+        .then(snap => {
+          if (!snap || !snap.exists()) return { exists: false, logo: '', updatedAt: 0 };
+          const d = snap.data();
+          return {
+            exists: true,
+            logo: typeof d?.logo === 'string' ? d.logo : '',
+            updatedAt: Number(d?.updatedAt) || 0
+          };
+        })
+        .catch(() => null)
+    : Promise.resolve({ exists: false, logo: '', updatedAt: 0 });
 
   // Build shard descriptors to fetch in parallel chunks
   const shardTasks: Array<{ col: ShardCollectionKey; idx: number; docId: string }> = [];
@@ -321,9 +334,26 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
     });
   }
 
-  const resolvedLogo = await logoPromise;
-  if (resolvedLogo && baseDb.settings) {
-    baseDb.settings.logo = resolvedLogo;
+  const logoResult = await logoPromise;
+  if (baseDb.settings) {
+    if (logoResult && logoResult.exists) {
+      if (logoResult.logo) {
+        baseDb.settings.logo = logoResult.logo;
+        baseDb.settings.logoUpdatedAt = logoResult.updatedAt || baseDb.settings.logoUpdatedAt;
+        delete baseDb.settings.logoRemovedAt;
+        cacheCompanyLogoLocally(prefix, logoResult.logo);
+      } else if (logoResult.updatedAt > (baseDb.settings.logoUpdatedAt || 0)) {
+        // Explicit cloud deletion newer than any local upload
+        baseDb.settings.logo = '';
+        baseDb.settings.logoRemovedAt = logoResult.updatedAt;
+      }
+    } else if (!baseDb.settings.logo && !baseDb.settings.logoRemovedAt) {
+      // Network timeout or doc fetch missed — restore cached logo if present on device
+      const cached = getCachedCompanyLogoLocally(prefix);
+      if (cached.logo && (!cached.removedAt || (cached.updatedAt || 0) >= cached.removedAt)) {
+        baseDb.settings.logo = cached.logo;
+      }
+    }
   }
 
   for (const col of SHARD_COLLECTIONS) {
@@ -442,10 +472,11 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 
       const now = Date.now();
       const logoString = cleanDb.settings?.logo || '';
+      const isExplicitlyRemoved = Boolean(!logoString && cleanDb.settings?.logoRemovedAt);
       const hasSeparateLogo = Boolean(logoString && logoString.length > 0);
 
-      // 1. Upload company logo asset only if changed
-      if (hasSeparateLogo) {
+      // 1. Upload or explicitly clear company logo asset (serialized via activePushChain so concurrent writes never race)
+      if (hasSeparateLogo && logoString.length <= 940000) {
         const logoHash = quickHash(logoString);
         if (uploadedLogoHashCache.get(cleanCode) !== logoHash) {
           await setDoc(doc(firestore, SYNC_DOC_PATH, `asset_${cleanCode}_logo`), {
@@ -454,6 +485,15 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
             updatedAt: now
           });
           uploadedLogoHashCache.set(cleanCode, logoHash);
+        }
+      } else if (isExplicitlyRemoved) {
+        if (uploadedLogoHashCache.get(cleanCode) !== 'REMOVED') {
+          await setDoc(doc(firestore, SYNC_DOC_PATH, `asset_${cleanCode}_logo`), {
+            companyCode: cleanCode,
+            logo: '',
+            updatedAt: cleanDb.settings?.logoRemovedAt || now
+          });
+          uploadedLogoHashCache.set(cleanCode, 'REMOVED');
         }
       }
 
@@ -575,13 +615,19 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
     }
   };
 
+  const enqueuePush = (): Promise<boolean> => {
+    const next = activePushChain.catch(() => false).then(() => pushJob());
+    activePushChain = next;
+    return next;
+  };
+
   if (immediate) {
-    return pushJob();
+    return enqueuePush();
   }
 
   return new Promise((resolve) => {
     syncDebounceTimer = setTimeout(async () => {
-      const res = await pushJob();
+      const res = await enqueuePush();
       resolve(res);
     }, 100);
   });
@@ -627,8 +673,17 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
         ...(unified.deletedInvoiceIds || []),
         ...(other.deletedInvoiceIds || [])
       ]);
+      const preservedLogo =
+        (unified.settings?.logo && unified.settings.logo.trim())
+          ? unified.settings.logo
+          : (other.settings?.logo && other.settings.logo.trim() ? other.settings.logo : '');
+
       unified = {
         ...unified,
+        settings: {
+          ...unified.settings,
+          logo: preservedLogo
+        },
         deletedInvoiceIds: Array.from(deletedSet),
         invoices: mergeInvoices(unified.invoices || [], other.invoices || [], deletedSet),
         vouchers: mergeVouchers(unified.vouchers || [], other.vouchers || []),

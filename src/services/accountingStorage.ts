@@ -139,6 +139,43 @@ export async function loadFromIndexedDB(customKey?: string): Promise<AccountingD
   }
 }
 
+function getCleanLogoCacheCode(companyCode?: string): string {
+  const raw = (companyCode || 'COMP-102').trim().toUpperCase();
+  return raw === 'COMP-101' || !raw ? 'COMP-102' : raw;
+}
+
+export function cacheCompanyLogoLocally(companyCode: string | undefined, logo: string, removedAt?: number): void {
+  if (typeof localStorage === 'undefined') return;
+  const code = getCleanLogoCacheCode(companyCode);
+  const key = `hesabaty_company_logo_${code}`;
+  try {
+    if (logo && logo.trim()) {
+      localStorage.setItem(key, JSON.stringify({ logo, updatedAt: Date.now() }));
+    } else if (removedAt) {
+      localStorage.setItem(key, JSON.stringify({ logo: '', removedAt }));
+    }
+  } catch (e) {
+    console.warn('Logo cache write notice:', e);
+  }
+}
+
+export function getCachedCompanyLogoLocally(companyCode?: string): { logo: string; updatedAt?: number; removedAt?: number } {
+  if (typeof localStorage === 'undefined') return { logo: '' };
+  const code = getCleanLogoCacheCode(companyCode);
+  try {
+    const raw = localStorage.getItem(`hesabaty_company_logo_${code}`);
+    if (!raw) return { logo: '' };
+    const parsed = JSON.parse(raw);
+    return {
+      logo: typeof parsed?.logo === 'string' ? parsed.logo : '',
+      updatedAt: typeof parsed?.updatedAt === 'number' ? parsed.updatedAt : undefined,
+      removedAt: typeof parsed?.removedAt === 'number' ? parsed.removedAt : undefined
+    };
+  } catch {
+    return { logo: '' };
+  }
+}
+
 export const PAYMENT_METHODS: PaymentMethod[] = [
   'نقدي',
   'Vodafone Cash',
@@ -2371,6 +2408,15 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
     parsed = sanitizeCompanyDatabase(parsed, normalizedTenantId);
     if (!parsed.settings.nextGRN) parsed.settings.nextGRN = 7001;
 
+    // Restore lightweight cached logo if localStorage main snapshot lacked it (e.g. quota fallback)
+    if (!parsed.settings.logo && !parsed.settings.logoRemovedAt) {
+      const cachedLogo = getCachedCompanyLogoLocally(parsed.settings.companyCode);
+      if (cachedLogo.logo) {
+        parsed.settings.logo = cachedLogo.logo;
+        if (cachedLogo.updatedAt) parsed.settings.logoUpdatedAt = cachedLogo.updatedAt;
+      }
+    }
+
     // Guarantee default accounts exist
     const currentAccountIds = new Set(parsed.accounts.map((a: Account) => a.id));
     defaultAccounts().forEach(defAcc => {
@@ -2396,6 +2442,9 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
 export function saveTenantDatabase(tenantId: string, db: AccountingDB): void {
   const storageKey = getTenantStorageKey(tenantId);
   const idbKey = getTenantIdbKey(tenantId);
+
+  // Persist tiny company logo cache independently so it never gets dropped by 3.5MB / 5MB localStorage limits
+  cacheCompanyLogoLocally(db.settings?.companyCode, db.settings?.logo || '', db.settings?.logoRemovedAt);
 
   // Asynchronously store full database in IndexedDB (supports millions of records & gigabytes)
   saveToIndexedDB(db, idbKey);
@@ -2470,6 +2519,8 @@ export function loadDatabase(): AccountingDB {
 }
 
 export function saveDatabase(db: AccountingDB): void {
+  cacheCompanyLogoLocally(db.settings?.companyCode, db.settings?.logo || '', db.settings?.logoRemovedAt);
+
   const activeTenantId = getActiveTenantId();
   if (activeTenantId) {
     saveTenantDatabase(activeTenantId, db);
@@ -2477,15 +2528,19 @@ export function saveDatabase(db: AccountingDB): void {
 
   // Always save full database to IndexedDB (scalable to millions of invoices)
   saveToIndexedDB(db, IDB_KEY);
-  try {
-    if ((db.invoices?.length || 0) <= 1200) {
-      const json = JSON.stringify(db);
-      if (json.length < 3_500_000) {
-        localStorage.setItem(STORAGE_KEY, json);
+
+  // Avoid writing a second full copy to localStorage when tenant key already stores it (prevents 5MB origin QuotaExceededError)
+  if (!activeTenantId) {
+    try {
+      if ((db.invoices?.length || 0) <= 1200) {
+        const json = JSON.stringify(db);
+        if (json.length < 3_500_000) {
+          localStorage.setItem(STORAGE_KEY, json);
+        }
       }
+    } catch (err) {
+      console.warn('localStorage limit notice (safely persisted in IndexedDB):', err);
     }
-  } catch (err) {
-    console.warn('localStorage limit notice (safely persisted in IndexedDB):', err);
   }
 }
 
