@@ -159,6 +159,7 @@ let lastLocalSavedTimestamp = 0;
 
 // Incremental shard hash cache: only modified shards are uploaded on incremental saves (O(1) network writes at 10M+ scale)
 const uploadedShardHashCache = new Map<string, string>();
+const lastKnownShardCountsByCompany = new Map<string, Record<string, number>>();
 let uploadedLogoHashCache = new Map<string, string>();
 let activePushChain: Promise<boolean> = Promise.resolve(true);
 
@@ -294,6 +295,7 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
 
   const prefix = normalizeCompanyCode(docVal.shardPrefix || docVal.companyCode || fallbackCode);
   const shardCounts: Record<string, number> = docVal.shardCounts || {};
+  lastKnownShardCountsByCompany.set(prefix, { ...shardCounts });
 
   // Fetch separate logo asset whenever logo wasn't explicitly deleted (even if an older/stale manifest didn't set hasSeparateLogo)
   const isLogoExplicitlyRemoved = Boolean(baseDb.settings?.logoRemovedAt);
@@ -472,11 +474,15 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
                                    (!cleanDb.suppliers || cleanDb.suppliers.length === 0) &&
                                    (!cleanDb.users || cleanDb.users.length <= 1);
 
+      let prevCloudShardCounts: Record<string, number> = lastKnownShardCountsByCompany.get(cleanCode) || {};
       try {
         const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${cleanCode}`);
         const checkSnap = await withTimeout(getDoc(compDocRef), 1800);
         if (checkSnap && checkSnap.exists()) {
           const val = checkSnap.data();
+          if (val?.shardCounts && typeof val.shardCounts === 'object') {
+            prevCloudShardCounts = { ...prevCloudShardCounts, ...val.shardCounts };
+          }
           if (isUninitializedClient && val) {
             const hasShardedData = val.sharded && ((val.shardCounts?.invoices || 0) > 0 || (val.shardCounts?.products || 0) > 0);
             let hasLegacyData = false;
@@ -525,7 +531,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
         }
       }
 
-      // 2. Shard large collections & write ONLY changed shards (O(changed shards) instead of full rewrite!)
+      // 2. Shard large collections & write ONLY changed shards (and zero out any shrank shards after Hard Deletes)
       const shardCounts: Record<string, number> = {};
       const shardWritePromises: Promise<void>[] = [];
 
@@ -533,8 +539,9 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
         const arr: any[] = Array.isArray((cleanDb as any)[col]) ? (cleanDb as any)[col] : [];
         const numShards = Math.ceil(arr.length / SHARD_PAGE_SIZE);
         shardCounts[col] = numShards;
+        const prevCount = Number(prevCloudShardCounts[col]) || 0;
 
-        // Clear cached hashes for shards that no longer exist after deletions so re-growth pushes cleanly
+        // Clear cached hashes for shards that no longer exist after deletions and wipe their cloud payload
         const prefixKey = `${cleanCode}::${col}::`;
         for (const cachedKey of Array.from(uploadedShardHashCache.keys())) {
           if (cachedKey.startsWith(prefixKey)) {
@@ -567,12 +574,30 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
             );
           }
         }
+
+        // Wipe any stale higher-index shard docs left behind after Hard Deletes
+        for (let staleIdx = numShards; staleIdx < prevCount; staleIdx++) {
+          const shardRef = doc(firestore, SYNC_DOC_PATH, `shard_${cleanCode}_${col}_${staleIdx}`);
+          shardWritePromises.push(
+            setDoc(shardRef, {
+              companyCode: cleanCode,
+              collection: col,
+              shardIndex: staleIdx,
+              count: 0,
+              updatedAt: now,
+              itemsJson: '[]'
+            }).then(() => {
+              uploadedShardHashCache.delete(`${cleanCode}::${col}::${staleIdx}`);
+            })
+          );
+        }
       }
 
       // Execute shard writes in batches of 15 before publishing updated manifest
       for (let i = 0; i < shardWritePromises.length; i += 15) {
         await Promise.all(shardWritePromises.slice(i, i + 15));
       }
+      lastKnownShardCountsByCompany.set(cleanCode, { ...shardCounts });
 
       // 3. Build ultra-lightweight core payload (~15-35 KB max!) without inline logo or heavy arrays
       const lightCoreDb: AccountingDB = {

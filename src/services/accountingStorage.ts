@@ -3625,80 +3625,70 @@ export function getBranchFinancialSummary(db: AccountingDB, branchId: string) {
 }
 
 /**
- * Deletes an invoice and fully reverts all its inventory, accounting, treasury, and balance effects:
- * - Returns stock to products in the exact invoice branch
- * - Removes stock movements
- * - Removes treasury movements
- * - Removes double-entry journal entries
- * - Removes return items (if return invoice)
- * - Updates party (customer/supplier) balance
- * - Logs comprehensive audit trail
+ * Permanently deletes an invoice (Hard Delete) and fully reverts all related dependencies:
+ * - Reverts stock quantities in the exact invoice branch and recalculates FIFO purchase cost/valuation
+ * - Removes all linked stock movements, treasury entries, journals, returns, and linked vouchers (+ their journals/treasury)
+ * - Clears any GRN links referencing the deleted invoice
+ * - Recalculates affected party (customer/supplier) balances
+ * - Persists immediately to storage so deleted records never reappear on refresh
  */
 export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): AccountingDB {
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  if (!updated.invoices) updated.invoices = [];
+  if (!updated.stockMovements) updated.stockMovements = [];
+  if (!updated.treasury) updated.treasury = [];
+  if (!updated.journals) updated.journals = [];
+  if (!updated.vouchers) updated.vouchers = [];
+  if (!updated.products) updated.products = [];
+
   const targetBranch = invoice.branchId || 'br_main';
-
-  // 1. Revert stock for each item in the invoice's branch
-  invoice.items.forEach(oldItem => {
-    const prod = updated.products.find(p => p.id === oldItem.productId || p.code === oldItem.productCode);
-    if (prod) {
-      const bp = getProductForBranch(prod, targetBranch);
-      let revertedQty = bp.currentQty;
-
-      if (invoice.type === 'sale' || invoice.invoiceKind === 'sale' || invoice.invoiceKind === 'wholesale') {
-        // Sale had subtracted items -> add them back to inventory
-        revertedQty += oldItem.qty;
-      } else if (invoice.type === 'purchase' || invoice.invoiceKind === 'purchase') {
-        // Purchase had added items -> subtract them from inventory
-        revertedQty -= oldItem.qty;
-      } else if (invoice.invoiceKind === 'sale_return') {
-        // Sale return had added items -> subtract them from inventory
-        revertedQty -= oldItem.qty;
-      } else if (invoice.invoiceKind === 'purchase_return') {
-        // Purchase return had returned items -> add them back to inventory
-        revertedQty += oldItem.qty;
-      }
-
-      const updatedProd = updateProductBranchData(prod, targetBranch, { currentQty: revertedQty });
-      const pIdx = updated.products.findIndex(p => p.id === prod.id);
-      if (pIdx > -1) {
-        updated.products[pIdx] = updatedProd;
-      }
-    }
-  });
+  const cleanInvId = (invoice.id || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
 
   const invKindStr = invoice.invoiceKind || invoice.type;
-  const expectedSmType = invKindStr === 'sale_return'
+  const isSaleReturn = invKindStr === 'sale_return';
+  const isPurchaseReturn = invKindStr === 'purchase_return';
+  const isPurchase = !isSaleReturn && !isPurchaseReturn && (invoice.type === 'purchase' || invKindStr === 'purchase');
+  const isSale = !isSaleReturn && !isPurchaseReturn && (invoice.type === 'sale' || invKindStr === 'sale' || invKindStr === 'wholesale');
+
+  const expectedSmType = isSaleReturn
     ? 'sale_return'
-    : invKindStr === 'purchase_return'
+    : isPurchaseReturn
       ? 'purchase_return'
-      : invoice.type === 'purchase'
+      : isPurchase
         ? 'purchase'
         : 'sale';
   const expectedTrSourceType = expectedSmType;
   const expectedVoucherType: 'receipt' | 'payment' =
-    (invoice.type === 'sale' || invKindStr === 'purchase_return') ? 'receipt' : 'payment';
-  const expectedTrPrefix = invoice.type === 'purchase'
+    (isSale || isPurchaseReturn) ? 'receipt' : 'payment';
+  const expectedTrPrefix = isPurchase
     ? `فاتورة مشتريات رقم ${invoice.number}`
     : `فاتورة مبيعات رقم ${invoice.number}`;
 
   const removedIds: string[] = [invoice.id];
+  if (invoice.journalEntryId) removedIds.push(invoice.journalEntryId);
 
-  // 2. Remove related stock movements
+  const affectedPartyIds = new Set<string>();
+  if (invoice.partyId) affectedPartyIds.add(invoice.partyId);
+
+  // 1. Hard-delete related stock movements
   updated.stockMovements = updated.stockMovements.filter(sm => {
-    const rm = sm.sourceId === invoice.id || (!sm.sourceId && sm.refNumber === invoice.number && sm.type === expectedSmType);
+    const rm =
+      sm.sourceId === invoice.id ||
+      (sm.id && (sm.id.startsWith(`sm_${invoice.id}_`) || (cleanInvId && sm.id.startsWith(`sm_${cleanInvId}_`)))) ||
+      (!sm.sourceId && sm.refNumber === invoice.number && sm.type === expectedSmType);
     if (rm && sm.id) removedIds.push(sm.id);
     return !rm;
   });
 
-  // 3. Remove all treasury entries related to this invoice
+  // 2. Hard-delete all treasury entries related to this invoice (including wholesale & split payments)
   updated.treasury = updated.treasury.filter(tr => {
+    const matchesSourceType = tr.sourceType === expectedTrSourceType || (isSale && tr.sourceType === 'wholesale');
     const rm =
       tr.sourceId === invoice.id ||
       (tr as any).invoiceId === invoice.id ||
-      (tr.id && invoice.id && tr.id.includes(invoice.id)) ||
-      ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim() && tr.sourceType === expectedTrSourceType) ||
-      Boolean(invoice.number && tr.description && tr.sourceType === expectedTrSourceType && (
+      (tr.id && invoice.id && (tr.id.includes(invoice.id) || (cleanInvId && tr.id.includes(cleanInvId)))) ||
+      ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim() && matchesSourceType) ||
+      Boolean(invoice.number && tr.description && matchesSourceType && (
         tr.description.includes(expectedTrPrefix) ||
         tr.description.includes(`مرتجع رقم ${invoice.number}`)
       ));
@@ -3706,14 +3696,17 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     return !rm;
   });
 
-  // 4. Remove journal entry
+  // 3. Hard-delete invoice double-entry journal
   updated.journals = updated.journals.filter(j => {
-    const rm = j.sourceId === invoice.id || j.id === invoice.journalEntryId || (j.id && j.id.includes(invoice.id));
+    const rm =
+      j.sourceId === invoice.id ||
+      j.id === invoice.journalEntryId ||
+      (j.id && (j.id.includes(invoice.id) || (cleanInvId && j.id.includes(cleanInvId))));
     if (rm && j.id) removedIds.push(j.id);
     return !rm;
   });
 
-  // 5. Remove any return entries
+  // 4. Hard-delete any return entries tied to this invoice
   if (updated.returns) {
     updated.returns = updated.returns.filter(r => {
       const rm = r.originalInvoiceId === invoice.id || (r.number === invoice.number && r.type === invoice.type);
@@ -3722,94 +3715,216 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     });
   }
 
-  // 5.5. Remove any linked payment/receipt vouchers created for this invoice and their journals
+  // 5. Hard-delete any linked vouchers and their journals/treasury
   const linkedVoucherIds = new Set<string>();
-  if (updated.vouchers) {
-    updated.vouchers = updated.vouchers.filter(v => {
-      const isLinked = (v.id && invoice.id && v.id.includes(invoice.id)) ||
-                       (v as any).sourceId === invoice.id ||
-                       (v as any).invoiceId === invoice.id ||
-                       ((v as any).referenceNumber === invoice.number && v.type === expectedVoucherType) ||
-                       (v.type === expectedVoucherType && v.description && v.description.includes(expectedTrPrefix));
-      if (isLinked) {
+  const linkedVoucherJournalIds = new Set<string>();
+  updated.vouchers = updated.vouchers.filter(v => {
+    const isLinked =
+      (v.id && invoice.id && (v.id.includes(invoice.id) || (cleanInvId && v.id.includes(cleanInvId)))) ||
+      (v as any).sourceId === invoice.id ||
+      (v as any).invoiceId === invoice.id ||
+      ((v as any).referenceNumber === invoice.number && v.type === expectedVoucherType) ||
+      (v.type === expectedVoucherType && v.description && v.description.includes(expectedTrPrefix));
+    if (isLinked) {
+      if (v.id) {
         linkedVoucherIds.add(v.id);
         removedIds.push(v.id);
-        return false;
       }
-      return true;
+      if (v.journalEntryId) {
+        linkedVoucherJournalIds.add(v.journalEntryId);
+        removedIds.push(v.journalEntryId);
+      }
+      if (v.partyId) affectedPartyIds.add(v.partyId);
+      return false;
+    }
+    return true;
+  });
+
+  if (linkedVoucherIds.size > 0 || linkedVoucherJournalIds.size > 0) {
+    updated.journals = updated.journals.filter(j => {
+      const rm =
+        linkedVoucherIds.has(j.sourceId || '') ||
+        linkedVoucherIds.has(j.id) ||
+        linkedVoucherJournalIds.has(j.id) ||
+        Array.from(linkedVoucherIds).some(vid => vid && j.id && j.id.includes(vid));
+      if (rm && j.id) removedIds.push(j.id);
+      return !rm;
     });
-
-    if (linkedVoucherIds.size > 0) {
-      updated.journals = updated.journals.filter(j => {
-        const rm = linkedVoucherIds.has(j.sourceId || '') || linkedVoucherIds.has(j.id);
-        if (rm && j.id) removedIds.push(j.id);
-        return !rm;
-      });
-      updated.treasury = updated.treasury.filter(tr => {
-        const rm = linkedVoucherIds.has(tr.sourceId || '') || linkedVoucherIds.has(tr.id);
-        if (rm && tr.id) removedIds.push(tr.id);
-        return !rm;
-      });
-    }
+    updated.treasury = updated.treasury.filter(tr => {
+      const rm =
+        linkedVoucherIds.has(tr.sourceId || '') ||
+        linkedVoucherIds.has(tr.id) ||
+        Array.from(linkedVoucherIds).some(vid => vid && tr.id && tr.id.includes(vid));
+      if (rm && tr.id) removedIds.push(tr.id);
+      return !rm;
+    });
   }
 
-  // 6. Remove the invoice itself & record permanent deletion tombstones across all removed IDs
+  // 6. Detach any Goods Received Notes referencing the deleted invoice
+  if (Array.isArray(updated.goodsReceivedNotes)) {
+    updated.goodsReceivedNotes.forEach(grn => {
+      if (grn && grn.matchedInvoiceId === invoice.id) {
+        grn.matchedInvoiceId = undefined;
+        if (grn.status === 'مفوتر') grn.status = 'معتمد ومستلم';
+      }
+    });
+  }
+
+  // 7. Hard-delete the invoice itself from updated.invoices
   updated.invoices = updated.invoices.filter(i => i.id !== invoice.id);
-  markRecordsDeleted(updated, removedIds, [invoice.id]);
 
-  // 7. Update party balance if party exists
-  if (invoice.partyId) {
-    const cust = updated.customers.find(c => c.id === invoice.partyId);
-    if (cust) {
-      cust.balance = calculateCustomerBalance(updated, cust.id);
+  // 8. Revert product stock quantities and recalculate FIFO buyPrice/avgCost from remaining purchases
+  const fifoAfterDelete = buildProductFifoLedger(updated, targetBranch);
+  const impactedProductKeys = new Set<string>();
+
+  (invoice.items || []).forEach(oldItem => {
+    const normOldName = normalizeArabicText(oldItem.productName);
+    const prod = updated.products.find(
+      p =>
+        (oldItem.productId && p.id === oldItem.productId) ||
+        (oldItem.productCode && p.code === oldItem.productCode) ||
+        (normOldName && normalizeArabicText(p.name) === normOldName)
+    );
+    if (prod) {
+      impactedProductKeys.add(prod.id);
+      const bp = getProductForBranch(prod, targetBranch);
+      let revertedQty = bp.currentQty;
+
+      if (isSale) {
+        revertedQty += oldItem.qty;
+      } else if (isPurchase) {
+        revertedQty -= oldItem.qty;
+      } else if (isSaleReturn) {
+        revertedQty -= oldItem.qty;
+      } else if (isPurchaseReturn) {
+        revertedQty += oldItem.qty;
+      }
+
+      const branchUpdates: Partial<BranchProductData> = {
+        currentQty: roundQty(revertedQty)
+      };
+
+      if (isPurchase) {
+        const fifoSummary = fifoAfterDelete.getProductSummary(prod.id, prod.name);
+        const revertedBuyPrice = fifoSummary.hasVerifiedPurchase ? fifoSummary.latestBuyPrice : 0;
+        branchUpdates.buyPrice = revertedBuyPrice;
+        branchUpdates.avgCost = revertedBuyPrice;
+      }
+
+      const updatedProd = updateProductBranchData(prod, targetBranch, branchUpdates);
+      const pIdx = updated.products.findIndex(p => p.id === prod.id);
+      if (pIdx > -1) {
+        updated.products[pIdx] = updatedProd;
+      }
     }
-    const supp = updated.suppliers.find(s => s.id === invoice.partyId);
-    if (supp) {
-      supp.balance = calculateSupplierBalance(updated, supp.id);
-    }
+  });
+
+  // If a purchase invoice was deleted, update FIFO COGS on remaining sale invoices for affected products
+  if (isPurchase && impactedProductKeys.size > 0) {
+    updated.invoices.forEach(inv => {
+      if (!inv || inv.invoiceKind === 'quote' || inv.invoiceKind === 'sale_return' || inv.invoiceKind === 'purchase_return') return;
+      if (inv.type !== 'sale' && inv.invoiceKind !== 'sale' && inv.invoiceKind !== 'wholesale') return;
+      inv.items?.forEach((it, lineIdx) => {
+        if (!it.productId || !impactedProductKeys.has(it.productId)) return;
+        const alloc = fifoAfterDelete.getSaleAllocation(inv.id, it.productId, it.productName, lineIdx);
+        if (alloc && alloc.hasVerifiedCost && alloc.effectiveUnitCost !== undefined) {
+          it.costPrice = Number(alloc.effectiveUnitCost.toFixed(4));
+          it.hasVerifiedCost = alloc.hasFullVerifiedCost;
+          it.uncoveredQty = alloc.uncoveredQty;
+        } else {
+          it.costPrice = 0;
+          it.hasVerifiedCost = false;
+          it.uncoveredQty = Math.abs(Number(it.qty) || 0);
+        }
+      });
+    });
   }
 
-  // 8. Log audit trail
-  const invTypeName = invoice.type === 'purchase' ? 'فاتورة شراء' : 'فاتورة بيع';
+  // 9. Recalculate affected customer/supplier balances
+  affectedPartyIds.forEach(partyId => {
+    const cust = (updated.customers || []).find(c => c.id === partyId);
+    if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
+    const supp = (updated.suppliers || []).find(s => s.id === partyId);
+    if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
+  });
+
+  // 10. Log audit trail, purge all deleted IDs, and persist immediately
+  const invTypeName = isPurchase ? 'فاتورة شراء' : isSaleReturn ? 'مرتجع مبيعات' : isPurchaseReturn ? 'مرتجع مشتريات' : 'فاتورة بيع';
   logAudit(
     updated,
-    `حذف ${invTypeName} وعكس التأثير بالكامل`,
-    `تم حذف الفاتورة ${invoice.number} وعكس المخزون (${invoice.items.length} أصناف) والخزينة والقيود المحاسبية والأرصدة بالكامل`
+    `حذف نهائي (${invTypeName}) وعكس التأثير بالكامل`,
+    `تم حذف الفاتورة ${invoice.number} نهائياً وعكس المخزون (${(invoice.items || []).length} أصناف) والخزينة والقيود والأرصدة بالكامل`
   );
+
+  markRecordsDeleted(updated, removedIds, [invoice.id]);
+  purgeDeletedRecordsFromDb(updated);
+  saveDatabase(updated);
 
   return updated;
 }
 
 /**
- * Deletes any voucher (receipt or payment) and cleanly reverts:
- * - Treasury entry and balance
- * - General journal double-entry
- * - Party (customer/supplier) balance
- * - Permanent deletion tombstone
+ * Permanently deletes any voucher (receipt or payment) (Hard Delete) and cleanly reverts:
+ * - Linked treasury entries (including auto-invoice treasury if legacy auto-voucher)
+ * - Double-entry general journal
+ * - Linked invoice paid/remaining/status/payments/paymentMethod
+ * - Party (customer/supplier) balances
+ * - Persists immediately to storage so deleted records never reappear on refresh
  */
 export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): AccountingDB {
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-  const removedIds: string[] = [voucher.id];
+  if (!updated.vouchers) updated.vouchers = [];
+  if (!updated.treasury) updated.treasury = [];
+  if (!updated.journals) updated.journals = [];
+  if (!updated.invoices) updated.invoices = [];
 
-  // 1. Remove treasury entry
+  const cleanVoucherId = (voucher.id || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const removedIds: string[] = [voucher.id];
+  if (voucher.journalEntryId) removedIds.push(voucher.journalEntryId);
+
+  const isLegacyAutoVoucher = Boolean(voucher.isAutoFromInvoice || (voucher.id && voucher.id.startsWith('vch_')));
+  const cleanInvId = voucher.invoiceId ? voucher.invoiceId.trim().replace(/[^a-zA-Z0-9_-]/g, '_') : '';
+
+  // 1. Hard-delete treasury entries linked to this voucher (and direct invoice treasury if legacy auto-voucher)
   updated.treasury = updated.treasury.filter(tr => {
-    const rm = tr.sourceId === voucher.id || tr.id === voucher.id || tr.id.includes(voucher.id);
+    const isDirectVoucherTr =
+      tr.sourceId === voucher.id ||
+      tr.id === voucher.id ||
+      (tr.id && (tr.id.includes(voucher.id) || (cleanVoucherId && tr.id.includes(cleanVoucherId))));
+    const isAutoInvoiceTr = Boolean(
+      isLegacyAutoVoucher &&
+      voucher.invoiceId && (
+        tr.sourceId === voucher.invoiceId ||
+        (tr as any).invoiceId === voucher.invoiceId ||
+        (cleanInvId && (
+          tr.id.startsWith(`tr_sale_${cleanInvId}`) ||
+          tr.id.startsWith(`tr_wholesale_${cleanInvId}`) ||
+          tr.id.startsWith(`tr_purchase_${cleanInvId}`)
+        ))
+      )
+    );
+    const rm = isDirectVoucherTr || isAutoInvoiceTr;
     if (rm && tr.id) removedIds.push(tr.id);
     return !rm;
   });
 
-  // 2. Remove journal entry
+  // 2. Hard-delete double-entry journal for this voucher
   updated.journals = updated.journals.filter(j => {
-    const rm = j.sourceId === voucher.id || j.id === voucher.journalEntryId;
+    const rm =
+      j.sourceId === voucher.id ||
+      j.id === voucher.journalEntryId ||
+      (j.id && (j.id.includes(voucher.id) || (cleanVoucherId && j.id.includes(cleanVoucherId))));
     if (rm && j.id) removedIds.push(j.id);
     return !rm;
   });
 
-  // 3. Remove voucher & record permanent deletion tombstone
+  // 3. Hard-delete voucher itself
   updated.vouchers = updated.vouchers.filter(item => item.id !== voucher.id);
-  markRecordsDeleted(updated, removedIds);
 
-  // 3.5. If voucher was linked to an invoice, revert invoice paid and remaining amount
+  // 4. Revert linked invoice paid / remaining / status / payments / paymentMethod
+  const affectedPartyIds = new Set<string>();
+  if (voucher.partyId) affectedPartyIds.add(voucher.partyId);
+
   if (voucher.invoiceId || (voucher as any).referenceNumber) {
     const expectedInvType = voucher.type === 'receipt' ? 'sale' : 'purchase';
     const linkedInv =
@@ -3818,35 +3933,58 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
         ? updated.invoices.find(i => i.number === (voucher as any).referenceNumber && i.type === expectedInvType)
         : undefined);
     if (linkedInv) {
-      linkedInv.paid = roundMoney(Math.max(0, (linkedInv.paid || 0) - voucher.amount));
-      linkedInv.remaining = roundMoney(Math.max(0, (linkedInv.total || 0) - linkedInv.paid));
+      const voucherAmt = Number(voucher.amount) || 0;
+      linkedInv.paid = roundMoney(Math.max(0, (Number(linkedInv.paid) || 0) - voucherAmt));
+      linkedInv.remaining = roundMoney(Math.max(0, (Number(linkedInv.total) || 0) - linkedInv.paid));
       linkedInv.status = linkedInv.paid <= 0 ? 'آجل' : linkedInv.remaining <= 0 ? 'مدفوع' : 'جزئي';
+
+      if (linkedInv.paid <= 0) {
+        linkedInv.payments = [];
+        linkedInv.paymentMethod = 'آجل';
+      } else if (Array.isArray(linkedInv.payments) && linkedInv.payments.length > 0) {
+        let toDeduct = voucherAmt;
+        const nextPayments = linkedInv.payments
+          .map(p => {
+            if (!p || toDeduct <= 0 || p.method === 'آجل') return p;
+            if (p.method === voucher.paymentMethod || linkedInv.payments!.length === 1) {
+              const amt = Number(p.amount) || 0;
+              const cut = Math.min(amt, toDeduct);
+              toDeduct = roundMoney(toDeduct - cut);
+              return { ...p, amount: roundMoney(amt - cut) };
+            }
+            return p;
+          })
+          .filter(p => p && (Number(p.amount) || 0) > 0);
+        linkedInv.payments = nextPayments;
+      }
+
+      if (linkedInv.partyId) affectedPartyIds.add(linkedInv.partyId);
     }
   }
 
-  // 4. Update party balance
-  if (voucher.partyId) {
-    const cust = updated.customers.find(c => c.id === voucher.partyId);
-    if (cust) {
-      cust.balance = calculateCustomerBalance(updated, cust.id);
-    }
-    const supp = updated.suppliers.find(s => s.id === voucher.partyId);
-    if (supp) {
-      supp.balance = calculateSupplierBalance(updated, supp.id);
-    }
-  }
+  // 5. Recalculate affected customer/supplier balances
+  affectedPartyIds.forEach(partyId => {
+    const cust = (updated.customers || []).find(c => c.id === partyId);
+    if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
+    const supp = (updated.suppliers || []).find(s => s.id === partyId);
+    if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
+  });
 
   logAudit(
     updated,
-    `حذف ${voucher.type === 'receipt' ? 'سند قبض' : 'سند صرف'} وعكس الأرصدة`,
-    `تم حذف السند ${voucher.number} بقيمة ${voucher.amount} وعكس الخزينة وحساب الطرف بالكامل`
+    `حذف نهائي (${voucher.type === 'receipt' ? 'سند قبض' : 'سند صرف'}) وعكس الأرصدة`,
+    `تم حذف السند ${voucher.number} بقيمة ${voucher.amount} نهائياً وعكس الخزينة والقيود وحساب الطرف بالكامل`
   );
+
+  markRecordsDeleted(updated, removedIds);
+  purgeDeletedRecordsFromDb(updated);
+  saveDatabase(updated);
 
   return updated;
 }
 
 /**
- * Deletes any stock adjustment and cleanly reverts
+ * Permanently deletes any stock adjustment (Hard Delete) and cleanly reverts stock, movements & journals
  */
 export function deleteAdjustmentAndRevert(db: AccountingDB, adjustmentId: string): AccountingDB {
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
@@ -3858,31 +3996,34 @@ export function deleteAdjustmentAndRevert(db: AccountingDB, adjustmentId: string
     const bId = adj.branchId || 'br_main';
     const bp = getProductForBranch(prod, bId);
     const revertedQty = bp.currentQty - adj.diffQty;
-    const prodUpdated = updateProductBranchData(prod, bId, { currentQty: revertedQty });
+    const prodUpdated = updateProductBranchData(prod, bId, { currentQty: roundQty(revertedQty) });
     const pIdx = updated.products.findIndex(p => p.id === prod.id);
     if (pIdx > -1) updated.products[pIdx] = prodUpdated;
   }
 
   const removedIds: string[] = [adj.id];
   updated.stockMovements = (updated.stockMovements || []).filter(sm => {
-    const rm = sm.sourceId === adj.id;
+    const rm = sm.sourceId === adj.id || (sm.id && sm.id.includes(adj.id));
     if (rm && sm.id) removedIds.push(sm.id);
     return !rm;
   });
   updated.journals = (updated.journals || []).filter(j => {
-    const rm = j.sourceId === adj.id;
+    const rm = j.sourceId === adj.id || (j.id && j.id.includes(adj.id));
     if (rm && j.id) removedIds.push(j.id);
     return !rm;
   });
   updated.adjustments = (updated.adjustments || []).filter(a => a.id !== adj.id);
-  markRecordsDeleted(updated, removedIds);
 
-  logAudit(updated, 'حذف تسوية جردية وعكس الرصيد', `تم حذف التسوية وعكس كمية المخزون بالكامل`);
+  logAudit(updated, 'حذف نهائي تسوية جردية وعكس الرصيد', `تم حذف التسوية نهائياً وعكس كمية المخزون بالكامل`);
+  markRecordsDeleted(updated, removedIds);
+  purgeDeletedRecordsFromDb(updated);
+  saveDatabase(updated);
+
   return updated;
 }
 
 /**
- * Deletes any manual treasury entry, expense, or revenue and cleanly reverts & tombstones permanently
+ * Permanently deletes any treasury entry, expense, or revenue (Hard Delete) and cleanly reverts all dependencies
  */
 export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string): AccountingDB {
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
@@ -3907,31 +4048,38 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
     });
   }
 
-  // 2. If this was linked to a voucher, remove the voucher and recalculate party balance
-  if (tr.sourceType === 'voucher' || tr.sourceType === 'receipt' || tr.sourceType === 'payment' || (updated.vouchers && updated.vouchers.some(v => v.id === targetSourceId))) {
-    const voucher = (updated.vouchers || []).find(v => v.id === targetSourceId);
-    if (voucher) {
-      removedIds.push(voucher.id);
-      updated.vouchers = updated.vouchers.filter(v => v.id !== voucher.id);
-      if (voucher.partyId) {
-        const cust = updated.customers.find(c => c.id === voucher.partyId);
-        if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
-        const supp = updated.suppliers.find(s => s.id === voucher.partyId);
-        if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
-      }
+  // 2. If this was linked to a voucher, remove the voucher and its journal and recalculate party balance
+  const linkedVoucher = (
+    tr.sourceType === 'voucher' ||
+    tr.sourceType === 'receipt' ||
+    tr.sourceType === 'payment' ||
+    (updated.vouchers && updated.vouchers.some(v => v.id === targetSourceId))
+  )
+    ? (updated.vouchers || []).find(v => v.id === targetSourceId)
+    : undefined;
+
+  if (linkedVoucher) {
+    removedIds.push(linkedVoucher.id);
+    if (linkedVoucher.journalEntryId) removedIds.push(linkedVoucher.journalEntryId);
+    updated.vouchers = updated.vouchers.filter(v => v.id !== linkedVoucher.id);
+    if (linkedVoucher.partyId) {
+      const cust = updated.customers.find(c => c.id === linkedVoucher.partyId);
+      if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
+      const supp = updated.suppliers.find(s => s.id === linkedVoucher.partyId);
+      if (supp) supp.balance = calculateSupplierBalance(updated, supp.id);
     }
   }
 
-  // 3. If this was linked to an invoice (purchase, sale, return), revert invoice paid/remaining and party balance
+  // 3. If this was linked to an invoice (purchase, sale, wholesale, return), revert invoice paid/remaining/payments and party balance
   const invoiceNumMatch = tr.description ? tr.description.match(/رقم\s*([A-Za-z0-9_-]+)/) : null;
   const invNumberExtracted = invoiceNumMatch ? invoiceNumMatch[1] : null;
   const expectedInvType = (tr.sourceType === 'purchase' || tr.sourceType === 'purchase_return')
     ? 'purchase'
-    : (tr.sourceType === 'sale' || tr.sourceType === 'sale_return')
+    : (tr.sourceType === 'sale' || tr.sourceType === 'wholesale' || tr.sourceType === 'sale_return')
       ? 'sale'
       : undefined;
   const linkedInvoice =
-    (updated.invoices || []).find(i => i.id === targetSourceId) ||
+    (updated.invoices || []).find(i => i.id === targetSourceId || i.id === (tr as any).invoiceId) ||
     (updated.invoices || []).find(i =>
       (!expectedInvType || i.type === expectedInvType) && (
         (invNumberExtracted && String(i.number).trim() === invNumberExtracted.trim()) ||
@@ -3943,8 +4091,12 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
     linkedInvoice.paid = roundMoney(Math.max(0, (linkedInvoice.paid || 0) - tr.amount));
     linkedInvoice.remaining = roundMoney(Math.max(0, (linkedInvoice.total || 0) - linkedInvoice.paid));
     linkedInvoice.status = linkedInvoice.paid <= 0 ? 'آجل' : linkedInvoice.remaining <= 0 ? 'مدفوع' : 'جزئي';
+    if (linkedInvoice.paid <= 0) {
+      linkedInvoice.payments = [];
+      linkedInvoice.paymentMethod = 'آجل';
+    }
 
-    // Also remove any auto voucher for this deleted treasury entry so it does not linger
+    // Also remove any stale auto voucher for this deleted treasury entry
     updated.vouchers = (updated.vouchers || []).filter(v => {
       const isLinkedAuto = (v.isAutoFromInvoice || v.id.startsWith('vch_')) && v.invoiceId === linkedInvoice.id;
       if (isLinkedAuto && v.id) removedIds.push(v.id);
@@ -3959,24 +4111,30 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
     }
   }
 
-  // 4. Remove treasury entry
+  // 4. Hard-delete treasury entry itself
   updated.treasury = updated.treasury.filter(t => t.id !== entryId);
 
-  // 5. Remove journals (for non-invoice movements or treasury entry's own journal)
+  // 5. Hard-delete associated journals (for non-invoice movements or treasury/voucher's own journal)
   updated.journals = (updated.journals || []).filter(j => {
-    const rm = (!linkedInvoice && (j.sourceId === targetSourceId || j.id === targetSourceId)) || j.sourceId === entryId || j.id === entryId;
+    const rm =
+      (!linkedInvoice && (j.sourceId === targetSourceId || j.id === targetSourceId || (j.id && j.id.includes(targetSourceId)))) ||
+      j.sourceId === entryId ||
+      j.id === entryId ||
+      (j.id && j.id.includes(entryId)) ||
+      (linkedVoucher && (j.id === linkedVoucher.journalEntryId || j.sourceId === linkedVoucher.id));
     if (rm && j.id) removedIds.push(j.id);
     return !rm;
   });
 
-  // 6. Persist permanent deletion tombstones
-  markRecordsDeleted(updated, removedIds);
-
   logAudit(
     updated,
-    'حذف حركة خزينة وعكس الرصيد',
-    `تم حذف حركة ${tr.direction === 'in' ? 'وارد' : 'صادر'} بقيمة ${tr.amount} وعكس رصيد الخزينة والفاتورة والأرصدة والقيود`
+    'حذف نهائي لحركة خزينة وعكس الرصيد',
+    `تم حذف حركة ${tr.direction === 'in' ? 'وارد' : 'صادر'} بقيمة ${tr.amount} نهائياً وعكس رصيد الخزينة والفاتورة والأرصدة والقيود`
   );
+
+  markRecordsDeleted(updated, removedIds);
+  purgeDeletedRecordsFromDb(updated);
+  saveDatabase(updated);
 
   return updated;
 }
@@ -4229,12 +4387,11 @@ export function parseNum(val: any): number {
 }
 
 /**
- * Synchronizes linked Receipt (سند قبض) or Payment (سند صرف) vouchers for an invoice.
- * Follows ERP cascading relational integrity (Odoo / Pro Accountant 2000 style):
- * - Sales / Wholesale Invoices with paid amount generate linked Receipt Vouchers
- * - Purchase Invoices with paid amount generate linked Payment Vouchers
- * - When an invoice is edited, its linked voucher is automatically updated
- * - When an invoice is deleted, its linked voucher is purged
+ * Non-generative voucher synchronizer:
+ * NEVER auto-creates new automatic Receipt/Payment vouchers when an invoice is posted.
+ * Only manual vouchers entered directly by the user are created; invoices retain solely
+ * their core double-entry journal (`createInvoiceJournal`).
+ * If a legacy auto-voucher already exists for an edited invoice, it updates or cleans it up.
  */
 export function syncInvoiceVouchers(
   db: AccountingDB,
@@ -4263,8 +4420,6 @@ export function syncInvoiceVouchers(
     return updated;
   }
 
-  // Money incoming -> 'receipt': Sales, Wholesale
-  // Money outgoing -> 'payment': Purchase
   const voucherType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
 
   const isAutoVoucherForInvoice = (v: Voucher): boolean => {
@@ -4282,7 +4437,7 @@ export function syncInvoiceVouchers(
     ? new RegExp(`رقم\\s*${invoiceNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![0-9A-Za-z])`)
     : null;
 
-  // If no auto-payment portion remains at invoice posting, remove ONLY auto invoice vouchers (preserve manual installments!)
+  // If no auto-payment portion remains, remove any stale auto-vouchers (never touch manual vouchers)
   if (autoPaidPortion <= 0) {
     updated.vouchers = updated.vouchers.filter(v => {
       if (!isAutoVoucherForInvoice(v)) return true;
@@ -4295,19 +4450,7 @@ export function syncInvoiceVouchers(
     return updated;
   }
 
-  const activePayMethod = (invoice.payments || []).find(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0)?.method;
-  const paymentMethod = (invoice.paymentMethod && invoice.paymentMethod !== 'آجل')
-    ? invoice.paymentMethod
-    : (activePayMethod || 'نقدي');
-  const desc = isSale
-    ? `سند قبض مقابل فاتورة مبيعات رقم ${invoice.number} (${invoice.partyName || 'عميل نقدي'}) عبر ${paymentMethod}`
-    : isPurchaseReturn
-    ? `سند قبض مقابل فاتورة مرتجع مشتريات رقم ${invoice.number} (${invoice.partyName || 'مورد عام'}) عبر ${paymentMethod}`
-    : isSaleReturn
-    ? `سند صرف مقابل فاتورة مرتجع مبيعات رقم ${invoice.number} (${invoice.partyName || 'عميل نقدي'}) عبر ${paymentMethod}`
-    : `سند صرف مقابل فاتورة مشتريات رقم ${invoice.number} (${invoice.partyName || 'مورد عام'}) عبر ${paymentMethod}`;
-
-  // Find existing auto linked voucher to UPDATE IN PLACE (even if previously misclassified with wrong type!)
+  // Only update an already-existing legacy auto-voucher in place; NEVER auto-create new ones
   const existingVoucher = updated.vouchers.find(v => {
     if (!isAutoVoucherForInvoice(v)) return false;
     return (v as any).invoiceId === invoiceId ||
@@ -4317,6 +4460,14 @@ export function syncInvoiceVouchers(
   });
 
   if (existingVoucher) {
+    const activePayMethod = (invoice.payments || []).find(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0)?.method;
+    const paymentMethod = (invoice.paymentMethod && invoice.paymentMethod !== 'آجل')
+      ? invoice.paymentMethod
+      : (activePayMethod || 'نقدي');
+    const desc = isSale
+      ? `سند قبض مقابل فاتورة مبيعات رقم ${invoice.number} (${invoice.partyName || 'عميل نقدي'}) عبر ${paymentMethod}`
+      : `سند صرف مقابل فاتورة مشتريات رقم ${invoice.number} (${invoice.partyName || 'مورد عام'}) عبر ${paymentMethod}`;
+
     existingVoucher.id = getDeterministicVoucherId(invoice.id, 0, voucherType);
     existingVoucher.type = voucherType;
     existingVoucher.amount = autoPaidPortion;
@@ -4333,7 +4484,6 @@ export function syncInvoiceVouchers(
     existingVoucher.updatedAt = new Date().toISOString();
     existingVoucher.updatedBy = currentUserName;
 
-    // Remove duplicate AUTO vouchers only (NEVER remove manual installments)
     updated.vouchers = updated.vouchers.filter(v => {
       if (v === existingVoucher || !isAutoVoucherForInvoice(v)) return true;
       const isDuplicate = (v as any).invoiceId === invoiceId ||
@@ -4342,47 +4492,20 @@ export function syncInvoiceVouchers(
                           (v.description && numRegex && numRegex.test(v.description));
       return !isDuplicate;
     });
-  } else {
-    const { number: vNum, nextSeq } = getNextUniqueVoucherNumber(updated, voucherType);
-    const settingKey = voucherType === 'receipt' ? 'nextReceipt' : 'nextPayment';
-    updated.settings[settingKey] = Math.max(updated.settings[settingKey] || 1, nextSeq + 1);
-
-    const newVoucher: Voucher = {
-      id: getDeterministicVoucherId(invoice.id, 0, voucherType),
-      number: vNum,
-      type: voucherType,
-      date: invoice.date,
-      partyId: invoice.partyId,
-      partyName: invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام'),
-      amount: autoPaidPortion,
-      paymentMethod,
-      description: desc,
-      referenceNumber: invoice.number,
-      invoiceId: invoice.id,
-      isAutoFromInvoice: true,
-      branchId: invoice.branchId || 'br_mawan',
-      branchName: invoice.branchName || 'الفرع الرئيسي - شركة الموان',
-      journalEntryId: invoice.journalEntryId,
-      createdAt: invoice.createdAt || new Date().toISOString(),
-      createdBy: invoice.createdBy || currentUserName,
-    };
-
-    updated.vouchers.unshift(newVoucher);
   }
 
   return updated;
 }
 
 /**
- * Retroactively synchronizes linked financial vouchers (سندات قبض وسندات صرف)
- * Preserves multiple partial installment vouchers (`isManualInstallment`) intact.
+ * Strictly non-generative voucher cleanup:
+ * Never creates new automatic vouchers for invoices; only removes stray return vouchers
+ * or reconciles/deduplicates existing auto-vouchers.
  */
 export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: AccountingDB; createdCount: number } {
   if (!db.vouchers) db.vouchers = [];
   if (!db.invoices || db.invoices.length === 0) return { db, createdCount: 0 };
 
-  let createdCount = 0;
-  const currentUserName = db.currentUser?.name || 'مدير النظام';
   const sortedInvoices = [...db.invoices].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
   sortedInvoices.forEach(inv => {
@@ -4414,6 +4537,10 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
              (v.description && numRegex && numRegex.test(v.description));
     });
 
+    if (autoVouchers.length === 0) {
+      return;
+    }
+
     const manualInstallments = db.vouchers.filter(v =>
       (v.invoiceId === inv.id) && (v.isManualInstallment || (!v.isAutoFromInvoice && !v.id.startsWith('vch_')))
     );
@@ -4421,41 +4548,34 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
     const autoExpected = Math.max(0, Number((paid - manualPaid).toFixed(2)));
 
     if (autoExpected <= 0) {
-      if (autoVouchers.length > 0) {
-        const rmIds = new Set(autoVouchers.map(v => v.id));
-        db.vouchers = db.vouchers.filter(v => !rmIds.has(v.id));
-      }
+      const rmIds = new Set(autoVouchers.map(v => v.id));
+      db.vouchers = db.vouchers.filter(v => !rmIds.has(v.id));
       return;
     }
 
-    if (autoVouchers.length === 0) {
-      syncInvoiceVouchers(db, inv, inv.createdBy || currentUserName);
-      createdCount++;
-    } else {
-      const activePayMethod = (inv.payments || []).find(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0)?.method;
-      const safeMethod = (inv.paymentMethod && inv.paymentMethod !== 'آجل') ? inv.paymentMethod : (activePayMethod || 'نقدي');
-      const primaryVoucher = autoVouchers[0];
-      primaryVoucher.id = getDeterministicVoucherId(inv.id, 0, expectedType);
-      primaryVoucher.type = expectedType;
-      primaryVoucher.amount = autoExpected;
-      primaryVoucher.invoiceId = inv.id;
-      primaryVoucher.referenceNumber = inv.number;
-      primaryVoucher.isAutoFromInvoice = true;
-      primaryVoucher.date = inv.date;
-      primaryVoucher.partyName = inv.partyName || (expectedType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
-      primaryVoucher.paymentMethod = safeMethod;
-      primaryVoucher.description = isSale
-        ? `سند قبض مقابل فاتورة مبيعات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`
-        : `سند صرف مقابل فاتورة مشتريات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`;
+    const activePayMethod = (inv.payments || []).find(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0)?.method;
+    const safeMethod = (inv.paymentMethod && inv.paymentMethod !== 'آجل') ? inv.paymentMethod : (activePayMethod || 'نقدي');
+    const primaryVoucher = autoVouchers[0];
+    primaryVoucher.id = getDeterministicVoucherId(inv.id, 0, expectedType);
+    primaryVoucher.type = expectedType;
+    primaryVoucher.amount = autoExpected;
+    primaryVoucher.invoiceId = inv.id;
+    primaryVoucher.referenceNumber = inv.number;
+    primaryVoucher.isAutoFromInvoice = true;
+    primaryVoucher.date = inv.date;
+    primaryVoucher.partyName = inv.partyName || (expectedType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
+    primaryVoucher.paymentMethod = safeMethod;
+    primaryVoucher.description = isSale
+      ? `سند قبض مقابل فاتورة مبيعات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`
+      : `سند صرف مقابل فاتورة مشتريات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`;
 
-      if (autoVouchers.length > 1) {
-        const extraIds = new Set(autoVouchers.slice(1).map(v => v.id));
-        db.vouchers = db.vouchers.filter(v => !extraIds.has(v.id));
-      }
+    if (autoVouchers.length > 1) {
+      const extraIds = new Set(autoVouchers.slice(1).map(v => v.id));
+      db.vouchers = db.vouchers.filter(v => !extraIds.has(v.id));
     }
   });
 
-  return { db, createdCount };
+  return { db, createdCount: 0 };
 }
 
 
