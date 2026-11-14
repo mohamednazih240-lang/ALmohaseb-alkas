@@ -341,9 +341,12 @@ export default function App() {
             });
             const cloudDelSet = new Set<string>(ensuredCloud.deletedRecordIds || []);
             const hasUnsyncedDeletions = (merged.deletedRecordIds || []).some(id => !cloudDelSet.has(id));
+            const hasLocalClosingsMissingFromCloud = (merged.dailyClosings || []).some(
+              dc => !(ensuredCloud.dailyClosings || []).some(cc => cc.id === dc.id)
+            );
             const needsCloudLogoRepair = Boolean(merged.settings.logo && !ensuredCloud.settings?.logo);
             const needsCloudPhantomCleanup = doesCloudNeedCleanupSync(initialCompanyCode, merged);
-            if (hasRicherLocal || hasUnsyncedDeletions || needsCloudLogoRepair || needsCloudPhantomCleanup) {
+            if (hasRicherLocal || hasLocalClosingsMissingFromCloud || hasUnsyncedDeletions || needsCloudLogoRepair || needsCloudPhantomCleanup) {
               pushDatabaseToCloud(merged, true);
             }
 

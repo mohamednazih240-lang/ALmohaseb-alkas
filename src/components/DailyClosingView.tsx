@@ -19,7 +19,10 @@ import {
   RefreshCw,
   Search,
   ChevronDown,
-  X
+  X,
+  Eye,
+  FileText,
+  Receipt
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -36,9 +39,11 @@ import {
   isFiniteNonNegative,
   PAYMENT_METHODS,
   buildProductFifoLedger,
-  markRecordsDeleted
+  markRecordsDeleted,
+  isBranchMatch
 } from '../services/accountingStorage';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
   UniversalPrintModal,
   MovementPrintBlock,
@@ -73,19 +78,25 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const [shiftNotes, setShiftNotes] = useState<string>('');
   const [justClosedRecord, setJustClosedRecord] = useState<DailyClosing | null>(null);
 
-  // Editing state
+  // Review & Editing state
+  const [reviewingClosing, setReviewingClosing] = useState<DailyClosing | null>(null);
+  const [reviewSubTab, setReviewSubTab] = useState<'summary' | 'invoices' | 'treasury' | 'other'>('summary');
   const [editingClosing, setEditingClosing] = useState<DailyClosing | null>(null);
 
-  // Search in history
+  // Search & Date filter in history
   const [historySearch, setHistorySearch] = useState<string>('');
+  const [historyDateFilter, setHistoryDateFilter] = useState<string>('');
 
   // Print modal state
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('تقرير تقفيل اليومية');
 
+  useModalBackHandler(!!reviewingClosing, () => setReviewingClosing(null), 'daily_closing_review_modal');
+  useModalBackHandler(!!editingClosing, () => setEditingClosing(null), 'daily_closing_edit_modal');
+
   const isTargetBranch = (bId?: string) => {
-    return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
+    return isBranchMatch(bId, targetBranchId);
   };
 
   const addOneDay = (dateStr: string): string => {
@@ -529,14 +540,38 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
       const idx = updated.dailyClosings.findIndex(c => c.id === editingClosing.id);
       if (idx !== -1) {
-        updated.dailyClosings[idx] = {
+        const prevClosing = updated.dailyClosings[idx];
+        const nextDifference = roundMoney(cleanActual - cleanExpected);
+        const updatedChannelSummaries = Array.isArray(prevClosing.channelSummaries)
+          ? prevClosing.channelSummaries.map(cs => {
+              if (cs.method !== 'نقدي') return cs;
+              return {
+                ...cs,
+                actualBalance: cleanActual,
+                variance: prevClosing.isInitialBaseline ? 0 : roundMoney(cleanActual - (cs.closingBalance || 0)),
+                nextDayOpeningBalance: cleanActual
+              };
+            })
+          : prevClosing.channelSummaries;
+        const updatedNextDayOpeningBalances = prevClosing.nextDayOpeningBalances
+          ? { ...prevClosing.nextDayOpeningBalances, ['نقدي']: cleanActual }
+          : prevClosing.nextDayOpeningBalances;
+
+        const savedClosing: DailyClosing = {
           ...editingClosing,
           actualCash: cleanActual,
           expectedCash: cleanExpected,
-          difference: roundMoney(cleanActual - cleanExpected)
+          difference: nextDifference,
+          channelSummaries: updatedChannelSummaries,
+          nextDayOpeningBalances: updatedNextDayOpeningBalances
         };
+
+        updated.dailyClosings[idx] = savedClosing;
         logAudit(updated, 'تعديل تقفيل يومية', `تم تعديل بيانات التقفيل ${editingClosing.shiftNumber}`);
         onUpdateDb(updated);
+        if (reviewingClosing?.id === savedClosing.id) {
+          setReviewingClosing(savedClosing);
+        }
         setEditingClosing(null);
         alert('تم تحديث التقفيل بنجاح');
       }
@@ -558,6 +593,12 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       logAudit(updated, 'حذف تقفيل يومية', `تم حذف سجل التقفيل ${closing.shiftNumber}`);
 
       onUpdateDb(updated);
+      if (reviewingClosing?.id === closing.id) {
+        setReviewingClosing(null);
+      }
+      if (justClosedRecord?.id === closing.id) {
+        setJustClosedRecord(null);
+      }
     });
   };
 
@@ -569,14 +610,9 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     setPrintModalOpen(true);
   };
 
-  // Batch Print all closings
+  // Batch Print all closings (respects current branch/date/search filters)
   const handlePrintBatch = () => {
-    const closings = (db.dailyClosings || []).filter(c =>
-      !historySearch ||
-      c.shiftNumber.includes(historySearch) ||
-      c.date.includes(historySearch) ||
-      c.closedBy.includes(historySearch)
-    );
+    const closings = filteredHistory;
 
     if (closings.length === 0) {
       alert('لا توجد سجلات تقفيل للطباعة');
@@ -589,9 +625,9 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     setPrintModalOpen(true);
   };
 
-  // Export history to CSV
+  // Export history to CSV (respects current branch/date/search filters)
   const handleExportHistoryCsv = () => {
-    const closings = (db.dailyClosings || []);
+    const closings = filteredHistory;
     if (closings.length === 0) {
       alert('لا توجد تقفيلات لتصديرها');
       return;
@@ -638,18 +674,88 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
   const isHistoryTargetBranch = (bId?: string) => {
     if (historyBranchFilter === 'all') return true;
-    return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
+    return isBranchMatch(bId, targetBranchId);
   };
 
-  // Filter history
-  const filteredHistory = (db.dailyClosings || [])
-    .filter(c => isHistoryTargetBranch(c.branchId))
-    .filter(c =>
-      !historySearch ||
-      c.shiftNumber.includes(historySearch) ||
-      c.date.includes(historySearch) ||
-      c.closedBy.includes(historySearch)
+  const sortClosingsDesc = (a: DailyClosing, b: DailyClosing) =>
+    a.date === b.date
+      ? (b.createdAt || '').localeCompare(a.createdAt || '')
+      : b.date.localeCompare(a.date);
+
+  const branchScopedHistory = useMemo(
+    () => (db.dailyClosings || []).filter(c => isHistoryTargetBranch(c.branchId)).sort(sortClosingsDesc),
+    [db.dailyClosings, historyBranchFilter, targetBranchId]
+  );
+
+  // Unique saved dates for one-tap day review
+  const availableHistoryDates = useMemo(() => {
+    const counts = new Map<string, number>();
+    branchScopedHistory.forEach(c => {
+      counts.set(c.date, (counts.get(c.date) || 0) + 1);
+    });
+    return Array.from(counts.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([date, count]) => ({ date, count }));
+  }, [branchScopedHistory]);
+
+  // Closings already saved for the selectedDate in current tab
+  const closingsForSelectedDate = useMemo(
+    () => (db.dailyClosings || [])
+      .filter(c => isTargetBranch(c.branchId) && c.date === selectedDate)
+      .sort(sortClosingsDesc),
+    [db.dailyClosings, selectedDate, targetBranchId]
+  );
+
+  // Filter history by branch, date, and search query
+  const filteredHistory = useMemo(() => {
+    const q = historySearch.trim().toLowerCase();
+    return branchScopedHistory
+      .filter(c => !historyDateFilter || c.date === historyDateFilter)
+      .filter(c => {
+        if (!q) return true;
+        return (
+          (c.shiftNumber || '').toLowerCase().includes(q) ||
+          (c.date || '').includes(q) ||
+          (c.closedBy || '').toLowerCase().includes(q) ||
+          (c.openedBy || '').toLowerCase().includes(q) ||
+          (c.branchName || '').toLowerCase().includes(q) ||
+          (c.notes || '').toLowerCase().includes(q)
+        );
+      });
+  }, [branchScopedHistory, historyDateFilter, historySearch]);
+
+  const openClosingReview = (closing: DailyClosing) => {
+    setReviewSubTab('summary');
+    setReviewingClosing(closing);
+  };
+
+  // Day-level movements & documents for the closing currently being reviewed
+  const reviewDayDetails = useMemo(() => {
+    if (!reviewingClosing) {
+      return { invoices: [], treasury: [], returns: [], expenses: [], revenues: [] };
+    }
+    const rDate = reviewingClosing.date;
+    const rBranch = reviewingClosing.branchId || targetBranchId;
+    const matchesReviewScope = (bId?: string) => isBranchMatch(bId, rBranch);
+
+    const invoices = (db.invoices || []).filter(
+      inv => inv.date === rDate && inv.invoiceKind !== 'quote' && matchesReviewScope(inv.branchId)
     );
+    const treasury = (db.treasury || []).filter(
+      t => t.date === rDate && matchesReviewScope(t.branchId)
+    );
+    const returns = (db.returns || []).filter(
+      r => r.date === rDate && matchesReviewScope(r.branchId)
+    );
+    const expenses = (db.expenses || []).filter(
+      e => e.date === rDate && matchesReviewScope(e.branchId)
+    );
+    const revenues = (db.revenues || []).filter(
+      r => r.date === rDate && matchesReviewScope(r.branchId)
+    );
+
+    return { invoices, treasury, returns, expenses, revenues };
+  }, [reviewingClosing, db.invoices, db.treasury, db.returns, db.expenses, db.revenues, targetBranchId]);
 
   return (
     <div className="space-y-4 pb-12">
@@ -700,14 +806,22 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                   <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
                   <div>
                     <h3 className="text-sm font-black text-white">
-                      ✓ تم اعتماد وتقفيل "{justClosedRecord.shiftNumber}" بنجاح
+                      ✓ تم اعتماد وتقفيل "{justClosedRecord.shiftNumber}" بنجاح وحفظه في السجل
                     </h3>
                     <p className="text-[11px] text-emerald-200">
                       الأرصدة الافتتاحية المرحلة لليوم التالي ({justClosedRecord.nextDayDate || nextDayDate}) في جميع وسائل الخزينة:
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openClosingReview(justClosedRecord)}
+                    className="px-3 py-1.5 bg-emerald-400 text-emerald-950 hover:bg-emerald-300 rounded-lg text-xs font-black flex items-center gap-1 cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>مراجعة الإغلاق</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => handlePrintSingle(justClosedRecord)}
@@ -860,6 +974,33 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
               />
             </div>
           </div>
+
+          {/* Saved Closings Quick-Review Bar for Selected Date */}
+          {closingsForSelectedDate.length > 0 && (
+            <div className="bg-blue-50/90 border border-blue-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-bold text-blue-950">
+                <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0" />
+                <span>
+                  يوجد {closingsForSelectedDate.length} إغلاق يومية محفوظ ليوم{' '}
+                  <span className="font-mono font-black">{selectedDate}</span> — اضغط على أي يومية لمراجعتها:
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {closingsForSelectedDate.map(sc => (
+                  <button
+                    key={sc.id}
+                    type="button"
+                    onClick={() => openClosingReview(sc)}
+                    className="px-2.5 py-1 bg-white hover:bg-blue-600 text-blue-900 hover:text-white border border-blue-300 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{sc.shiftNumber}</span>
+                    <span className="text-[10px] font-mono opacity-80">({sc.time || '18:00'})</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Quick Metrics Grid */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -1256,59 +1397,174 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       ) : (
         /* History Tab */
         <div className="space-y-3">
-          {/* Toolbar */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
-            <div className="relative flex-1 max-w-sm">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-3" />
-              <input
-                type="text"
-                placeholder="بحث في سجل التقفيلات بالوردية، التاريخ، أو المسؤول..."
-                value={historySearch}
-                onChange={e => setHistorySearch(e.target.value)}
-                className="w-full pr-8 pl-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-600"
-              />
+          {/* Toolbar: Search + Exact Day Picker + Branch Filter + Export/Print */}
+          <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs space-y-2.5">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 flex-1">
+                <div className="relative flex-1 min-w-[200px] max-w-sm">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder="بحث بالوردية، التاريخ، المسؤول، أو الملاحظات..."
+                    value={historySearch}
+                    onChange={e => setHistorySearch(e.target.value)}
+                    className="w-full pr-8 pl-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:border-blue-600"
+                  />
+                </div>
+
+                {/* Pick any day */}
+                <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1">
+                    <Calendar className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                    <span className="text-[11px] font-bold text-slate-600 whitespace-nowrap">اختر يوماً:</span>
+                    <input
+                      type="date"
+                      value={historyDateFilter}
+                      onChange={e => setHistoryDateFilter(e.target.value)}
+                      className="bg-transparent text-xs font-mono font-bold text-slate-900 outline-none"
+                    />
+                  </div>
+                  {historyDateFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setHistoryDateFilter('')}
+                      className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-[11px] font-bold cursor-pointer"
+                    >
+                      كل الأيام
+                    </button>
+                  )}
+                </div>
+
+                {branches.length > 1 && (
+                  <select
+                    value={historyBranchFilter}
+                    onChange={e => setHistoryBranchFilter(e.target.value as 'current' | 'all')}
+                    className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-800 outline-none cursor-pointer"
+                  >
+                    <option value="current">فرع: {currentBranch.name}</option>
+                    <option value="all">كل الفروع</option>
+                  </select>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleExportHistoryCsv}
+                  className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                  title="تصدير السجل بالكامل إلى Excel"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>تصدير Excel</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handlePrintBatch}
+                  className="px-3 py-1.5 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                  title="طباعة وتصدير جماعي لكل التقفيلات في PDF مجمع"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>طباعة وتصدير جماعي PDF</span>
+                </button>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleExportHistoryCsv}
-                className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                title="تصدير السجل بالكامل إلى Excel"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
-                <span>تصدير Excel</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handlePrintBatch}
-                className="px-3 py-1.5 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                title="طباعة وتصدير جماعي لكل التقفيلات في PDF مجمع"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                <span>طباعة وتصدير جماعي PDF</span>
-              </button>
-            </div>
+            {/* Quick Saved Days Bar */}
+            {availableHistoryDates.length > 0 && (
+              <div className="flex items-center gap-1.5 overflow-x-auto pt-2 border-t border-slate-100 pb-0.5">
+                <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap ml-1">
+                  الأيام المحفوظة ({availableHistoryDates.length}):
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setHistoryDateFilter('')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap transition-colors cursor-pointer ${
+                    !historyDateFilter
+                      ? 'bg-slate-900 text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  الكل ({branchScopedHistory.length})
+                </button>
+                {availableHistoryDates.map(item => (
+                  <button
+                    key={item.date}
+                    type="button"
+                    onClick={() => {
+                      setHistoryDateFilter(item.date);
+                      const dayClosings = branchScopedHistory.filter(c => c.date === item.date);
+                      if (dayClosings.length === 1) {
+                        openClosingReview(dayClosings[0]);
+                      }
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold whitespace-nowrap transition-colors flex items-center gap-1 cursor-pointer ${
+                      historyDateFilter === item.date
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-100 text-slate-800 hover:bg-blue-50 hover:text-blue-700 border border-slate-200'
+                    }`}
+                  >
+                    <span>{item.date}</span>
+                    {item.count > 1 && (
+                      <span className="text-[10px] opacity-80">({item.count})</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {filteredHistory.length === 0 ? (
             <div className="p-12 text-center bg-white rounded-xl border border-slate-200 shadow-2xs">
               <ShieldCheck className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-              <div className="text-sm font-bold text-slate-700">لا توجد تقفيلات يومية مسجلة حتى الآن</div>
-              <div className="text-xs text-slate-400 mt-1">يمكنك إغلاق اليومية الحالية لحفظ أول سجل ومطابقة الخزينة</div>
+              <div className="text-sm font-bold text-slate-700">
+                {historyDateFilter || historySearch
+                  ? 'لا توجد تقفيلات مطابقة لليوم أو البحث المحدد'
+                  : 'لا توجد تقفيلات يومية مسجلة حتى الآن'}
+              </div>
+              <div className="text-xs text-slate-400 mt-1">
+                {historyDateFilter || historySearch
+                  ? 'يمكنك مسح الفلتر لعرض جميع الأيام المحفوظة في السجل'
+                  : 'يمكنك إغلاق اليومية الحالية لحفظ أول سجل ومطابقة الخزينة'}
+              </div>
+              {(historyDateFilter || historySearch) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHistoryDateFilter('');
+                    setHistorySearch('');
+                  }}
+                  className="mt-3 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold cursor-pointer"
+                >
+                  عرض جميع التقفيلات المحفوظة
+                </button>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {filteredHistory.map(c => (
                 <div
                   key={c.id}
-                  className="bg-white rounded-xl border border-slate-200 hover:border-slate-300 shadow-2xs p-3.5 flex flex-col justify-between space-y-3"
+                  onClick={() => openClosingReview(c)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openClosingReview(c);
+                    }
+                  }}
+                  className="bg-white rounded-xl border border-slate-200 hover:border-blue-400 hover:shadow-md shadow-2xs p-3.5 flex flex-col justify-between space-y-3 transition-all cursor-pointer group text-right"
                 >
                   <div className="flex items-start justify-between border-b border-slate-100 pb-2">
                     <div>
-                      <h4 className="text-xs font-black text-slate-900">{c.shiftNumber}</h4>
-                      <span className="text-[10px] text-slate-500 font-mono">{c.date} - {c.time || '18:00'}</span>
+                      <h4 className="text-xs font-black text-slate-900 group-hover:text-blue-700 transition-colors">
+                        {c.shiftNumber}
+                      </h4>
+                      <span className="text-[10px] text-slate-500 font-mono">
+                        {c.date} - {c.time || '18:00'}
+                        {historyBranchFilter === 'all' && c.branchName ? ` • ${c.branchName}` : ''}
+                      </span>
                     </div>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                       c.isInitialBaseline ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-800'
@@ -1384,39 +1640,540 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                   </div>
 
                   {/* Actions */}
-                  <div className="pt-2 border-t border-slate-100 flex items-center justify-end gap-1.5">
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-1.5">
                     <button
                       type="button"
-                      onClick={() => handlePrintSingle(c)}
-                      className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
-                      title="طباعة ومعاينة التقفيل بتنسيق رسمي"
+                      onClick={e => {
+                        e.stopPropagation();
+                        openClosingReview(c);
+                      }}
+                      className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
                     >
-                      <Printer className="w-3.5 h-3.5" />
-                      <span>طباعة / PDF</span>
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>مراجعة اليومية</span>
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => setEditingClosing(c)}
-                      className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors cursor-pointer"
-                      title="تعديل بيانات التقفيل"
-                    >
-                      <Edit className="w-3.5 h-3.5" />
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={e => {
+                          e.stopPropagation();
+                          handlePrintSingle(c);
+                        }}
+                        className="px-2 py-1 text-slate-700 hover:text-black hover:bg-slate-100 rounded text-xs font-bold flex items-center gap-1 cursor-pointer"
+                        title="طباعة ومعاينة التقفيل بتنسيق رسمي"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>طباعة</span>
+                      </button>
 
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteClosing(c)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
-                      title="حذف سجل التقفيل"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                      <button
+                        type="button"
+                        onClick={e => {
+                          e.stopPropagation();
+                          setEditingClosing(c);
+                        }}
+                        className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors cursor-pointer"
+                        title="تعديل بيانات التقفيل"
+                      >
+                        <Edit className="w-3.5 h-3.5" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={e => {
+                          e.stopPropagation();
+                          handleDeleteClosing(c);
+                        }}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors cursor-pointer"
+                        title="حذف سجل التقفيل"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Full Daily Closing Review Modal */}
+      {reviewingClosing && (
+        <div
+          className="fixed inset-0 z-50 bg-black/65 backdrop-blur-2xs flex items-center justify-center p-2 sm:p-4"
+          onClick={() => setReviewingClosing(null)}
+        >
+          <div
+            className="bg-white rounded-2xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="p-3.5 sm:p-4 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-emerald-500/20 border border-emerald-400/40 rounded-xl">
+                  <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm sm:text-base font-black text-white">
+                      مراجعة يومية: {reviewingClosing.shiftNumber}
+                    </h3>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      reviewingClosing.isInitialBaseline
+                        ? 'bg-amber-400/20 text-amber-200 border border-amber-400/40'
+                        : 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/40'
+                    }`}>
+                      {reviewingClosing.isInitialBaseline ? 'تأسيس البداية' : reviewingClosing.status}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-300 font-mono mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                    <span>التاريخ: {reviewingClosing.date}</span>
+                    <span>الوقت: {reviewingClosing.time || '18:00'}</span>
+                    <span className="font-sans">المسؤول: {reviewingClosing.closedBy || reviewingClosing.openedBy}</span>
+                    {reviewingClosing.branchName && (
+                      <span className="font-sans">الفرع: {reviewingClosing.branchName}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setReviewingClosing(null)}
+                className="p-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg cursor-pointer"
+                title="إغلاق المراجعة"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Sub-Tabs inside Review Modal */}
+            <div className="px-3.5 py-2 bg-slate-50 border-b border-slate-200 flex items-center gap-1.5 overflow-x-auto shrink-0 text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => setReviewSubTab('summary')}
+                className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors cursor-pointer ${
+                  reviewSubTab === 'summary'
+                    ? 'bg-slate-900 text-white'
+                    : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                ملخص الإغلاق والخزينة
+              </button>
+              <button
+                type="button"
+                onClick={() => setReviewSubTab('invoices')}
+                className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors flex items-center gap-1 cursor-pointer ${
+                  reviewSubTab === 'invoices'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>فواتير اليوم ({reviewDayDetails.invoices.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setReviewSubTab('treasury')}
+                className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors flex items-center gap-1 cursor-pointer ${
+                  reviewSubTab === 'treasury'
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <Wallet className="w-3.5 h-3.5" />
+                <span>حركات الخزينة والسندات ({reviewDayDetails.treasury.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setReviewSubTab('other')}
+                className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors flex items-center gap-1 cursor-pointer ${
+                  reviewSubTab === 'other'
+                    ? 'bg-amber-600 text-white'
+                    : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                <Receipt className="w-3.5 h-3.5" />
+                <span>
+                  مصروفات وإيرادات ومرتجعات (
+                  {reviewDayDetails.expenses.length + reviewDayDetails.revenues.length + reviewDayDetails.returns.length}
+                  )
+                </span>
+              </button>
+            </div>
+
+            {/* Modal Scrollable Body */}
+            <div className="p-3.5 sm:p-4 overflow-y-auto space-y-4 flex-1">
+              {reviewSubTab === 'summary' && (
+                <>
+                  {/* KPI Cards */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
+                      <span className="text-[11px] font-bold text-emerald-800 block">إجمالي دخل الخزينة</span>
+                      <span className="text-sm sm:text-base font-black font-mono text-emerald-950 mt-1 block">
+                        {formatMoney(reviewingClosing.cashIn, db.settings.currency)}
+                      </span>
+                    </div>
+                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-3">
+                      <span className="text-[11px] font-bold text-rose-800 block">إجمالي خرج الخزينة</span>
+                      <span className="text-sm sm:text-base font-black font-mono text-rose-950 mt-1 block">
+                        {formatMoney(reviewingClosing.cashOut, db.settings.currency)}
+                      </span>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
+                      <span className="text-[11px] font-bold text-blue-800 block">مجمل ربح اليومية</span>
+                      <span className="text-sm sm:text-base font-black font-mono text-blue-950 mt-1 block">
+                        {formatMoney(reviewingClosing.grossProfit, db.settings.currency)}
+                      </span>
+                    </div>
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-3">
+                      <span className="text-[11px] font-bold text-amber-900 block">نسبة الربح المحققة</span>
+                      <span className="text-sm sm:text-base font-black font-mono text-amber-950 mt-1 block">
+                        {reviewingClosing.profitMargin.toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Sales & Drawer Breakdown */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div className="space-y-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                      <div className="font-black text-slate-900 border-b border-slate-200 pb-1">
+                        ملخص المبيعات والتكلفة والأرباح
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">إجمالي المبيعات:</span>
+                        <strong className="font-mono">{formatMoney(reviewingClosing.salesTotal, db.settings.currency)}</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">إجمالي المرتجعات:</span>
+                        <strong className="font-mono">{formatMoney(reviewingClosing.returnsTotal, db.settings.currency)}</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">صافي المبيعات:</span>
+                        <strong className="font-mono">{formatMoney(reviewingClosing.netSales, db.settings.currency)}</strong>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-slate-600">تكلفة البضاعة المباعة (FIFO):</span>
+                        <strong className="font-mono">{formatMoney(reviewingClosing.cogs, db.settings.currency)}</strong>
+                      </div>
+                      <div className="flex justify-between text-blue-900 font-black border-t border-slate-200 pt-1.5">
+                        <span>مجمل الربح:</span>
+                        <span className="font-mono">{formatMoney(reviewingClosing.grossProfit, db.settings.currency)}</span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                      <div className="font-black text-slate-900 border-b border-slate-200 pb-1">
+                        مطابقة درج النقدية (الكاش)
+                      </div>
+                      {!reviewingClosing.isInitialBaseline && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-600">رصيد بداية الدرج:</span>
+                          <strong className="font-mono">{formatMoney(reviewingClosing.startingCash, db.settings.currency)}</strong>
+                        </div>
+                      )}
+                      {!reviewingClosing.isInitialBaseline && (
+                        <div className="flex justify-between">
+                          <span className="text-slate-600">النقد المتوقع دفترياً:</span>
+                          <strong className="font-mono">{formatMoney(reviewingClosing.expectedCash, db.settings.currency)}</strong>
+                        </div>
+                      )}
+                      <div className="flex justify-between font-bold text-slate-950">
+                        <span>النقد الفعلي المسجل:</span>
+                        <strong className="font-mono">{formatMoney(reviewingClosing.actualCash, db.settings.currency)}</strong>
+                      </div>
+                      {!reviewingClosing.isInitialBaseline && (
+                        <div className={`flex justify-between font-black border-t border-slate-200 pt-1.5 ${
+                          reviewingClosing.difference === 0
+                            ? 'text-emerald-700'
+                            : reviewingClosing.difference > 0
+                            ? 'text-blue-700'
+                            : 'text-rose-700'
+                        }`}>
+                          <span>الفارق (العجز / الزيادة):</span>
+                          <span className="font-mono">
+                            {reviewingClosing.difference === 0
+                              ? 'مطابق تماماً ✓'
+                              : reviewingClosing.difference > 0
+                              ? `زيادة +${formatMoney(reviewingClosing.difference, db.settings.currency)}`
+                              : `عجز ${formatMoney(reviewingClosing.difference, db.settings.currency)}`}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* All 5 Treasury Channels Table */}
+                  {reviewingClosing.channelSummaries && reviewingClosing.channelSummaries.length > 0 && (
+                    <div className="bg-slate-900 text-white rounded-xl p-3.5 border border-slate-700 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 pb-2">
+                        <span className="text-xs font-black flex items-center gap-1.5">
+                          <Wallet className="w-4 h-4 text-emerald-400" />
+                          <span>تفاصيل وسائل الخزينة والرصيد المرحل لليوم التالي ({reviewingClosing.nextDayDate || addOneDay(reviewingClosing.date)})</span>
+                        </span>
+                        <span className="text-xs font-mono font-black text-emerald-300">
+                          الإجمالي المرحل:{' '}
+                          {formatMoney(
+                            reviewingClosing.channelSummaries.reduce((s, cs) => s + (cs.nextDayOpeningBalance || 0), 0),
+                            db.settings.currency
+                          )}
+                        </span>
+                      </div>
+
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-center text-[11px] border-collapse">
+                          <thead>
+                            <tr className="bg-slate-800 text-slate-300 font-bold border-b border-slate-700">
+                              <th className="py-1.5 px-2 text-right">الوسيلة</th>
+                              <th className="py-1.5 px-2">افتتاحي</th>
+                              <th className="py-1.5 px-2 text-emerald-300">وارد (+)</th>
+                              <th className="py-1.5 px-2 text-rose-300">صادر (-)</th>
+                              <th className="py-1.5 px-2">رصيد النظام</th>
+                              <th className="py-1.5 px-2 text-amber-300">الفعلي المرحل</th>
+                              {!reviewingClosing.isInitialBaseline && <th className="py-1.5 px-2 text-blue-300">الفارق</th>}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800 font-mono">
+                            {reviewingClosing.channelSummaries.map(cs => {
+                              const chVar = cs.variance || 0;
+                              return (
+                                <tr key={cs.method} className="hover:bg-slate-800/60">
+                                  <td className="py-1.5 px-2 text-right font-sans font-bold text-white">{cs.method}</td>
+                                  <td className="py-1.5 px-2 text-slate-300">{formatCleanNumber(cs.openingBalance)}</td>
+                                  <td className="py-1.5 px-2 text-emerald-400">+{formatCleanNumber(cs.cashIn)}</td>
+                                  <td className="py-1.5 px-2 text-rose-400">-{formatCleanNumber(cs.cashOut)}</td>
+                                  <td className="py-1.5 px-2 text-slate-200">{formatCleanNumber(cs.closingBalance)}</td>
+                                  <td className="py-1.5 px-2 font-black text-emerald-300">
+                                    {formatMoney(cs.nextDayOpeningBalance, db.settings.currency)}
+                                  </td>
+                                  {!reviewingClosing.isInitialBaseline && (
+                                    <td className={`py-1.5 px-2 font-bold ${
+                                      chVar === 0 ? 'text-emerald-300' : chVar > 0 ? 'text-blue-300' : 'text-rose-300'
+                                    }`}>
+                                      {chVar === 0 ? 'مطابق' : chVar > 0 ? `+${formatCleanNumber(chVar)}` : formatCleanNumber(chVar)}
+                                    </td>
+                                  )}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {reviewingClosing.notes && (
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs">
+                      <span className="font-bold text-slate-700 block mb-1">ملاحظات اليومية:</span>
+                      <p className="text-slate-800 whitespace-pre-wrap">{reviewingClosing.notes}</p>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {reviewSubTab === 'invoices' && (
+                <div className="space-y-2">
+                  {reviewDayDetails.invoices.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+                      لا توجد فواتير مسجلة بتاريخ {reviewingClosing.date}
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-xs text-right border-collapse">
+                        <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
+                          <tr>
+                            <th className="p-2.5">رقم الفاتورة</th>
+                            <th className="p-2.5">النوع</th>
+                            <th className="p-2.5">العميل / المورد</th>
+                            <th className="p-2.5">طريقة الدفع</th>
+                            <th className="p-2.5 text-center">الإجمالي</th>
+                            <th className="p-2.5 text-center">المدفوع</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {reviewDayDetails.invoices.map(inv => {
+                            const isSale = inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale';
+                            return (
+                              <tr key={inv.id} className="hover:bg-slate-50">
+                                <td className="p-2.5 font-mono font-bold text-slate-900">#{inv.number}</td>
+                                <td className="p-2.5">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                    isSale ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
+                                  }`}>
+                                    {inv.invoiceKind === 'wholesale' ? 'مبيعات جملة' : isSale ? 'مبيعات' : 'مشتريات'}
+                                  </span>
+                                </td>
+                                <td className="p-2.5 font-bold text-slate-800">{inv.partyName || '—'}</td>
+                                <td className="p-2.5 text-slate-600">{inv.paymentMethod || 'نقدي'}</td>
+                                <td className="p-2.5 text-center font-mono font-black text-slate-950">
+                                  {formatMoney(inv.total, db.settings.currency)}
+                                </td>
+                                <td className="p-2.5 text-center font-mono text-emerald-700 font-bold">
+                                  {formatMoney(inv.paid ?? inv.total, db.settings.currency)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {reviewSubTab === 'treasury' && (
+                <div className="space-y-2">
+                  {reviewDayDetails.treasury.length === 0 ? (
+                    <div className="p-8 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+                      لا توجد حركات خزينة أو سندات مسجلة بتاريخ {reviewingClosing.date}
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-xs text-right border-collapse">
+                        <thead className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
+                          <tr>
+                            <th className="p-2.5">الحركة</th>
+                            <th className="p-2.5">الوسيلة</th>
+                            <th className="p-2.5">البيان / الوصف</th>
+                            <th className="p-2.5 text-center">المبلغ</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {reviewDayDetails.treasury.map(tr => (
+                            <tr key={tr.id} className="hover:bg-slate-50">
+                              <td className="p-2.5">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  tr.direction === 'in'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : 'bg-rose-100 text-rose-800'
+                                }`}>
+                                  {tr.direction === 'in' ? 'وارد (+)' : 'صادر (-)'}
+                                </span>
+                              </td>
+                              <td className="p-2.5 font-bold text-slate-800">{tr.method}</td>
+                              <td className="p-2.5 text-slate-700">{tr.description || 'حركة خزينة'}</td>
+                              <td className={`p-2.5 text-center font-mono font-black ${
+                                tr.direction === 'in' ? 'text-emerald-700' : 'text-rose-700'
+                              }`}>
+                                {tr.direction === 'in' ? '+' : '-'}{formatMoney(tr.amount, db.settings.currency)}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {reviewSubTab === 'other' && (
+                <div className="space-y-3 text-xs">
+                  {reviewDayDetails.expenses.length === 0 &&
+                  reviewDayDetails.revenues.length === 0 &&
+                  reviewDayDetails.returns.length === 0 ? (
+                    <div className="p-8 text-center text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+                      لا توجد مصروفات أو إيرادات أو مرتجعات مسجلة بتاريخ {reviewingClosing.date}
+                    </div>
+                  ) : (
+                    <>
+                      {reviewDayDetails.expenses.length > 0 && (
+                        <div className="border border-rose-200 rounded-xl overflow-hidden">
+                          <div className="bg-rose-50 px-3 py-2 font-black text-rose-900 border-b border-rose-200">
+                            المصروفات ({reviewDayDetails.expenses.length})
+                          </div>
+                          <div className="divide-y divide-slate-100">
+                            {reviewDayDetails.expenses.map(ex => (
+                              <div key={ex.id} className="p-2.5 flex justify-between items-center">
+                                <span className="font-bold text-slate-800">{ex.category} {ex.description ? `— ${ex.description}` : ''}</span>
+                                <span className="font-mono font-black text-rose-700">{formatMoney(ex.amount, db.settings.currency)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {reviewDayDetails.revenues.length > 0 && (
+                        <div className="border border-emerald-200 rounded-xl overflow-hidden">
+                          <div className="bg-emerald-50 px-3 py-2 font-black text-emerald-900 border-b border-emerald-200">
+                            الإيرادات الأخرى ({reviewDayDetails.revenues.length})
+                          </div>
+                          <div className="divide-y divide-slate-100">
+                            {reviewDayDetails.revenues.map(rv => (
+                              <div key={rv.id} className="p-2.5 flex justify-between items-center">
+                                <span className="font-bold text-slate-800">{rv.category} {rv.description ? `— ${rv.description}` : ''}</span>
+                                <span className="font-mono font-black text-emerald-700">{formatMoney(rv.amount, db.settings.currency)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {reviewDayDetails.returns.length > 0 && (
+                        <div className="border border-amber-200 rounded-xl overflow-hidden">
+                          <div className="bg-amber-50 px-3 py-2 font-black text-amber-900 border-b border-amber-200">
+                            المرتجعات ({reviewDayDetails.returns.length})
+                          </div>
+                          <div className="divide-y divide-slate-100">
+                            {reviewDayDetails.returns.map(ret => (
+                              <div key={ret.id} className="p-2.5 flex justify-between items-center">
+                                <span className="font-bold text-slate-800">
+                                  {ret.type === 'sale' ? 'مرتجع مبيعات' : 'مرتجع مشتريات'} — {ret.partyName || ''}
+                                </span>
+                                <span className="font-mono font-black text-amber-800">{formatMoney(ret.total, db.settings.currency)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer Actions */}
+            <div className="p-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handlePrintSingle(reviewingClosing)}
+                  className="px-3 py-1.5 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>طباعة / PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingClosing(reviewingClosing)}
+                  className="px-3 py-1.5 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <Edit className="w-3.5 h-3.5" />
+                  <span>تعديل</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedDate(reviewingClosing.date);
+                    setReviewingClosing(null);
+                    setActiveTab('current');
+                  }}
+                  className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold cursor-pointer"
+                >
+                  فتح يومية {reviewingClosing.date}
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setReviewingClosing(null)}
+                className="px-4 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-900 rounded-lg text-xs font-bold cursor-pointer"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
