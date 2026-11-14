@@ -176,6 +176,159 @@ export function getCachedCompanyLogoLocally(companyCode?: string): { logo: strin
   }
 }
 
+export function loadLocalDeletedRecordIds(companyCode?: string): string[] {
+  if (typeof localStorage === 'undefined') return [];
+  const code = getCleanLogoCacheCode(companyCode);
+  try {
+    const raw = localStorage.getItem(`hesabaty_deleted_ids_${code}`);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string' && x.trim().length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveLocalDeletedRecordIds(companyCode: string | undefined, ids: Iterable<string>): string[] {
+  const unique = Array.from(new Set(Array.from(ids).filter((x): x is string => typeof x === 'string' && x.trim().length > 0)));
+  const capped = unique.length > 5000 ? unique.slice(-5000) : unique;
+  if (typeof localStorage !== 'undefined') {
+    const code = getCleanLogoCacheCode(companyCode);
+    try {
+      localStorage.setItem(`hesabaty_deleted_ids_${code}`, JSON.stringify(capped));
+    } catch {
+      // ignore quota
+    }
+  }
+  return capped;
+}
+
+export function getAllDeletedRecordIds(
+  db: AccountingDB | null | undefined,
+  extraIds?: Iterable<string>
+): Set<string> {
+  const set = new Set<string>([
+    ...PURGED_COMP101_INVOICE_IDS,
+    ...loadLocalDeletedRecordIds(db?.settings?.companyCode),
+    ...(db?.deletedInvoiceIds || []),
+    ...(db?.deletedRecordIds || [])
+  ]);
+  if (extraIds) {
+    for (const id of extraIds) {
+      if (id && typeof id === 'string') set.add(id);
+    }
+  }
+  return set;
+}
+
+export function markRecordsDeleted(
+  db: AccountingDB,
+  ids: Array<string | undefined | null>,
+  invoiceIds: Array<string | undefined | null> = []
+): AccountingDB {
+  const cleanIds = ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+  const cleanInvIds = invoiceIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+  const mergedSet = getAllDeletedRecordIds(db, [...cleanIds, ...cleanInvIds]);
+  const savedList = saveLocalDeletedRecordIds(db.settings?.companyCode, mergedSet);
+  db.deletedRecordIds = savedList;
+  if (cleanInvIds.length > 0 || (db.deletedInvoiceIds && db.deletedInvoiceIds.length > 0)) {
+    const invSet = new Set<string>([...(db.deletedInvoiceIds || []), ...cleanInvIds]);
+    db.deletedInvoiceIds = Array.from(invSet);
+  }
+  return db;
+}
+
+export function purgeDeletedRecordsFromDb(db: AccountingDB, externalDeletedSet?: Set<string>): AccountingDB {
+  if (!db) return db;
+  const del = externalDeletedSet || getAllDeletedRecordIds(db);
+  if (del.size === 0) return db;
+
+  const keepById = <T extends { id?: string }>(arr?: T[]): T[] =>
+    Array.isArray(arr) ? arr.filter(x => x && (!x.id || !del.has(x.id))) : [];
+
+  db.invoices = (db.invoices || []).filter(inv => inv && !isPurgedEkhwaInvoice(inv) && !del.has(inv.id));
+  db.vouchers = (db.vouchers || []).filter(v => {
+    if (!v) return false;
+    if (v.id && del.has(v.id)) return false;
+    if ((v as any).invoiceId && del.has((v as any).invoiceId)) return false;
+    if ((v as any).sourceId && del.has((v as any).sourceId)) return false;
+    return true;
+  });
+  db.treasury = (db.treasury || []).filter(tr => {
+    if (!tr) return false;
+    if (tr.id && del.has(tr.id)) return false;
+    if (tr.sourceId && del.has(tr.sourceId)) return false;
+    if ((tr as any).invoiceId && del.has((tr as any).invoiceId)) return false;
+    return true;
+  });
+  db.stockMovements = (db.stockMovements || []).filter(sm => {
+    if (!sm) return false;
+    if (sm.id && del.has(sm.id)) return false;
+    if (sm.sourceId && del.has(sm.sourceId)) return false;
+    if (sm.productId && del.has(sm.productId)) return false;
+    return true;
+  });
+  db.journals = (db.journals || []).filter(j => {
+    if (!j) return false;
+    if (j.id && del.has(j.id)) return false;
+    if (j.sourceId && del.has(j.sourceId)) return false;
+    return true;
+  });
+  db.returns = (db.returns || []).filter(r => {
+    if (!r) return false;
+    if (r.id && del.has(r.id)) return false;
+    if (r.originalInvoiceId && del.has(r.originalInvoiceId)) return false;
+    return true;
+  });
+
+  db.products = keepById(db.products);
+  db.expenses = keepById(db.expenses);
+  db.revenues = keepById(db.revenues);
+  db.dailyClosings = keepById(db.dailyClosings);
+  db.quotes = keepById(db.quotes);
+  db.orders = keepById(db.orders);
+  db.adjustments = keepById(db.adjustments);
+  db.transfers = keepById(db.transfers);
+  db.customers = keepById(db.customers);
+  db.suppliers = keepById(db.suppliers);
+  db.fixedAssets = keepById(db.fixedAssets);
+  db.costCenters = keepById(db.costCenters);
+  db.currencies = keepById(db.currencies);
+  db.bankReconciliations = keepById(db.bankReconciliations);
+  db.goodsReceivedNotes = keepById(db.goodsReceivedNotes);
+  if (Array.isArray(db.branches) && db.branches.length > 1) {
+    db.branches = db.branches.filter(b => b && (b.isMain || !b.id || !del.has(b.id)));
+  }
+  if (Array.isArray(db.users) && db.users.length > 1) {
+    db.users = db.users.filter(u => u && (!u.id || !del.has(u.id)));
+  }
+
+  db.deletedRecordIds = saveLocalDeletedRecordIds(db.settings?.companyCode, del);
+  return db;
+}
+
+export function mergeArrayById<T extends { id?: string }>(
+  existingList: T[] = [],
+  incomingList: T[] = [],
+  deletedIds?: Set<string>
+): T[] {
+  const map = new Map<string, T>();
+  (existingList || []).forEach(item => {
+    if (!item) return;
+    if (item.id && deletedIds?.has(item.id)) return;
+    const key = item.id || JSON.stringify(item);
+    map.set(key, item);
+  });
+  (incomingList || []).forEach(item => {
+    if (!item) return;
+    if (item.id && deletedIds?.has(item.id)) return;
+    const key = item.id || JSON.stringify(item);
+    const prev = map.get(key);
+    map.set(key, prev ? { ...prev, ...item } : item);
+  });
+  return Array.from(map.values());
+}
+
 export const PAYMENT_METHODS: PaymentMethod[] = [
   'نقدي',
   'Vodafone Cash',
@@ -1482,32 +1635,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     });
   }
 
-  // 2. الحفاظ الصارم على فاتورة رقم 17 لشركة الرحمة للحدايد (المنشئ Ahmed Nazih والمعدل Mohamed Nazih)
-  const inv17 = db.invoices.find(
-    i => (i.number === '17' && (i.type === 'purchase' || i.invoiceKind === 'purchase')) ||
-         (i.partyName && i.partyName.includes('الرحمة'))
-  );
-  if (inv17) {
-    if (!inv17.items || inv17.items.length < 15) {
-      inv17.items = JSON.parse(JSON.stringify(RAHMA_INVOICE_17_ITEMS));
-      inv17.total = 4319.14;
-      inv17.subtotal = 4319.14;
-      inv17.paid = 4319.14;
-      inv17.remaining = 0;
-      inv17.status = 'مدفوع';
-      inv17.paymentMethod = 'نقدي';
-      inv17.branchId = inv17.branchId || 'br_mawan';
-      inv17.branchName = inv17.branchName || 'الفرع الرئيسي - شركة الموان';
-    }
-    if (!inv17.createdBy || inv17.createdBy === 'مدير النظام') {
-      inv17.createdBy = 'Ahmed Nazih';
-    }
-    if (!inv17.updatedBy || inv17.updatedBy === inv17.createdBy) {
-      inv17.updatedBy = 'Mohamed Nazih';
-    }
-  }
-
-  // 3. فحص كافة الفواتير المسجلة وربط بنودها بأصنافها الحقيقية بالاسم أولاً
+  // 2. فحص كافة الفواتير المسجلة وربط بنودها بأصنافها الموجودة دون أي إنشاء تلقائي لأصناف أو حركات أو خزينة
   (db.invoices || []).forEach(inv => {
     if (inv.invoiceKind === 'quote' || (inv.invoiceKind as string) === 'order') return;
     if (!Array.isArray(inv.items) || inv.items.length === 0) return;
@@ -1519,7 +1647,6 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
 
     const targetBranch = inv.branchId || defaultBranchId;
     const branchName = inv.branchName || db.branches?.find(b => b.id === targetBranch)?.name || defaultBranchName;
-    let invHadMissing = false;
 
     // إعادة احتساب صافي إجمالي الفاتورة مع الحفاظ الصارم على طرح الخصم وإضافة الضريبة والإيرادات الإضافية
     const calculatedItemsTotal = Number(
@@ -1548,10 +1675,9 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       if (!item || !item.productName) return;
       const normItemName = normalizeArabicText(item.productName);
 
-      // المطابقة الصارمة: بالاسم المطابق لغوياً أولاً وأبداً لمنع اختطاف الأصناف بسبب تشابه الكود
+      // المطابقة بالاسم المطابق لغوياً أو بالمعرف فقط (لا يتم إنشاء أصناف جديدة تلقائياً)
       let prod = prodByNorm.get(normItemName);
 
-      // ثانياً: إذا كان معرف الصنف مسجلاً ومطابقاً
       if (!prod && item.productId) {
         const canonicalId = mergedIdMap.get(item.productId) || item.productId;
         const candidate = db.products.find(p => p.id === canonicalId);
@@ -1560,79 +1686,25 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
         }
       }
 
-      // ثالثاً: إدراج الصنف في الكتالوج عند الاستعادة من فواتير المشتريات المسجلة (بدون تسعير بيع تلقائي أو نسب وهمية)
-      if (!prod && item.productName.trim()) {
-        const candCode = (item.productCode || '').trim();
-        const newCode = (candCode && !seenCodes.has(candCode.toLowerCase()))
-          ? candCode
-          : generateUniqueProductCode(db);
-        const unitBuy = isPurchase
-          ? (Number(item.unitPrice || item.costPrice || (item as any).price) || 0)
-          : 0;
-        const newProdId = generateId('prod');
-
-        prod = {
-          id: newProdId,
-          name: item.productName.trim(),
-          code: newCode,
-          barcode: '',
-          category: 'عامة',
-          unit: item.unit || 'قطعة',
-          buyPrice: unitBuy,
-          sellPrice: 0,
-          wholesalePrice: 0,
-          minStock: 1,
-          currentQty: 0,
-          avgCost: unitBuy,
-          branchesData: {}
-        };
-        db.products.push(prod);
-        prodByNorm.set(normItemName, prod);
-        seenCodes.add(newCode.toLowerCase());
-      }
-
       if (!prod) return;
 
       // تصحيح وتثبيت ارتباط بند الفاتورة بالصنف الحقيقي
       item.productId = prod.id;
       item.productCode = prod.code;
 
-      // معرف حركة المخزون الحتمي والفريد: sm_${invId}_${productId}
       const deterministicSmId = getDeterministicStockMovementId(inv.id, prod.id);
-
       const qty = Number(item.qty) || 0;
       const unitCost = Number(item.costPrice || item.unitPrice || (item as any).price) || 0;
-      // المشتريات ومرتجع المبيعات تزيد المخزون (+qty)
-      // المبيعات ومرتجع المشتريات تخصم من المخزون (-qty بالسالب للأصناف غير المشتراة بعد)
       const qtyChange = (isPurchase || isSaleReturn) ? Math.abs(qty) : -Math.abs(qty);
       const movementType = isPurchase ? 'purchase' : (isSale ? 'sale' : (isSaleReturn ? 'sale_return' : 'purchase_return'));
 
-      // فحص وجود الحركة المخزنية المطابقة للصنف الحقيقي
+      // تحديث الحركة المخزنية الموجودة فقط (بدون إنشاء أي حركة محذوفة أو غير مسجلة)
       const existingSmIdx = db.stockMovements.findIndex(sm =>
         sm.id === deterministicSmId ||
         (sm.sourceId === inv.id && (sm.productId === prod.id || normalizeArabicText(sm.productName) === normItemName))
       );
 
-      if (existingSmIdx === -1) {
-        db.stockMovements.unshift({
-          id: deterministicSmId,
-          date: inv.date || getTodayDate(),
-          productId: prod.id,
-          productName: prod.name,
-          warehouseId: defaultWh.id,
-          warehouseName: defaultWh.name,
-          qtyChange,
-          balanceAfter: 0,
-          unitCost,
-          type: movementType,
-          refNumber: inv.number,
-          sourceId: inv.id,
-          branchId: targetBranch,
-          branchName: branchName
-        });
-        missingMovementsAdded++;
-        invHadMissing = true;
-      } else {
+      if (existingSmIdx !== -1) {
         const sm = db.stockMovements[existingSmIdx];
         sm.id = deterministicSmId;
         sm.productId = prod.id;
@@ -1650,110 +1722,6 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
     // إزالة أي حركات مخزنية يتيمة للفاتورة لا تنتمي لأصنافها الفعلية
     const validInvProdIds = new Set(inv.items.map(it => it.productId));
     db.stockMovements = db.stockMovements.filter(sm => sm.sourceId !== inv.id || validInvProdIds.has(sm.productId));
-
-    if (invHadMissing) {
-      invoicesWithMissingMovements++;
-      details.push(`فاتورة #${inv.number} (${inv.partyName || 'طرف'}): تم فحص وإدراج أصنافها في حركات المخزون.`);
-    }
-
-    // التأكد من التأثير المالي التام للفاتورة على الخزينة في حال السداد أو الكاش (مع عزل أقساط السندات اليدوية المستقلة)
-    const manualInstallmentsPaid = (db.vouchers || [])
-      .filter(v => v.invoiceId === inv.id && (v.isManualInstallment || (!v.isAutoFromInvoice && !v.id.startsWith('vch_'))))
-      .reduce((s, v) => s + (Number(v.amount) || 0), 0);
-    const totalPaidRef = Number(inv.paid) > 0 ? Number(inv.paid) : (inv.paymentMethod && inv.paymentMethod !== 'آجل' ? Number(inv.total) : 0);
-    const paidAmount = Math.max(0, Number((totalPaidRef - manualInstallmentsPaid).toFixed(2)));
-    if (paidAmount > 0) {
-      const isOutflow = isPurchase || isSaleReturn;
-      const direction: 'in' | 'out' = isOutflow ? 'out' : 'in';
-      const sourceType = isPurchase ? 'purchase' : (isSale ? 'sale' : (isSaleReturn ? 'sale_return' : 'purchase_return'));
-
-      const existingSplitEntries = db.treasury.filter(tr =>
-        tr.sourceId === inv.id && tr.direction === direction
-      );
-      const existingSplitSum = existingSplitEntries.reduce((s, t) => s + (Number(t.amount) || 0), 0);
-      const activeSplits = (inv.payments || []).filter(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0);
-
-      if (activeSplits.length > 1 && Math.abs(existingSplitSum - paidAmount) <= 0.05 && existingSplitEntries.length === activeSplits.length) {
-        // Split payments already match exact paid amount & channel count; keep them intact
-      } else if (activeSplits.length > 1 && Math.abs(activeSplits.reduce((s, p) => s + Number(p.amount), 0) - paidAmount) <= 0.05) {
-        // Rebuild split treasury entries accurately per channel
-        db.treasury = db.treasury.filter(tr => !(tr.sourceId === inv.id && tr.direction === direction));
-        activeSplits.forEach((pLine, pIdx) => {
-          const splitId = getDeterministicTreasuryId(sourceType, inv.id, pIdx, direction);
-          const desc = isPurchase
-            ? `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'} عبر ${pLine.method}`
-            : `تحصيل فاتورة مبيعات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'عميل'} عبر ${pLine.method}`;
-          db.treasury.unshift({
-            id: splitId,
-            date: inv.date || getTodayDate(),
-            direction,
-            amount: Number(pLine.amount),
-            method: pLine.method,
-            description: desc,
-            sourceType,
-            sourceId: inv.id,
-            branchId: targetBranch,
-            branchName: branchName
-          });
-        });
-        treasuryDiscrepanciesFixed++;
-      } else {
-        const deterministicTrId = getDeterministicTreasuryId(sourceType, inv.id, 0, direction);
-        const resolvedMethod = (activeSplits[0]?.method) || (inv.paymentMethod && inv.paymentMethod !== 'آجل' ? inv.paymentMethod : 'نقدي');
-
-      const existingTr = db.treasury.find(tr =>
-          tr.id === deterministicTrId ||
-          tr.sourceId === inv.id ||
-          ((tr as any).invoiceId === inv.id) ||
-          (tr.sourceType === sourceType && (tr as any).refNumber && String((tr as any).refNumber).trim() === String(inv.number).trim())
-        );
-
-        const desc = isPurchase
-          ? `سداد فاتورة مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'} عبر ${resolvedMethod}`
-          : isSaleReturn
-          ? `صرف استرداد مرتجع مبيعات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'عميل'} عبر ${resolvedMethod}`
-          : isPurchaseReturn
-          ? `استرداد مرتجع مشتريات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'مورد'} عبر ${resolvedMethod}`
-          : `تحصيل فاتورة مبيعات رقم ${inv.number} (${branchName}) - ${inv.partyName || 'عميل'} عبر ${resolvedMethod}`;
-
-        if (!existingTr) {
-          db.treasury.unshift({
-            id: deterministicTrId,
-            date: inv.date || getTodayDate(),
-            direction,
-            amount: paidAmount,
-            method: resolvedMethod,
-            description: desc,
-            sourceType,
-            sourceId: inv.id,
-            branchId: targetBranch,
-            branchName: branchName
-          });
-          treasuryDiscrepanciesFixed++;
-        } else {
-          existingTr.id = deterministicTrId;
-          if (
-            existingTr.direction !== direction ||
-            existingTr.sourceType !== sourceType ||
-            existingTr.date !== (inv.date || getTodayDate()) ||
-            existingTr.branchId !== targetBranch ||
-            Math.abs((Number(existingTr.amount) || 0) - paidAmount) > 0.01 ||
-            existingTr.method !== resolvedMethod
-          ) {
-            existingTr.direction = direction;
-            existingTr.sourceType = sourceType;
-            existingTr.date = inv.date || getTodayDate();
-            existingTr.amount = paidAmount;
-            existingTr.method = resolvedMethod;
-            existingTr.description = desc;
-            existingTr.sourceId = inv.id;
-            existingTr.branchId = targetBranch;
-            existingTr.branchName = branchName;
-            treasuryDiscrepanciesFixed++;
-          }
-        }
-      }
-    }
   });
 
   // 4. إزالة أي حركات مكررة متبقية لضمان وجود حركة واحدة فقط لكل بند
@@ -1973,31 +1941,11 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   if (!db.quotes) db.quotes = [];
   if (!db.orders) db.orders = [];
   if (!db.deletedInvoiceIds) db.deletedInvoiceIds = [];
+  if (!db.deletedRecordIds) db.deletedRecordIds = [];
 
-  // إزالة نهائية ودائمة لفواتير COMP-101 المدمجة الـ 10 (Muhammed Raşad) وأي فواتير محذوفة مسجلة في سجل الحذف
-  const blockedIds = new Set<string>([
-    ...PURGED_COMP101_INVOICE_IDS,
-    ...(db.deletedInvoiceIds || [])
-  ]);
-  const removedInvNumbers = new Set<string>();
-  const removedInvIds = new Set<string>(blockedIds);
-
-  db.invoices = db.invoices.filter(inv => {
-    if (!inv) return false;
-    if (isPurgedEkhwaInvoice(inv) || blockedIds.has(inv.id)) {
-      if (inv.id) removedInvIds.add(inv.id);
-      if (inv.number) removedInvNumbers.add(String(inv.number));
-      return false;
-    }
-    return true;
-  });
-
-  if (removedInvIds.size > 0) {
-    db.stockMovements = db.stockMovements.filter(sm => !sm.sourceId || !removedInvIds.has(sm.sourceId));
-    db.vouchers = db.vouchers.filter(v => !((v as any).invoiceId && removedInvIds.has((v as any).invoiceId)) && !((v as any).sourceId && removedInvIds.has((v as any).sourceId)));
-    db.treasury = db.treasury.filter(tr => !tr.sourceId || !removedInvIds.has(tr.sourceId));
-    db.journals = db.journals.filter(j => !j.sourceId || !removedInvIds.has(j.sourceId));
-  }
+  // إزالة نهائية ودائمة لفواتير COMP-101 المدمجة وأي سجلات محذوفة مسجلة في سجل الحذف العام (deletedRecordIds / deletedInvoiceIds)
+  const blockedIds = getAllDeletedRecordIds(db);
+  db = purgeDeletedRecordsFromDb(db, blockedIds);
 
   // إزالة الأصناف الـ 22 الدخيلة الخاصة بفواتير COMP-101 المدمجة فقط إذا لم تعد مستخدمة في أي فاتورة حقيقية
   const activeProductIds = new Set<string>();
@@ -2034,8 +1982,8 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     }
   }
 
-  // Ensure both Ahmed Nazih and Mohamed Nazih exist
-  if (!cleanUsers.some(u => u.name === 'Mohamed Nazih' || u.username === 'mohamed nazih')) {
+  // Ensure both Ahmed Nazih and Mohamed Nazih exist unless explicitly deleted by the manager
+  if (!blockedIds.has('usr_mvnj47xi') && !cleanUsers.some(u => u.name === 'Mohamed Nazih' || u.username === 'mohamed nazih')) {
     cleanUsers.push({
       id: 'usr_mvnj47xi',
       name: 'Mohamed Nazih',
@@ -2047,7 +1995,7 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
       active: true
     });
   }
-  if (!cleanUsers.some(u => u.name === 'Ahmed Nazih' || u.username === 'ahmed nazih')) {
+  if (!blockedIds.has('usr_mvnj6i7d_vhlqh') && !cleanUsers.some(u => u.name === 'Ahmed Nazih' || u.username === 'ahmed nazih')) {
     cleanUsers.push({
       id: 'usr_mvnj6i7d_vhlqh',
       name: 'Ahmed Nazih',
@@ -2100,62 +2048,9 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.currentUser = db.users[0];
   }
 
-  // Ensure "شركة الرحمة للحدايد والبويات" supplier is registered and never lost
-  const rahmaSupplierName = 'شركة الرحمة للحدايد والبويات';
-  let rahmaSupplier = db.suppliers.find(s => s.name?.includes('الرحمة') || s.name === rahmaSupplierName);
-  if (!rahmaSupplier) {
-    rahmaSupplier = {
-      id: 'supp_rahma_iron',
-      code: 'S-001',
-      name: rahmaSupplierName,
-      company: rahmaSupplierName,
-      phone: '',
-      address: 'المقر الرئيسي',
-      type: 'supplier',
-      balance: 0,
-      openingBalance: 0,
-      creditLimit: 0,
-      notes: 'مورد معتمد - توريدات حدايد وبويات'
-    };
-    db.suppliers.unshift(rahmaSupplier);
-  }
-
-  // Ensure Invoice #17 preserves Ahmed Nazih as creator and Mohamed Nazih as modifier, with all 15 items untouched
-  const inv17 = db.invoices?.find(
-    i => (i.number === '17' && (i.type === 'purchase' || i.invoiceKind === 'purchase')) ||
-         (i.partyName && i.partyName.includes('الرحمة'))
-  );
-  if (inv17) {
-    if (!inv17.createdBy || inv17.createdBy === 'مدير النظام') {
-      inv17.createdBy = 'Ahmed Nazih';
-    }
-    // If modified, ensure editor is Mohamed Nazih as intended
-    if (!inv17.updatedBy || inv17.updatedBy === inv17.createdBy) {
-      inv17.updatedBy = 'Mohamed Nazih';
-    }
-    if (!inv17.items || inv17.items.length < 15) {
-      inv17.items = JSON.parse(JSON.stringify(RAHMA_INVOICE_17_ITEMS));
-      inv17.total = 4319.14;
-      inv17.subtotal = 4319.14;
-      inv17.paid = 4319.14;
-      inv17.remaining = 0;
-      inv17.status = 'مدفوع';
-      inv17.branchId = 'br_mawan';
-      inv17.branchName = 'الفرع الرئيسي - شركة الموان';
-      inv17.paymentMethod = 'نقدي';
-    }
-  }
-
-  // Retroactively verify and correct all purchase invoice items, stock movements, and treasury impacts (single O(N) pass)
+  // التدقيق غير التوليدي: تصحيح الأرصدة وتنظيف التكرارات والسجلات الشبحية فقط دون إنشاء أي حركة أو سند أو صنف جديد لم يسجله المستخدم
   db = verifyAndCorrectStockMovements(db).db;
-
-  // Retroactively audit and deduplicate all vouchers, treasury entries, and phantom deductions
   db = reconcileAndDeduplicateAllFinancialRecords(db).db;
-
-  // Retroactively ensure all invoices with payments match their linked vouchers down to the millimeter
-  if (db.invoices && db.invoices.length > 0) {
-    db = syncAllExistingInvoiceVouchers(db).db;
-  }
 
   return db;
 }
@@ -3472,8 +3367,20 @@ export function mergeInvoices(
 /**
  * Union & merge vouchers safely by deterministic ID or composite key to prevent loss and duplicate vouchers across phones
  */
-export function mergeVouchers(existingList: Voucher[] = [], incomingList: Voucher[] = []): Voucher[] {
+export function mergeVouchers(
+  existingList: Voucher[] = [],
+  incomingList: Voucher[] = [],
+  deletedIds?: Set<string>
+): Voucher[] {
   const map = new Map<string, Voucher>();
+  const isDeleted = (v: Voucher) =>
+    Boolean(
+      deletedIds && (
+        (v.id && deletedIds.has(v.id)) ||
+        (v.invoiceId && deletedIds.has(v.invoiceId)) ||
+        ((v as any).sourceId && deletedIds.has((v as any).sourceId))
+      )
+    );
   const getKey = (v: Voucher) => {
     const isAuto = !v.isManualInstallment && (v.isAutoFromInvoice || v.id.startsWith('vch_'));
     if (v.invoiceId && isAuto) {
@@ -3483,10 +3390,10 @@ export function mergeVouchers(existingList: Voucher[] = [], incomingList: Vouche
   };
 
   (existingList || []).forEach(v => {
-    if (v && v.id) map.set(getKey(v), v);
+    if (v && v.id && !isDeleted(v)) map.set(getKey(v), v);
   });
   (incomingList || []).forEach(v => {
-    if (v && v.id) {
+    if (v && v.id && !isDeleted(v)) {
       const key = getKey(v);
       const existing = map.get(key);
       map.set(key, existing ? { ...existing, ...v } : v);
@@ -3495,8 +3402,20 @@ export function mergeVouchers(existingList: Voucher[] = [], incomingList: Vouche
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 }
 
-export function mergeTreasury(existingList: TreasuryEntry[] = [], incomingList: TreasuryEntry[] = []): TreasuryEntry[] {
+export function mergeTreasury(
+  existingList: TreasuryEntry[] = [],
+  incomingList: TreasuryEntry[] = [],
+  deletedIds?: Set<string>
+): TreasuryEntry[] {
   const map = new Map<string, TreasuryEntry>();
+  const isDeleted = (tr: TreasuryEntry) =>
+    Boolean(
+      deletedIds && (
+        (tr.id && deletedIds.has(tr.id)) ||
+        (tr.sourceId && deletedIds.has(tr.sourceId)) ||
+        ((tr as any).invoiceId && deletedIds.has((tr as any).invoiceId))
+      )
+    );
   const getKey = (tr: TreasuryEntry) => {
     const splitMatch = tr.id.match(/_p(\d+)_/);
     if (tr.sourceId && tr.sourceType === 'transfer') {
@@ -3512,10 +3431,10 @@ export function mergeTreasury(existingList: TreasuryEntry[] = [], incomingList: 
   };
 
   (existingList || []).forEach(tr => {
-    if (tr && tr.id) map.set(getKey(tr), tr);
+    if (tr && tr.id && !isDeleted(tr)) map.set(getKey(tr), tr);
   });
   (incomingList || []).forEach(tr => {
-    if (tr && tr.id) {
+    if (tr && tr.id && !isDeleted(tr)) {
       const key = getKey(tr);
       const existing = map.get(key);
       map.set(key, existing ? { ...existing, ...tr } : tr);
@@ -3524,8 +3443,20 @@ export function mergeTreasury(existingList: TreasuryEntry[] = [], incomingList: 
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 }
 
-export function mergeStockMovements(existingList: StockMovement[] = [], incomingList: StockMovement[] = []): StockMovement[] {
+export function mergeStockMovements(
+  existingList: StockMovement[] = [],
+  incomingList: StockMovement[] = [],
+  deletedIds?: Set<string>
+): StockMovement[] {
   const map = new Map<string, StockMovement>();
+  const isDeleted = (sm: StockMovement) =>
+    Boolean(
+      deletedIds && (
+        (sm.id && deletedIds.has(sm.id)) ||
+        (sm.sourceId && deletedIds.has(sm.sourceId)) ||
+        (sm.productId && deletedIds.has(sm.productId))
+      )
+    );
   const getKey = (sm: StockMovement) => {
     if (sm.sourceId && sm.productId) {
       return `sm_${sm.sourceId}_${sm.productId}`;
@@ -3533,23 +3464,27 @@ export function mergeStockMovements(existingList: StockMovement[] = [], incoming
     return sm.id;
   };
   (existingList || []).forEach(sm => {
-    if (sm && (sm.id || (sm.sourceId && sm.productId))) {
+    if (sm && (sm.id || (sm.sourceId && sm.productId)) && !isDeleted(sm)) {
       const key = getKey(sm);
       const normalizedSm = (sm.sourceId && sm.productId)
         ? { ...sm, id: `sm_${sm.sourceId}_${sm.productId}` }
         : sm;
-      map.set(key, normalizedSm);
+      if (!deletedIds?.has(normalizedSm.id)) {
+        map.set(key, normalizedSm);
+      }
     }
   });
   (incomingList || []).forEach(sm => {
-    if (sm && (sm.id || (sm.sourceId && sm.productId))) {
+    if (sm && (sm.id || (sm.sourceId && sm.productId)) && !isDeleted(sm)) {
       const key = getKey(sm);
       const existing = map.get(key);
       const merged = existing ? { ...existing, ...sm } : sm;
       if (merged.sourceId && merged.productId) {
         merged.id = `sm_${merged.sourceId}_${merged.productId}`;
       }
-      map.set(key, merged);
+      if (!deletedIds?.has(merged.id)) {
+        map.set(key, merged);
+      }
     }
   });
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -3559,12 +3494,17 @@ export function mergeStockMovements(existingList: StockMovement[] = [], incoming
  * Union & merge product catalogs across devices by normalized Arabic name or ID,
  * preserving newly created products and updated pricing before stock verification recalculates balances/costs.
  */
-export function mergeProducts(existingList: Product[] = [], incomingList: Product[] = []): Product[] {
+export function mergeProducts(
+  existingList: Product[] = [],
+  incomingList: Product[] = [],
+  deletedIds?: Set<string>
+): Product[] {
   const byKey = new Map<string, Product>();
   const idToKey = new Map<string, string>();
 
   const registerProduct = (p: Product, isIncoming: boolean) => {
     if (!p || !p.name) return;
+    if (p.id && deletedIds?.has(p.id)) return;
     const norm = normalizeArabicText(p.name);
     const key = (p.id && idToKey.get(p.id)) || (norm ? `name:${norm}` : `id:${p.id}`);
     const existing = byKey.get(key);
@@ -3740,34 +3680,44 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     ? `فاتورة مشتريات رقم ${invoice.number}`
     : `فاتورة مبيعات رقم ${invoice.number}`;
 
-  // 2. Remove related stock movements (strictly scoped by sourceId OR matching movement type + refNumber)
-  updated.stockMovements = updated.stockMovements.filter(
-    sm => sm.sourceId !== invoice.id && !(!sm.sourceId && sm.refNumber === invoice.number && sm.type === expectedSmType)
-  );
+  const removedIds: string[] = [invoice.id];
 
-  // 3. Remove all treasury entries related to this invoice (strictly by id OR matching sourceType + invoice number)
+  // 2. Remove related stock movements
+  updated.stockMovements = updated.stockMovements.filter(sm => {
+    const rm = sm.sourceId === invoice.id || (!sm.sourceId && sm.refNumber === invoice.number && sm.type === expectedSmType);
+    if (rm && sm.id) removedIds.push(sm.id);
+    return !rm;
+  });
+
+  // 3. Remove all treasury entries related to this invoice
   updated.treasury = updated.treasury.filter(tr => {
-    if (tr.sourceId === invoice.id || (tr as any).invoiceId === invoice.id || (tr.id && invoice.id && tr.id.includes(invoice.id))) return false;
-    if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim() && tr.sourceType === expectedTrSourceType) return false;
-    if (invoice.number && tr.description && tr.sourceType === expectedTrSourceType && (
-      tr.description.includes(expectedTrPrefix) ||
-      tr.description.includes(`مرتجع رقم ${invoice.number}`)
-    )) {
-      return false;
-    }
-    return true;
+    const rm =
+      tr.sourceId === invoice.id ||
+      (tr as any).invoiceId === invoice.id ||
+      (tr.id && invoice.id && tr.id.includes(invoice.id)) ||
+      ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim() && tr.sourceType === expectedTrSourceType) ||
+      Boolean(invoice.number && tr.description && tr.sourceType === expectedTrSourceType && (
+        tr.description.includes(expectedTrPrefix) ||
+        tr.description.includes(`مرتجع رقم ${invoice.number}`)
+      ));
+    if (rm && tr.id) removedIds.push(tr.id);
+    return !rm;
   });
 
   // 4. Remove journal entry
-  updated.journals = updated.journals.filter(
-    j => j.sourceId !== invoice.id && j.id !== invoice.journalEntryId && (!j.id.includes(invoice.id))
-  );
+  updated.journals = updated.journals.filter(j => {
+    const rm = j.sourceId === invoice.id || j.id === invoice.journalEntryId || (j.id && j.id.includes(invoice.id));
+    if (rm && j.id) removedIds.push(j.id);
+    return !rm;
+  });
 
   // 5. Remove any return entries
   if (updated.returns) {
-    updated.returns = updated.returns.filter(
-      r => r.originalInvoiceId !== invoice.id && !(r.number === invoice.number && r.type === invoice.type)
-    );
+    updated.returns = updated.returns.filter(r => {
+      const rm = r.originalInvoiceId === invoice.id || (r.number === invoice.number && r.type === invoice.type);
+      if (rm && r.id) removedIds.push(r.id);
+      return !rm;
+    });
   }
 
   // 5.5. Remove any linked payment/receipt vouchers created for this invoice and their journals
@@ -3781,26 +3731,29 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
                        (v.type === expectedVoucherType && v.description && v.description.includes(expectedTrPrefix));
       if (isLinked) {
         linkedVoucherIds.add(v.id);
+        removedIds.push(v.id);
         return false;
       }
       return true;
     });
 
     if (linkedVoucherIds.size > 0) {
-      // Remove journal entries belonging to the deleted vouchers
-      updated.journals = updated.journals.filter(
-        j => !linkedVoucherIds.has(j.sourceId || '') && !linkedVoucherIds.has(j.id)
-      );
-      // Remove treasury records belonging to the deleted vouchers
-      updated.treasury = updated.treasury.filter(
-        tr => !linkedVoucherIds.has(tr.sourceId || '') && !linkedVoucherIds.has(tr.id)
-      );
+      updated.journals = updated.journals.filter(j => {
+        const rm = linkedVoucherIds.has(j.sourceId || '') || linkedVoucherIds.has(j.id);
+        if (rm && j.id) removedIds.push(j.id);
+        return !rm;
+      });
+      updated.treasury = updated.treasury.filter(tr => {
+        const rm = linkedVoucherIds.has(tr.sourceId || '') || linkedVoucherIds.has(tr.id);
+        if (rm && tr.id) removedIds.push(tr.id);
+        return !rm;
+      });
     }
   }
 
-  // 6. Remove the invoice itself & record permanent deletion tombstone so it never resurrects across devices
+  // 6. Remove the invoice itself & record permanent deletion tombstones across all removed IDs
   updated.invoices = updated.invoices.filter(i => i.id !== invoice.id);
-  updated.deletedInvoiceIds = Array.from(new Set([...(updated.deletedInvoiceIds || []), invoice.id]));
+  markRecordsDeleted(updated, removedIds, [invoice.id]);
 
   // 7. Update party balance if party exists
   if (invoice.partyId) {
@@ -3830,19 +3783,29 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
  * - Treasury entry and balance
  * - General journal double-entry
  * - Party (customer/supplier) balance
- * - Audit trail
+ * - Permanent deletion tombstone
  */
 export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): AccountingDB {
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  const removedIds: string[] = [voucher.id];
 
   // 1. Remove treasury entry
-  updated.treasury = updated.treasury.filter(tr => tr.sourceId !== voucher.id && tr.id !== voucher.id && !tr.id.includes(voucher.id));
+  updated.treasury = updated.treasury.filter(tr => {
+    const rm = tr.sourceId === voucher.id || tr.id === voucher.id || tr.id.includes(voucher.id);
+    if (rm && tr.id) removedIds.push(tr.id);
+    return !rm;
+  });
 
   // 2. Remove journal entry
-  updated.journals = updated.journals.filter(j => j.sourceId !== voucher.id && j.id !== voucher.journalEntryId);
+  updated.journals = updated.journals.filter(j => {
+    const rm = j.sourceId === voucher.id || j.id === voucher.journalEntryId;
+    if (rm && j.id) removedIds.push(j.id);
+    return !rm;
+  });
 
-  // 3. Remove voucher
+  // 3. Remove voucher & record permanent deletion tombstone
   updated.vouchers = updated.vouchers.filter(item => item.id !== voucher.id);
+  markRecordsDeleted(updated, removedIds);
 
   // 3.5. If voucher was linked to an invoice, revert invoice paid and remaining amount
   if (voucher.invoiceId || (voucher as any).referenceNumber) {
@@ -3881,19 +3844,13 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
 }
 
 /**
- * Deletes any stock adjustment and cleanly reverts:
- * - Branch product stock quantity back to what it was before the adjustment
- * - Stock movements log
- * - Inventory journals
- * - Audit trail
+ * Deletes any stock adjustment and cleanly reverts
  */
 export function deleteAdjustmentAndRevert(db: AccountingDB, adjustmentId: string): AccountingDB {
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
   const adj = (updated.adjustments || []).find(a => a.id === adjustmentId);
   if (!adj) return updated;
 
-  // Revert product stock: adjustment applied diffQty = actualQty - systemQty
-  // To revert, subtract diffQty from currentQty
   const prod = updated.products.find(p => p.id === adj.productId);
   if (prod) {
     const bId = adj.branchId || 'br_main';
@@ -3904,23 +3861,26 @@ export function deleteAdjustmentAndRevert(db: AccountingDB, adjustmentId: string
     if (pIdx > -1) updated.products[pIdx] = prodUpdated;
   }
 
-  // Remove stock movements
-  updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.sourceId !== adj.id);
-  // Remove journals
-  updated.journals = (updated.journals || []).filter(j => j.sourceId !== adj.id);
-  // Remove adjustment
+  const removedIds: string[] = [adj.id];
+  updated.stockMovements = (updated.stockMovements || []).filter(sm => {
+    const rm = sm.sourceId === adj.id;
+    if (rm && sm.id) removedIds.push(sm.id);
+    return !rm;
+  });
+  updated.journals = (updated.journals || []).filter(j => {
+    const rm = j.sourceId === adj.id;
+    if (rm && j.id) removedIds.push(j.id);
+    return !rm;
+  });
   updated.adjustments = (updated.adjustments || []).filter(a => a.id !== adj.id);
+  markRecordsDeleted(updated, removedIds);
 
   logAudit(updated, 'حذف تسوية جردية وعكس الرصيد', `تم حذف التسوية وعكس كمية المخزون بالكامل`);
   return updated;
 }
 
 /**
- * Deletes any manual treasury entry, expense, or revenue and cleanly reverts:
- * - Treasury balance
- * - Expenses / Revenues lists
- * - Journals
- * - Audit trail
+ * Deletes any manual treasury entry, expense, or revenue and cleanly reverts & tombstones permanently
  */
 export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string): AccountingDB {
   const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
@@ -3928,18 +3888,28 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
   if (!tr) return updated;
 
   const targetSourceId = tr.sourceId || tr.id;
+  const removedIds: string[] = [entryId];
 
   // 1. If this was an expense or revenue, remove from expenses/revenues
   if (tr.sourceType === 'expense') {
-    updated.expenses = (updated.expenses || []).filter(e => e.id !== targetSourceId && e.id !== entryId);
+    updated.expenses = (updated.expenses || []).filter(e => {
+      const rm = e.id === targetSourceId || e.id === entryId;
+      if (rm && e.id) removedIds.push(e.id);
+      return !rm;
+    });
   } else if (tr.sourceType === 'revenue') {
-    updated.revenues = (updated.revenues || []).filter(r => r.id !== targetSourceId && r.id !== entryId);
+    updated.revenues = (updated.revenues || []).filter(r => {
+      const rm = r.id === targetSourceId || r.id === entryId;
+      if (rm && r.id) removedIds.push(r.id);
+      return !rm;
+    });
   }
 
   // 2. If this was linked to a voucher, remove the voucher and recalculate party balance
-  if (tr.sourceType === 'voucher' || (updated.vouchers && updated.vouchers.some(v => v.id === targetSourceId))) {
+  if (tr.sourceType === 'voucher' || tr.sourceType === 'receipt' || tr.sourceType === 'payment' || (updated.vouchers && updated.vouchers.some(v => v.id === targetSourceId))) {
     const voucher = (updated.vouchers || []).find(v => v.id === targetSourceId);
     if (voucher) {
+      removedIds.push(voucher.id);
       updated.vouchers = updated.vouchers.filter(v => v.id !== voucher.id);
       if (voucher.partyId) {
         const cust = updated.customers.find(c => c.id === voucher.partyId);
@@ -3972,6 +3942,13 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
     linkedInvoice.remaining = roundMoney(Math.max(0, (linkedInvoice.total || 0) - linkedInvoice.paid));
     linkedInvoice.status = linkedInvoice.paid <= 0 ? 'آجل' : linkedInvoice.remaining <= 0 ? 'مدفوع' : 'جزئي';
 
+    // Also remove any auto voucher for this deleted treasury entry so it does not linger
+    updated.vouchers = (updated.vouchers || []).filter(v => {
+      const isLinkedAuto = (v.isAutoFromInvoice || v.id.startsWith('vch_')) && v.invoiceId === linkedInvoice.id;
+      if (isLinkedAuto && v.id) removedIds.push(v.id);
+      return !isLinkedAuto;
+    });
+
     if (linkedInvoice.partyId) {
       const cust = updated.customers.find(c => c.id === linkedInvoice.partyId);
       if (cust) cust.balance = calculateCustomerBalance(updated, cust.id);
@@ -3983,13 +3960,15 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
   // 4. Remove treasury entry
   updated.treasury = updated.treasury.filter(t => t.id !== entryId);
 
-  // 5. Remove journals
-  updated.journals = (updated.journals || []).filter(j => 
-    j.sourceId !== targetSourceId && 
-    j.id !== targetSourceId && 
-    j.sourceId !== entryId && 
-    j.id !== entryId
-  );
+  // 5. Remove journals (for non-invoice movements or treasury entry's own journal)
+  updated.journals = (updated.journals || []).filter(j => {
+    const rm = (!linkedInvoice && (j.sourceId === targetSourceId || j.id === targetSourceId)) || j.sourceId === entryId || j.id === entryId;
+    if (rm && j.id) removedIds.push(j.id);
+    return !rm;
+  });
+
+  // 6. Persist permanent deletion tombstones
+  markRecordsDeleted(updated, removedIds);
 
   logAudit(
     updated,
@@ -4272,9 +4251,19 @@ export function syncInvoiceVouchers(
   const isPurchaseReturn = invoice.invoiceKind === 'purchase_return';
   const isSale = !isSaleReturn && !isPurchaseReturn && (invoice.type === 'sale' || invoice.invoiceKind === 'sale' || invoice.invoiceKind === 'wholesale');
 
-  // Money incoming -> 'receipt': Sales, Wholesale, Purchase Return
-  // Money outgoing -> 'payment': Purchase, Sale Return
-  const voucherType: 'receipt' | 'payment' = (isSale || isPurchaseReturn) ? 'receipt' : 'payment';
+  // Return invoices stay strictly in Returns & Treasury—never inject auto-vouchers into Receipts/Payments
+  if (isSaleReturn || isPurchaseReturn) {
+    updated.vouchers = updated.vouchers.filter(v => {
+      if (v.isManualInstallment) return true;
+      const isLinked = (v as any).invoiceId === invoiceId || (v as any).sourceId === invoiceId;
+      return !isLinked;
+    });
+    return updated;
+  }
+
+  // Money incoming -> 'receipt': Sales, Wholesale
+  // Money outgoing -> 'payment': Purchase
+  const voucherType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
 
   const isAutoVoucherForInvoice = (v: Voucher): boolean => {
     if (v.isManualInstallment) return false;

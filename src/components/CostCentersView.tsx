@@ -20,7 +20,7 @@ import {
   Filter
 } from 'lucide-react';
 import { AccountingDB, CostCenter } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit, roundMoney, isFiniteNonNegative } from '../services/accountingStorage';
+import { formatMoney, generateId, getTodayDate, logAudit, roundMoney, isFiniteNonNegative, markRecordsDeleted } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
@@ -125,6 +125,7 @@ export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb
       if (!confirm(`هل أنت متأكد من حذف مركز التكلفة (${ccName})؟`)) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.costCenters = updated.costCenters.filter(c => c.id !== id);
+      markRecordsDeleted(updated, [id]);
       if (selectedCenterId === id) {
         setSelectedCenterId(updated.costCenters[0]?.id || '');
       }

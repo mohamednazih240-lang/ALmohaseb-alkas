@@ -27,7 +27,8 @@ import {
   getTodayDate,
   logAudit,
   roundMoney,
-  getNextUniqueInvoiceNumber
+  getNextUniqueInvoiceNumber,
+  markRecordsDeleted
 } from '../services/accountingStorage';
 import { postInvoiceTransaction } from '../services/accountingEngine';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
@@ -212,6 +213,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       if (!confirm('هل ترغب في حذف عرض السعر؟')) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.quotes = updated.quotes.filter(q => q.id !== id);
+      markRecordsDeleted(updated, [id]);
       onUpdateDb(updated);
     });
   };
@@ -221,6 +223,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       if (!confirm('هل ترغب في حذف الأمر؟')) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.orders = updated.orders.filter(o => o.id !== id);
+      markRecordsDeleted(updated, [id]);
       onUpdateDb(updated);
     });
   };

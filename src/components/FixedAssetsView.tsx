@@ -28,7 +28,8 @@ import {
   assertJournalBalanced,
   generateId,
   getTodayDate,
-  logAudit
+  logAudit,
+  markRecordsDeleted
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -153,6 +154,7 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
       if (!confirm(`هل أنت متأكد من حذف الأصل (${astName})؟`)) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.fixedAssets = updated.fixedAssets.filter(a => a.id !== id);
+      markRecordsDeleted(updated, [id]);
       if (selectedAssetId === id) {
         setSelectedAssetId(updated.fixedAssets[0]?.id || '');
       }

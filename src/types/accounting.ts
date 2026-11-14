@@ -394,6 +394,8 @@ export interface DailyClosingChannelSummary {
   cashOut: number;
   closingBalance: number;
   nextDayOpeningBalance: number;
+  actualBalance?: number;
+  variance?: number;
 }
 
 export interface DailyClosing {
@@ -666,4 +668,5 @@ export interface AccountingDB {
   audit: AuditLog[];
   cleanGeneration?: number;
   deletedInvoiceIds?: string[];
+  deletedRecordIds?: string[];
 }

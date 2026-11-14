@@ -17,7 +17,7 @@ import {
   Scale
 } from 'lucide-react';
 import { AccountingDB, Currency, JournalEntry } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit, roundQty, isFinitePositive } from '../services/accountingStorage';
+import { formatMoney, generateId, getTodayDate, logAudit, roundQty, isFinitePositive, markRecordsDeleted } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
@@ -127,6 +127,7 @@ export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }
       if (!confirm(`هل أنت متأكد من حذف العملة (${cName})؟`)) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.currencies = updated.currencies.filter(c => c.id !== id);
+      markRecordsDeleted(updated, [id]);
       logAudit(updated, 'حذف عملة', cName);
       onUpdateDb(updated);
     });

@@ -19,7 +19,7 @@ import {
   ReturnInvoice,
   Invoice
 } from '../types/accounting';
-import { formatMoney, logAudit, getProductForBranch, updateProductBranchData, calculateCustomerBalance, calculateSupplierBalance, roundQty } from '../services/accountingStorage';
+import { formatMoney, logAudit, getProductForBranch, updateProductBranchData, calculateCustomerBalance, calculateSupplierBalance, roundQty, markRecordsDeleted } from '../services/accountingStorage';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
@@ -232,12 +232,36 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
         if (pIdx > -1) updated.products[pIdx] = prodUpdated;
       }
 
-      updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.sourceId !== ret.id);
+      const removedIds: string[] = [ret.id];
+      const removedInvIds: string[] = [];
+      if (ret.originalInvoiceId) removedInvIds.push(ret.originalInvoiceId);
+
+      updated.stockMovements = (updated.stockMovements || []).filter(sm => {
+        const rm = sm.sourceId === ret.id || (ret.originalInvoiceId && sm.sourceId === ret.originalInvoiceId);
+        if (rm) removedIds.push(sm.id);
+        return !rm;
+      });
       const retKind = ret.type === 'sale' ? 'sale_return' : 'purchase_return';
-      updated.treasury = (updated.treasury || []).filter(tr => tr.sourceId !== ret.id && !(tr.sourceType === retKind && ret.number && tr.description?.includes(`رقم ${ret.number}`)));
-      updated.journals = (updated.journals || []).filter(j => j.sourceId !== ret.id);
+      updated.treasury = (updated.treasury || []).filter(tr => {
+        const rm = tr.sourceId === ret.id || (ret.originalInvoiceId && tr.sourceId === ret.originalInvoiceId) || (tr.sourceType === retKind && ret.number && tr.description?.includes(`رقم ${ret.number}`));
+        if (rm) removedIds.push(tr.id);
+        return !rm;
+      });
+      updated.journals = (updated.journals || []).filter(j => {
+        const rm = j.sourceId === ret.id || (ret.originalInvoiceId && j.sourceId === ret.originalInvoiceId) || j.id === ret.journalEntryId;
+        if (rm) removedIds.push(j.id);
+        return !rm;
+      });
       updated.returns = (updated.returns || []).filter(r => r.id !== ret.id);
-      updated.invoices = (updated.invoices || []).filter(i => i.id !== ret.id && !(i.number === ret.number && i.invoiceKind === retKind));
+      updated.invoices = (updated.invoices || []).filter(i => {
+        const rm = i.id === ret.id || i.id === ret.originalInvoiceId || (i.number === ret.number && i.invoiceKind === retKind);
+        if (rm) {
+          removedIds.push(i.id);
+          removedInvIds.push(i.id);
+        }
+        return !rm;
+      });
+      markRecordsDeleted(updated, removedIds, removedInvIds);
 
       if (ret.partyId) {
         const cust = updated.customers.find(c => c.id === ret.partyId);

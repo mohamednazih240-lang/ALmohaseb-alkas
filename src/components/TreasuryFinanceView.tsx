@@ -41,7 +41,8 @@ import {
   isBranchMatch,
   roundMoney,
   assertJournalBalanced,
-  isFinitePositive
+  isFinitePositive,
+  markRecordsDeleted
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
@@ -530,13 +531,23 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       const isExp = subPage === 'expenses';
       if (!confirm(`هل أنت متأكد من حذف ${isExp ? 'المصروف' : 'الإيراد'} "${item.category}"؟`)) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const removedIds: string[] = [item.id];
       if (isExp) {
         updated.expenses = updated.expenses.filter(e => e.id !== item.id);
       } else {
         updated.revenues = updated.revenues.filter(r => r.id !== item.id);
       }
-      updated.treasury = updated.treasury.filter(t => t.sourceId !== item.id);
-      updated.journals = updated.journals.filter(j => j.sourceId !== item.id);
+      updated.treasury = updated.treasury.filter(t => {
+        const rm = t.sourceId === item.id;
+        if (rm) removedIds.push(t.id);
+        return !rm;
+      });
+      updated.journals = updated.journals.filter(j => {
+        const rm = j.sourceId === item.id;
+        if (rm) removedIds.push(j.id);
+        return !rm;
+      });
+      markRecordsDeleted(updated, removedIds);
       logAudit(updated, isExp ? 'حذف مصروف' : 'حذف إيراد', `تم حذف ${item.category} بقيمة ${item.amount}`);
       onUpdateDb(updated);
     });

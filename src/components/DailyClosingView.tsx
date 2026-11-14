@@ -35,7 +35,8 @@ import {
   roundMoney,
   isFiniteNonNegative,
   PAYMENT_METHODS,
-  buildProductFifoLedger
+  buildProductFifoLedger,
+  markRecordsDeleted
 } from '../services/accountingStorage';
 import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
@@ -112,6 +113,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const [isBaselineMode, setIsBaselineMode] = useState<boolean>(() => !hasPriorClosing);
   const [actualCashInput, setActualCashInput] = useState<string>('');
   const [baselineChannelInputs, setBaselineChannelInputs] = useState<Record<string, string>>({});
+  const [showReconcileChannels, setShowReconcileChannels] = useState<boolean>(false);
+  const [reconcileInputs, setReconcileInputs] = useState<Record<string, string>>({});
 
   // Cumulative treasury book opening balances prior to selectedDate across all 5 payment channels
   const priorChannelBookBalances = useMemo(() => {
@@ -119,25 +122,15 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     treasuryMethods.forEach(m => {
       map[m] = 0;
     });
-    db.treasury
-      .filter(t => t.date < selectedDate && isTargetBranch(t.branchId))
-      .forEach(t => {
-        if (!treasuryMethods.includes(t.method)) return;
-        const amt = Number(t.amount) || 0;
-        map[t.method] = roundMoney((map[t.method] || 0) + (t.direction === 'in' ? amt : -amt));
-      });
 
-    // Carry forward next-day opening balances for ALL 5 payment channels from latest prior closing + interim treasury flows
     if (latestPriorClosing?.nextDayOpeningBalances) {
       const priorDate = latestPriorClosing.date;
       treasuryMethods.forEach(m => {
-        const carried = latestPriorClosing.nextDayOpeningBalances?.[m];
-        if (carried !== undefined) {
-          const betweenNet = db.treasury
-            .filter(t => t.date > priorDate && t.date < selectedDate && t.method === m && isTargetBranch(t.branchId))
-            .reduce((s, t) => s + (t.direction === 'in' ? (Number(t.amount) || 0) : -(Number(t.amount) || 0)), 0);
-          map[m] = roundMoney(carried + betweenNet);
-        }
+        const carried = latestPriorClosing.nextDayOpeningBalances?.[m] ?? 0;
+        const betweenNet = db.treasury
+          .filter(t => t.date > priorDate && t.date < selectedDate && t.method === m && isTargetBranch(t.branchId))
+          .reduce((s, t) => s + (t.direction === 'in' ? (Number(t.amount) || 0) : -(Number(t.amount) || 0)), 0);
+        map[m] = roundMoney(carried + betweenNet);
       });
     }
     return map;
@@ -148,6 +141,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     setStartingCashEdited(false);
     setActualCashEdited(false);
     setBaselineChannelInputs({});
+    setReconcileInputs({});
+    setShowReconcileChannels(false);
     setIsBaselineMode(!hasPriorClosing);
     setStartingCash(roundMoney(priorChannelBookBalances['نقدي'] || 0));
     if (!hasPriorClosing) {
@@ -275,17 +270,21 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
     // Expected cash in drawer ('نقدي')
     const rawExpectedCash = roundMoney(startingCash + drawerIn - drawerOut);
-    const effectiveActualCash = actualCashEdited
-      ? roundMoney(actualCash)
-      : (isBaselineMode ? roundMoney(Math.max(0, rawExpectedCash)) : rawExpectedCash);
+    const cashBaselineRaw = baselineChannelInputs['نقدي'];
+    const effectiveActualCash = isBaselineMode
+      ? roundMoney(actualCashEdited ? actualCash : (cashBaselineRaw !== undefined && cashBaselineRaw.trim() !== '' ? (parseFloat(cashBaselineRaw) || 0) : 0))
+      : (actualCashEdited
+          ? roundMoney(actualCash)
+          : (reconcileInputs['نقدي'] !== undefined && reconcileInputs['نقدي'].trim() !== ''
+              ? roundMoney(parseFloat(reconcileInputs['نقدي']) || 0)
+              : rawExpectedCash));
 
-    // On Day-1 baseline mode, the user establishes the real cash baseline with zero fake prior deficit/surplus
+    // On Day-1 baseline mode, user-entered values across all 5 channels become the exact opening balances with zero deficits/surpluses
     const expectedCash = isBaselineMode ? effectiveActualCash : rawExpectedCash;
-    const diff = isBaselineMode ? 0 : roundMoney(effectiveActualCash - expectedCash);
 
-    // Per-channel summary & Next-Day Opening Balance for ALL treasury payment methods
+    // Per-channel summary & Next-Day Opening Balance for ALL 5 treasury payment methods
     const channelSummaries: DailyClosingChannelSummary[] = treasuryMethods.map(m => {
-      const opening = m === 'نقدي' ? roundMoney(startingCash) : roundMoney(priorChannelBookBalances[m] || 0);
+      const opening = isBaselineMode ? 0 : (m === 'نقدي' ? roundMoney(startingCash) : roundMoney(priorChannelBookBalances[m] || 0));
       const chIn = roundMoney(
         dayTreasury.filter(t => t.method === m && t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
       );
@@ -293,19 +292,42 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         dayTreasury.filter(t => t.method === m && t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
       );
       const closing = roundMoney(opening + chIn - chOut);
-      const hasManualChannelOverride = isBaselineMode && m !== 'نقدي' && baselineChannelInputs[m] !== undefined && baselineChannelInputs[m].trim() !== '';
-      const nextOpening = m === 'نقدي'
-        ? roundMoney(effectiveActualCash)
-        : (hasManualChannelOverride ? roundMoney(Number(baselineChannelInputs[m]) || 0) : closing);
+
+      let actualBal = closing;
+      if (isBaselineMode) {
+        if (m === 'نقدي') {
+          actualBal = effectiveActualCash;
+        } else {
+          const raw = baselineChannelInputs[m];
+          actualBal = raw !== undefined && raw.trim() !== '' ? roundMoney(Math.max(0, parseFloat(raw) || 0)) : 0;
+        }
+      } else {
+        if (m === 'نقدي') {
+          actualBal = effectiveActualCash;
+        } else {
+          const raw = reconcileInputs[m];
+          actualBal = raw !== undefined && raw.trim() !== '' ? roundMoney(Math.max(0, parseFloat(raw) || 0)) : closing;
+        }
+      }
+
+      const channelVariance = isBaselineMode ? 0 : roundMoney(actualBal - closing);
+
       return {
         method: m,
         openingBalance: opening,
         cashIn: chIn,
         cashOut: chOut,
-        closingBalance: closing,
-        nextDayOpeningBalance: nextOpening
+        closingBalance: isBaselineMode ? actualBal : closing,
+        actualBalance: actualBal,
+        variance: channelVariance,
+        nextDayOpeningBalance: actualBal
       };
     });
+
+    const totalChannelVariance = isBaselineMode
+      ? 0
+      : roundMoney(channelSummaries.reduce((s, cs) => s + (cs.variance || 0), 0));
+    const diff = isBaselineMode ? 0 : roundMoney(effectiveActualCash - expectedCash);
 
     const nextDayOpeningBalances: Record<string, number> = {};
     channelSummaries.forEach(cs => {
@@ -338,11 +360,12 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       expectedCash,
       effectiveActualCash,
       diff,
+      totalChannelVariance,
       channelSummaries,
       nextDayOpeningBalances,
       totalNextDayOpening
     };
-  }, [db, fifoLedger, selectedDate, startingCash, actualCash, actualCashEdited, isBaselineMode, baselineChannelInputs, targetBranchId, treasuryMethods, priorChannelBookBalances]);
+  }, [db, fifoLedger, selectedDate, startingCash, actualCash, actualCashEdited, isBaselineMode, baselineChannelInputs, reconcileInputs, targetBranchId, treasuryMethods, priorChannelBookBalances]);
 
   // Keep actualCash synced to expectedCash in audit mode until cashier enters a manual drawer count
   React.useEffect(() => {
@@ -391,8 +414,12 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         { cols: ['مجمل أرباح الوردية', `${formatCleanNumber(c.grossProfit)} ${db.settings.currency}`, 'وفق دفعات FIFO الموثقة'], isBold: true, highlight: true },
         { cols: ['نسبة الأرباح للوردية %', `${c.profitMargin.toFixed(1)}%`, 'هامش الربح المحقق'], isBold: true, highlight: true },
         { cols: ['النقد الفعلي بالدرج (نقدي)', `${formatCleanNumber(c.actualCash)} ${db.settings.currency}`, 'الجرد الفعلي للدرج'] },
-        { cols: ['النقد المتوقع بالدرج (نقدي)', `${formatCleanNumber(c.expectedCash)} ${db.settings.currency}`, 'بداية الدرج + وارد الكاش - صادر الكاش'] },
-        { cols: ['العجز / الفائض بالدرج', `${formatCleanNumber(c.difference)} ${db.settings.currency}`, c.difference === 0 ? 'مطابق تماماً' : c.difference > 0 ? 'فائض بالدرج' : 'عجز بالدرج'], isBold: true },
+        ...(c.isInitialBaseline
+          ? []
+          : [
+              { cols: ['النقد المتوقع بالدرج (نقدي)', `${formatCleanNumber(c.expectedCash)} ${db.settings.currency}`, 'بداية الدرج + وارد الكاش - صادر الكاش'] },
+              { cols: ['العجز / الفائض بالدرج', `${formatCleanNumber(c.difference)} ${db.settings.currency}`, c.difference === 0 ? 'مطابق تماماً' : c.difference > 0 ? 'فائض بالدرج' : 'عجز بالدرج'], isBold: true }
+            ]),
         ...channelRows
       ],
       summaryLines: [
@@ -413,10 +440,11 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   // Save current shift closing with full next-day opening balances for all payment methods
   const handleSaveClosing = () => {
     runWithLock(() => {
-      const cleanStarting = roundMoney(startingCash);
+      const cleanStarting = roundMoney(isBaselineMode ? 0 : startingCash);
       const cleanActual = roundMoney(liveStats.effectiveActualCash);
-      if (isBaselineMode && !actualCashEdited) {
-        alert('في أول تقفيل يومية (تأسيس الرصيد)، يرجى إدخال المبلغ النقدي الموجود معك فعلياً بالدرج يدوياً أولاً.');
+      const hasAnyBaselineInput = actualCashEdited || Object.values(baselineChannelInputs).some(v => v.trim() !== '');
+      if (isBaselineMode && !hasAnyBaselineInput) {
+        alert('يرجى إدخال المبلغ الفعلي الموجود في وسائل الخزينة أولاً.');
         return;
       }
       if (cleanActual < 0) {
@@ -428,7 +456,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         return;
       }
       const confirmMsg = isBaselineMode
-        ? `سيتم اعتماد "${shiftName}" كأول تقفيل يومية (تأسيس الرصيد النقدي الفعلي = ${formatMoney(cleanActual, db.settings.currency)}) وترحيله كرصيد افتتاحي ليوم ${nextDayDate} لبدء المراجعة الحقيقية والعجوزات والزيادات من الغد. هل أنت متأكد؟`
+        ? `سيتم اعتماد "${shiftName}" وترحيل الأرصدة المدخلة لجميع وسائل الخزينة (${formatMoney(liveStats.totalNextDayOpening, db.settings.currency)}) كرصيد افتتاحي ليوم ${nextDayDate}. هل أنت متأكد؟`
         : `هل أنت متأكد من حفظ واعتماد تقفيل "${shiftName}" لتاريخ ${selectedDate} وترحيل الرصيد الافتتاحي لليوم التالي (${nextDayDate})؟`;
       if (!confirm(confirmMsg)) {
         return;
@@ -438,7 +466,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       if (!updated.dailyClosings) updated.dailyClosings = [];
 
       const expected = isBaselineMode ? cleanActual : roundMoney(liveStats.expectedCash);
-      const diff = isBaselineMode ? 0 : roundMoney(cleanActual - expected);
+      const diff = isBaselineMode ? 0 : roundMoney(liveStats.totalChannelVariance !== 0 ? liveStats.totalChannelVariance : (cleanActual - expected));
 
       const newClosing: DailyClosing = {
         id: generateId('cls'),
@@ -526,6 +554,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       if (!updated.dailyClosings) updated.dailyClosings = [];
 
       updated.dailyClosings = updated.dailyClosings.filter(c => c.id !== closing.id);
+      markRecordsDeleted(updated, [closing.id]);
       logAudit(updated, 'حذف تقفيل يومية', `تم حذف سجل التقفيل ${closing.shiftNumber}`);
 
       onUpdateDb(updated);
@@ -636,9 +665,6 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
               فرع: {currentBranch.name}
             </span>
           </div>
-          <p className="text-xs text-slate-500 font-medium mt-0.5">
-            متابعة مدخلات ومخرجات الخزينة لفرع ({currentBranch.name})، مطابقة الدرج الفعلي، وعرض نسبة ومجمل الأرباح المستقلة
-          </p>
         </div>
 
         {/* Tab switch */}
@@ -730,59 +756,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
             </div>
           )}
 
-          {/* Day-1 Baseline vs Day-2+ Real Audit Mode Banner */}
-          {isBaselineMode ? (
-            <div className="bg-amber-50 border-2 border-amber-400 rounded-xl p-3.5 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-start gap-2.5">
-                <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                <div>
-                  <h3 className="text-xs sm:text-sm font-black text-amber-950">
-                    أول تقفيل يومية: إدخال الرصيد النقدي الفعلي الموجود معك يدوياً (تأسيس البداية)
-                  </h3>
-                  <p className="text-[11px] text-amber-900 mt-0.5 leading-relaxed">
-                    أدخل المبلغ النقدي الموجود في يدك / الدرج حالياً في خانة <strong>«المبلغ النقدي الموجود معي الآن»</strong> (ويمكنك أيضاً تعديل أرصدة القنوات الأخرى في الجدول بالأسفل). سيتم اعتماده كرصيد افتتاحي صحيح ليوم <strong>{nextDayDate}</strong> بدون احتساب فروقات أو عجوزات وهمية عن أيام سابقة، وبدءاً من الغد تبدأ المراجعة الحقيقية والعجوزات والزيادات تلقائياً.
-                  </p>
-                </div>
-              </div>
-              {hasPriorClosing && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsBaselineMode(false);
-                    setActualCashEdited(false);
-                  }}
-                  className="px-3 py-1.5 bg-white hover:bg-amber-100 text-amber-950 border border-amber-400 rounded-lg text-xs font-bold shrink-0 cursor-pointer"
-                >
-                  العودة لوضع المراجعة ({latestPriorClosing?.date})
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-blue-700 shrink-0" />
-                <div className="text-[11px] text-blue-950 font-bold">
-                  وضع المراجعة الحقيقية والعجوزات والزيادات — مرحّل من تقفيل يوم{' '}
-                  <span className="font-mono underline">{latestPriorClosing?.date}</span>{' '}
-                  (رصيد بداية الدرج: <span className="font-mono">{formatMoney(startingCash, db.settings.currency)}</span>)
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsBaselineMode(true);
-                  setActualCashEdited(false);
-                  setActualCashInput('');
-                }}
-                className="text-[11px] font-bold text-blue-800 hover:underline self-start sm:self-center cursor-pointer"
-              >
-                إعادة ضبط رصيد بداية يدوي؟
-              </button>
-            </div>
-          )}
-
           {/* Shift Configuration Bar */}
-          <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs grid grid-cols-1 sm:grid-cols-4 gap-3">
+          <div className={`bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs grid grid-cols-1 ${isBaselineMode ? 'sm:grid-cols-3' : 'sm:grid-cols-4'} gap-3`}>
             <div>
               <label className="text-[11px] font-bold text-slate-600 block mb-1">
                 تاريخ اليومية / الوردية
@@ -811,46 +786,50 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
               />
             </div>
 
-            <div>
-              <label className="text-[11px] font-bold text-slate-600 flex items-center justify-between mb-1">
-                <span>{isBaselineMode ? 'مرجع النظام قبل الجرد' : 'رصيد بداية الدرج (مرحل)'}</span>
-                {startingCashEdited && (
-                  <button
-                    type="button"
-                    onClick={() => setStartingCashEdited(false)}
-                    className="text-[10px] text-blue-600 hover:underline font-bold cursor-pointer"
-                  >
-                    تلقائي
-                  </button>
-                )}
-              </label>
-              <input
-                type="number"
-                value={startingCash}
-                onChange={e => {
-                  setStartingCashEdited(true);
-                  setStartingCash(Number(e.target.value) || 0);
-                }}
-                placeholder="0"
-                className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-50 border border-slate-300 rounded-lg outline-none focus:border-blue-600"
-              />
-            </div>
+            {!isBaselineMode && (
+              <div>
+                <label className="text-[11px] font-bold text-slate-600 flex items-center justify-between mb-1">
+                  <span>رصيد بداية الدرج (مرحل)</span>
+                  {startingCashEdited && (
+                    <button
+                      type="button"
+                      onClick={() => setStartingCashEdited(false)}
+                      className="text-[10px] text-blue-600 hover:underline font-bold cursor-pointer"
+                    >
+                      تلقائي
+                    </button>
+                  )}
+                </label>
+                <input
+                  type="number"
+                  value={startingCash}
+                  onChange={e => {
+                    setStartingCashEdited(true);
+                    setStartingCash(Number(e.target.value) || 0);
+                  }}
+                  placeholder="0"
+                  className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-50 border border-slate-300 rounded-lg outline-none focus:border-blue-600"
+                />
+              </div>
+            )}
 
             <div>
               <label className="text-[11px] font-black text-emerald-900 flex items-center justify-between mb-1">
-                <span>{isBaselineMode ? 'المبلغ النقدي الموجود معي الآن *' : 'الجرد الفعلي بالدرج (نقدي) *'}</span>
+                <span>{isBaselineMode ? 'المبلغ النقدي الفعلي (كاش) *' : 'الجرد الفعلي بالدرج (نقدي) *'}</span>
                 {!isBaselineMode && (
                   <button
                     type="button"
                     onClick={() => {
-                      setActualCashEdited(false);
-                      setActualCash(liveStats.rawExpectedCash);
-                      setActualCashInput(String(liveStats.rawExpectedCash));
+                      const nextMap: Record<string, string> = {};
+                      liveStats.channelSummaries.forEach(cs => {
+                        nextMap[cs.method] = reconcileInputs[cs.method] ?? String(cs.closingBalance);
+                      });
+                      setReconcileInputs(nextMap);
+                      setShowReconcileChannels(true);
                     }}
-                    className="text-[10px] text-emerald-700 hover:underline font-bold cursor-pointer"
-                    title="مطابقة الجرد الفعلي مع الرصيد المتوقع بالنظام"
+                    className="px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-black cursor-pointer"
                   >
-                    مطابقة بالمتوقع
+                    تطابق
                   </button>
                 )}
               </label>
@@ -858,11 +837,16 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                 type="number"
                 min="0"
                 step="any"
-                value={actualCashEdited ? actualCashInput : (isBaselineMode ? '' : String(liveStats.rawExpectedCash))}
+                value={actualCashEdited ? actualCashInput : (isBaselineMode ? (baselineChannelInputs['نقدي'] ?? '') : String(liveStats.rawExpectedCash))}
                 onFocus={e => e.target.select()}
                 onChange={e => {
                   const val = e.target.value;
                   setActualCashInput(val);
+                  if (isBaselineMode) {
+                    setBaselineChannelInputs(prev => ({ ...prev, ['نقدي']: val }));
+                  } else {
+                    setReconcileInputs(prev => ({ ...prev, ['نقدي']: val }));
+                  }
                   if (val === '') {
                     setActualCashEdited(false);
                     setActualCash(0);
@@ -871,12 +855,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                     setActualCash(Math.max(0, parseFloat(val) || 0));
                   }
                 }}
-                placeholder={isBaselineMode ? 'أدخل النقد الفعلي معك الآن...' : '0'}
-                className={`w-full px-2.5 py-1.5 text-xs font-mono font-black rounded-lg outline-none ${
-                  isBaselineMode
-                    ? 'bg-amber-50 border-2 border-amber-500 text-amber-950 focus:border-emerald-600'
-                    : 'bg-slate-50 border-2 border-emerald-500 text-slate-950 focus:border-emerald-700'
-                }`}
+                placeholder="0"
+                className="w-full px-2.5 py-1.5 text-xs font-mono font-black rounded-lg outline-none bg-slate-50 border-2 border-emerald-500 text-slate-950 focus:border-emerald-700"
               />
             </div>
           </div>
@@ -985,12 +965,14 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
                 <div className="space-y-2 bg-slate-50 p-3 rounded-lg border border-slate-200">
                   <div className="font-bold text-slate-900 border-b border-slate-200 pb-1">
-                    مطابقة درج النقدية (الكاش فقط)
+                    {isBaselineMode ? 'ملخص النقدية (كاش)' : 'مطابقة درج النقدية (الكاش فقط)'}
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-600">رصيد الافتتاح (البداية):</span>
-                    <strong className="font-mono">{formatMoney(startingCash, db.settings.currency)}</strong>
-                  </div>
+                  {!isBaselineMode && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-600">رصيد الافتتاح (البداية):</span>
+                      <strong className="font-mono">{formatMoney(startingCash, db.settings.currency)}</strong>
+                    </div>
+                  )}
                   <div className="flex justify-between text-emerald-700">
                     <span>(+) وارد الكاش للدرج:</span>
                     <strong className="font-mono">{formatMoney(liveStats.drawerIn, db.settings.currency)}</strong>
@@ -999,60 +981,76 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                     <span>(-) صادر الكاش من الدرج:</span>
                     <strong className="font-mono">{formatMoney(liveStats.drawerOut, db.settings.currency)}</strong>
                   </div>
-                  <div className="flex justify-between font-bold border-t border-slate-200 pt-1">
-                    <span className="text-slate-800">
-                      {isBaselineMode ? 'الرصيد الأساسي المعتمد بالدرج:' : 'النقد المتوقع بالدرج (دفترياً):'}
-                    </span>
-                    <strong className="font-mono">{formatMoney(liveStats.expectedCash, db.settings.currency)}</strong>
-                  </div>
+                  {!isBaselineMode && (
+                    <div className="flex justify-between font-bold border-t border-slate-200 pt-1">
+                      <span className="text-slate-800">النقد المتوقع بالدرج (دفترياً):</span>
+                      <strong className="font-mono">{formatMoney(liveStats.expectedCash, db.settings.currency)}</strong>
+                    </div>
+                  )}
                   <div className="flex justify-between font-bold text-slate-950">
                     <span>النقد الفعلي الموجود بالدرج:</span>
                     <strong className="font-mono">{formatMoney(liveStats.effectiveActualCash, db.settings.currency)}</strong>
                   </div>
-                  <div className={`flex justify-between font-black border-t border-slate-200 pt-1.5 ${
-                    isBaselineMode
-                      ? 'text-amber-800'
-                      : liveStats.diff === 0
-                      ? 'text-emerald-700'
-                      : liveStats.diff > 0
-                      ? 'text-blue-700'
-                      : 'text-rose-700'
-                  }`}>
-                    <span>الفارق (العجز / الزيادة):</span>
-                    <span className="font-mono text-sm">
-                      {isBaselineMode
-                        ? 'تأسيس رصيد البداية (العجز/الزيادة تبدأ من الغد)'
-                        : liveStats.diff === 0
-                        ? 'مطابق تماماً ✓'
+                  {!isBaselineMode && (
+                    <div className={`flex justify-between font-black border-t border-slate-200 pt-1.5 ${
+                      liveStats.diff === 0
+                        ? 'text-emerald-700'
                         : liveStats.diff > 0
-                        ? `زيادة +${formatMoney(liveStats.diff, db.settings.currency)}`
-                        : `عجز ${formatMoney(liveStats.diff, db.settings.currency)}`}
-                    </span>
-                  </div>
+                        ? 'text-blue-700'
+                        : 'text-rose-700'
+                    }`}>
+                      <span>الفارق (العجز / الزيادة):</span>
+                      <span className="font-mono text-sm">
+                        {liveStats.diff === 0
+                          ? 'مطابق تماماً ✓'
+                          : liveStats.diff > 0
+                          ? `زيادة +${formatMoney(liveStats.diff, db.settings.currency)}`
+                          : `عجز ${formatMoney(liveStats.diff, db.settings.currency)}`}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* Next-Day Opening Balances Across ALL Treasury Channels */}
+              {/* Next-Day Opening Balances & Day 2+ «تطابق» Reconciliation Across ALL 5 Treasury Channels */}
               <div className="bg-slate-900 text-white rounded-xl p-3.5 border border-slate-700 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 pb-2">
                   <div className="flex items-center gap-2">
                     <Wallet className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <div>
-                      <h4 className="text-xs font-black text-white">
-                        الرصيد الافتتاحي لليوم التالي ({nextDayDate}) في جميع وسائل الخزينة
-                      </h4>
-                      <p className="text-[10px] text-slate-300">
-                        {isBaselineMode
-                          ? 'في أول تقفيل: يمكنك إدخال الرصيد الصحيح لكل وسيلة دفع يدوياً ليتم ترحيله كبداية للمراجعة الحقيقية من الغد'
-                          : 'يُرحّل تلقائياً كرصيد افتتاحي لكل قناة دفع في خزينة الفرع عند إغلاق اليومية'}
-                      </p>
-                    </div>
+                    <h4 className="text-xs font-black text-white">
+                      الرصيد الافتتاحي لليوم التالي ({nextDayDate}) في جميع وسائل الخزينة
+                    </h4>
                   </div>
-                  <div className="bg-emerald-500/20 border border-emerald-400/50 px-2.5 py-1 rounded-lg text-left">
-                    <span className="text-[9.5px] text-emerald-200 block">إجمالي الافتتاحي لليوم التالي</span>
-                    <span className="text-xs font-black font-mono text-emerald-300">
-                      {formatMoney(liveStats.totalNextDayOpening, db.settings.currency)}
-                    </span>
+                  <div className="flex items-center gap-2">
+                    {!isBaselineMode && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!showReconcileChannels) {
+                            const nextMap: Record<string, string> = {};
+                            liveStats.channelSummaries.forEach(cs => {
+                              nextMap[cs.method] = reconcileInputs[cs.method] ?? String(cs.closingBalance);
+                            });
+                            setReconcileInputs(nextMap);
+                          }
+                          setShowReconcileChannels(prev => !prev);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 cursor-pointer transition-all ${
+                          showReconcileChannels
+                            ? 'bg-emerald-500 text-slate-950'
+                            : 'bg-blue-600 hover:bg-blue-500 text-white shadow-xs'
+                        }`}
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>{showReconcileChannels ? 'إخفاء المطابقة' : 'تطابق'}</span>
+                      </button>
+                    )}
+                    <div className="bg-emerald-500/20 border border-emerald-400/50 px-2.5 py-1 rounded-lg text-left">
+                      <span className="text-[9.5px] text-emerald-200 block">إجمالي الافتتاحي لليوم التالي</span>
+                      <span className="text-xs font-black font-mono text-emerald-300">
+                        {formatMoney(liveStats.totalNextDayOpening, db.settings.currency)}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
@@ -1061,42 +1059,128 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                     <thead>
                       <tr className="bg-slate-800 text-slate-300 font-bold border-b border-slate-700">
                         <th className="py-1.5 px-2 text-right">وسيلة الدفع / الخزينة</th>
-                        <th className="py-1.5 px-2">افتتاحي اليوم</th>
+                        {!isBaselineMode && <th className="py-1.5 px-2">افتتاحي اليوم</th>}
                         <th className="py-1.5 px-2 text-emerald-300">الوارد (+)</th>
                         <th className="py-1.5 px-2 text-rose-300">الصادر (-)</th>
-                        <th className="py-1.5 px-2 text-amber-300 font-black">الرصيد الافتتاحي لليوم التالي</th>
+                        {!isBaselineMode && <th className="py-1.5 px-2 text-slate-200">رصيد النظام</th>}
+                        <th className="py-1.5 px-2 text-amber-300 font-black">
+                          {isBaselineMode ? 'المبلغ الفعلي المعتمد' : (showReconcileChannels ? 'تصحيح المبلغ الفعلي' : 'الرصيد الافتتاحي لليوم التالي')}
+                        </th>
+                        {!isBaselineMode && showReconcileChannels && (
+                          <th className="py-1.5 px-2 text-blue-300 font-black">الفارق (عجز / زيادة)</th>
+                        )}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800 font-mono">
-                      {liveStats.channelSummaries.map(cs => (
-                        <tr key={cs.method} className="hover:bg-slate-800/60">
-                          <td className="py-1.5 px-2 text-right font-sans font-bold text-white">{cs.method}</td>
-                          <td className="py-1.5 px-2 text-slate-300">{formatCleanNumber(cs.openingBalance)}</td>
-                          <td className="py-1.5 px-2 text-emerald-400">+{formatCleanNumber(cs.cashIn)}</td>
-                          <td className="py-1.5 px-2 text-rose-400">-{formatCleanNumber(cs.cashOut)}</td>
-                          <td className="py-1.5 px-2">
-                            {isBaselineMode && cs.method !== 'نقدي' ? (
-                              <input
-                                type="number"
-                                min="0"
-                                step="any"
-                                value={baselineChannelInputs[cs.method] ?? ''}
-                                onChange={e => setBaselineChannelInputs(prev => ({ ...prev, [cs.method]: e.target.value }))}
-                                placeholder={formatCleanNumber(cs.closingBalance)}
-                                className="w-28 px-2 py-0.5 text-center bg-slate-800 border border-amber-400/60 text-amber-200 font-mono font-black rounded outline-none focus:border-emerald-400"
-                                title="اختياري: عدّل الرصيد الافتتاحي الفعلي لهذه القناة لليوم الأول"
-                              />
-                            ) : (
-                              <span className="inline-block bg-emerald-600/30 border border-emerald-400/50 text-emerald-200 font-black px-2 py-0.5 rounded">
-                                {formatMoney(cs.nextDayOpeningBalance, db.settings.currency)}
-                              </span>
+                      {liveStats.channelSummaries.map(cs => {
+                        const chDiff = cs.variance || 0;
+                        return (
+                          <tr key={cs.method} className="hover:bg-slate-800/60">
+                            <td className="py-1.5 px-2 text-right font-sans font-bold text-white">{cs.method}</td>
+                            {!isBaselineMode && (
+                              <td className="py-1.5 px-2 text-slate-300">{formatCleanNumber(cs.openingBalance)}</td>
                             )}
-                          </td>
-                        </tr>
-                      ))}
+                            <td className="py-1.5 px-2 text-emerald-400">+{formatCleanNumber(cs.cashIn)}</td>
+                            <td className="py-1.5 px-2 text-rose-400">-{formatCleanNumber(cs.cashOut)}</td>
+                            {!isBaselineMode && (
+                              <td className="py-1.5 px-2 text-slate-200 font-bold">{formatCleanNumber(cs.closingBalance)}</td>
+                            )}
+                            <td className="py-1.5 px-2">
+                              {isBaselineMode ? (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="any"
+                                  value={cs.method === 'نقدي' ? (actualCashEdited ? actualCashInput : (baselineChannelInputs['نقدي'] ?? '')) : (baselineChannelInputs[cs.method] ?? '')}
+                                  onFocus={e => e.target.select()}
+                                  onChange={e => {
+                                    const val = e.target.value;
+                                    setBaselineChannelInputs(prev => ({ ...prev, [cs.method]: val }));
+                                    if (cs.method === 'نقدي') {
+                                      setActualCashInput(val);
+                                      if (val === '') {
+                                        setActualCashEdited(false);
+                                        setActualCash(0);
+                                      } else {
+                                        setActualCashEdited(true);
+                                        setActualCash(Math.max(0, parseFloat(val) || 0));
+                                      }
+                                    }
+                                  }}
+                                  placeholder="0"
+                                  className="w-28 px-2 py-1 text-center bg-slate-800 border border-amber-400/70 text-amber-200 font-mono font-black rounded outline-none focus:border-emerald-400"
+                                />
+                              ) : showReconcileChannels ? (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="any"
+                                  value={reconcileInputs[cs.method] ?? String(cs.closingBalance)}
+                                  onFocus={e => e.target.select()}
+                                  onChange={e => {
+                                    const val = e.target.value;
+                                    setReconcileInputs(prev => ({ ...prev, [cs.method]: val }));
+                                    if (cs.method === 'نقدي') {
+                                      setActualCashInput(val);
+                                      if (val === '') {
+                                        setActualCashEdited(false);
+                                        setActualCash(0);
+                                      } else {
+                                        setActualCashEdited(true);
+                                        setActualCash(Math.max(0, parseFloat(val) || 0));
+                                      }
+                                    }
+                                  }}
+                                  className="w-28 px-2 py-1 text-center bg-slate-800 border border-blue-400/80 text-white font-mono font-black rounded outline-none focus:border-emerald-400"
+                                />
+                              ) : (
+                                <span className="inline-block bg-emerald-600/30 border border-emerald-400/50 text-emerald-200 font-black px-2 py-0.5 rounded">
+                                  {formatMoney(cs.nextDayOpeningBalance, db.settings.currency)}
+                                </span>
+                              )}
+                            </td>
+                            {!isBaselineMode && showReconcileChannels && (
+                              <td className="py-1.5 px-2 font-black">
+                                <span className={`inline-block px-2 py-0.5 rounded text-[10.5px] ${
+                                  chDiff === 0
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                    : chDiff > 0
+                                    ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40'
+                                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                }`}>
+                                  {chDiff === 0
+                                    ? 'مطابق ✓'
+                                    : chDiff > 0
+                                    ? `زيادة +${formatMoney(chDiff, db.settings.currency)}`
+                                    : `عجز ${formatMoney(chDiff, db.settings.currency)}`}
+                                </span>
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
+
+                {!isBaselineMode && showReconcileChannels && (
+                  <div className={`flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-700 text-xs font-black ${
+                    liveStats.totalChannelVariance === 0
+                      ? 'text-emerald-300'
+                      : liveStats.totalChannelVariance > 0
+                      ? 'text-blue-300'
+                      : 'text-rose-300'
+                  }`}>
+                    <span>إجمالي فروقات المطابقة لجميع الوسائل:</span>
+                    <span className="font-mono text-sm">
+                      {liveStats.totalChannelVariance === 0
+                        ? 'جميع الوسائل مطابقة تماماً ✓'
+                        : liveStats.totalChannelVariance > 0
+                        ? `زيادة إجمالية +${formatMoney(liveStats.totalChannelVariance, db.settings.currency)}`
+                        : `عجز إجمالي ${formatMoney(liveStats.totalChannelVariance, db.settings.currency)}`}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Notes */}
@@ -1261,20 +1345,20 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex justify-between text-[11px] pt-1">
-                      <span className="text-slate-500">العجز / الزيادة:</span>
-                      <strong className={`font-mono font-bold ${
-                        c.isInitialBaseline ? 'text-amber-800' : c.difference === 0 ? 'text-emerald-700' : c.difference > 0 ? 'text-blue-700' : 'text-rose-700'
-                      }`}>
-                        {c.isInitialBaseline
-                          ? 'تأسيس الرصيد الأساسي'
-                          : c.difference === 0
-                          ? 'مطابق'
-                          : c.difference > 0
-                          ? `زيادة +${formatMoney(c.difference, db.settings.currency)}`
-                          : `عجز ${formatMoney(c.difference, db.settings.currency)}`}
-                      </strong>
-                    </div>
+                    {!c.isInitialBaseline && (
+                      <div className="flex justify-between text-[11px] pt-1">
+                        <span className="text-slate-500">العجز / الزيادة:</span>
+                        <strong className={`font-mono font-bold ${
+                          c.difference === 0 ? 'text-emerald-700' : c.difference > 0 ? 'text-blue-700' : 'text-rose-700'
+                        }`}>
+                          {c.difference === 0
+                            ? 'مطابق'
+                            : c.difference > 0
+                            ? `زيادة +${formatMoney(c.difference, db.settings.currency)}`
+                            : `عجز ${formatMoney(c.difference, db.settings.currency)}`}
+                        </strong>
+                      </div>
+                    )}
 
                     {c.channelSummaries && c.channelSummaries.length > 0 && (
                       <div className="bg-slate-900 text-white p-2 rounded-lg space-y-1 text-[10px]">

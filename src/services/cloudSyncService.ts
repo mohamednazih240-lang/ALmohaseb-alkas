@@ -25,7 +25,11 @@ import {
   PURGED_COMP101_INVOICE_IDS,
   isPurgedEkhwaInvoice,
   cacheCompanyLogoLocally,
-  getCachedCompanyLogoLocally
+  getCachedCompanyLogoLocally,
+  getAllDeletedRecordIds,
+  purgeDeletedRecordsFromDb,
+  mergeArrayById,
+  saveLocalDeletedRecordIds
 } from './accountingStorage';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -404,16 +408,17 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
   const latestAudit = db.audit && db.audit[0] ? db.audit[0] : null;
   const actionLabel = latestAudit ? `${latestAudit.action}${latestAudit.detail ? ` (${latestAudit.detail})` : ''}` : 'تحديث البيانات';
 
-  // Ensure purged foreign invoices never get pushed from any device
-  const deletedSet = new Set<string>([
-    ...PURGED_COMP101_INVOICE_IDS,
-    ...(db.deletedInvoiceIds || [])
-  ]);
-  const cleanDb: AccountingDB = {
-    ...db,
-    deletedInvoiceIds: Array.from(new Set(db.deletedInvoiceIds || [])),
-    invoices: (db.invoices || []).filter(inv => !isPurgedEkhwaInvoice(inv) && !deletedSet.has(inv.id))
-  };
+  // Ensure purged/deleted records never get pushed from any device
+  const deletedSet = getAllDeletedRecordIds(db);
+  saveLocalDeletedRecordIds(cleanCode, deletedSet);
+  const cleanDb: AccountingDB = purgeDeletedRecordsFromDb(
+    {
+      ...db,
+      deletedInvoiceIds: Array.from(new Set([...PURGED_COMP101_INVOICE_IDS, ...(db.deletedInvoiceIds || [])])),
+      deletedRecordIds: Array.from(deletedSet)
+    },
+    deletedSet
+  );
 
   // Broadcast locally across browser tabs in 0ms
   if (localBroadcastChannel) {
@@ -505,6 +510,17 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
         const arr: any[] = Array.isArray((cleanDb as any)[col]) ? (cleanDb as any)[col] : [];
         const numShards = Math.ceil(arr.length / SHARD_PAGE_SIZE);
         shardCounts[col] = numShards;
+
+        // Clear cached hashes for shards that no longer exist after deletions so re-growth pushes cleanly
+        const prefixKey = `${cleanCode}::${col}::`;
+        for (const cachedKey of Array.from(uploadedShardHashCache.keys())) {
+          if (cachedKey.startsWith(prefixKey)) {
+            const idxPart = Number(cachedKey.slice(prefixKey.length));
+            if (Number.isFinite(idxPart) && idxPart >= numShards) {
+              uploadedShardHashCache.delete(cachedKey);
+            }
+          }
+        }
 
         for (let idx = 0; idx < numShards; idx++) {
           const slice = arr.slice(idx * SHARD_PAGE_SIZE, (idx + 1) * SHARD_PAGE_SIZE);
@@ -666,13 +682,10 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
     if (candidates.length === 0) return null;
 
     let unified = candidates[0];
+    let combinedDeletedSet = getAllDeletedRecordIds(unified);
     for (let i = 1; i < candidates.length; i++) {
       const other = candidates[i];
-      const deletedSet = new Set<string>([
-        ...PURGED_COMP101_INVOICE_IDS,
-        ...(unified.deletedInvoiceIds || []),
-        ...(other.deletedInvoiceIds || [])
-      ]);
+      combinedDeletedSet = getAllDeletedRecordIds(unified, getAllDeletedRecordIds(other, combinedDeletedSet));
       const preservedLogo =
         (unified.settings?.logo && unified.settings.logo.trim())
           ? unified.settings.logo
@@ -684,27 +697,37 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
           ...unified.settings,
           logo: preservedLogo
         },
-        deletedInvoiceIds: Array.from(deletedSet),
-        invoices: mergeInvoices(unified.invoices || [], other.invoices || [], deletedSet),
-        vouchers: mergeVouchers(unified.vouchers || [], other.vouchers || []),
-        treasury: mergeTreasury(unified.treasury || [], other.treasury || []),
-        stockMovements: mergeStockMovements(unified.stockMovements || [], other.stockMovements || []),
-        products: mergeProducts(unified.products || [], other.products || []),
+        deletedInvoiceIds: Array.from(new Set([...PURGED_COMP101_INVOICE_IDS, ...(unified.deletedInvoiceIds || []), ...(other.deletedInvoiceIds || [])])),
+        deletedRecordIds: Array.from(combinedDeletedSet),
+        invoices: mergeInvoices(unified.invoices || [], other.invoices || [], combinedDeletedSet),
+        vouchers: mergeVouchers(unified.vouchers || [], other.vouchers || [], combinedDeletedSet),
+        treasury: mergeTreasury(unified.treasury || [], other.treasury || [], combinedDeletedSet),
+        stockMovements: mergeStockMovements(unified.stockMovements || [], other.stockMovements || [], combinedDeletedSet),
+        products: mergeProducts(unified.products || [], other.products || [], combinedDeletedSet),
+        dailyClosings: mergeArrayById(unified.dailyClosings || [], other.dailyClosings || [], combinedDeletedSet),
+        expenses: mergeArrayById(unified.expenses || [], other.expenses || [], combinedDeletedSet),
+        revenues: mergeArrayById(unified.revenues || [], other.revenues || [], combinedDeletedSet),
+        returns: mergeArrayById(unified.returns || [], other.returns || [], combinedDeletedSet),
+        journals: mergeArrayById(unified.journals || [], other.journals || [], combinedDeletedSet),
+        quotes: mergeArrayById(unified.quotes || [], other.quotes || [], combinedDeletedSet),
+        orders: mergeArrayById(unified.orders || [], other.orders || [], combinedDeletedSet),
+        adjustments: mergeArrayById(unified.adjustments || [], other.adjustments || [], combinedDeletedSet),
+        transfers: mergeArrayById(unified.transfers || [], other.transfers || [], combinedDeletedSet),
+        customers: mergeArrayById(unified.customers || [], other.customers || [], combinedDeletedSet),
+        suppliers: mergeArrayById(unified.suppliers || [], other.suppliers || [], combinedDeletedSet),
+        fixedAssets: mergeArrayById(unified.fixedAssets || [], other.fixedAssets || [], combinedDeletedSet),
+        costCenters: mergeArrayById(unified.costCenters || [], other.costCenters || [], combinedDeletedSet),
+        currencies: mergeArrayById(unified.currencies || [], other.currencies || [], combinedDeletedSet),
+        bankReconciliations: mergeArrayById(unified.bankReconciliations || [], other.bankReconciliations || [], combinedDeletedSet),
+        goodsReceivedNotes: mergeArrayById(unified.goodsReceivedNotes || [], other.goodsReceivedNotes || [], combinedDeletedSet),
         users: Array.from(new Map<string, AppUser>([
           ...(unified.users || []).map((u): [string, AppUser] => [u.id || u.username, u]),
           ...(other.users || []).map((u): [string, AppUser] => [u.id || u.username, u])
-        ]).values()),
-        customers: Array.from(new Map<string, any>([
-          ...(unified.customers || []).map((c): [string, any] => [c.id || c.name, c]),
-          ...(other.customers || []).map((c): [string, any] => [c.id || c.name, c])
-        ]).values()),
-        suppliers: Array.from(new Map<string, any>([
-          ...(unified.suppliers || []).map((s): [string, any] => [s.id || s.name, s]),
-          ...(other.suppliers || []).map((s): [string, any] => [s.id || s.name, s])
-        ]).values()),
+        ]).values())
       };
     }
-    return verifyAndCorrectStockMovements(sanitizeCompanyDatabase(unified, clean)).db;
+    const purgedUnified = purgeDeletedRecordsFromDb(unified, combinedDeletedSet);
+    return verifyAndCorrectStockMovements(sanitizeCompanyDatabase(purgedUnified, clean)).db;
   } catch (err) {
     console.warn('Firestore cloud sync fetch warning:', err);
     return null;

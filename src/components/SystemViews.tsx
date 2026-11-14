@@ -273,7 +273,8 @@ import {
   formatMoney,
   isBranchMawan,
   getBranchExpectedPin,
-  cacheCompanyLogoLocally
+  cacheCompanyLogoLocally,
+  markRecordsDeleted
 } from '../services/accountingStorage';
 import { updateCompany, getActiveTenantId } from '../services/tenantService';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
@@ -643,6 +644,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
       if (!confirm(`هل أنت متأكد من حذف المستخدم "${u.name}"؟`)) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.users = updated.users.filter(x => x.id !== u.id);
+      markRecordsDeleted(updated, [u.id]);
       logAudit(updated, 'حذف مستخدم', u.name);
       onUpdateDb(updated);
     });
@@ -729,6 +731,7 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
       if (!confirm(`هل ترغب في حذف فرع "${b.name}"؟`)) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.branches = (updated.branches || []).filter(x => x.id !== b.id);
+      markRecordsDeleted(updated, [b.id]);
       logAudit(updated, 'حذف فرع', b.name);
       onUpdateDb(updated);
     });

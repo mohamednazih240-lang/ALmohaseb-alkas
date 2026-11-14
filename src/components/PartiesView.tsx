@@ -32,7 +32,8 @@ import {
   isDuplicateParty,
   getNextUniquePartyCode,
   roundMoney,
-  isFiniteNonNegative
+  isFiniteNonNegative,
+  markRecordsDeleted
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -256,6 +257,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
       } else {
         updated.suppliers = updated.suppliers.filter(s => s.id !== partyId);
       }
+      markRecordsDeleted(updated, [partyId]);
       logAudit(updated, `حذف ${isCustomer ? 'عميل' : 'مورد'}`, `تم حذف ${partyName}`);
       onUpdateDb(updated);
     });

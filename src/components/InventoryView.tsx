@@ -55,7 +55,8 @@ import {
   roundQty,
   isFiniteNonNegative,
   isFinitePositive,
-  assertJournalBalanced
+  assertJournalBalanced,
+  markRecordsDeleted
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import {
@@ -258,8 +259,14 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       if (!confirm(`هل أنت متأكد تماماً من حذف (${count}) صنف محدد نهائياً من دليل الأصناف؟`)) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const removedIds: string[] = Array.from(selectedProductIds);
       updated.products = updated.products.filter(p => !selectedProductIds.has(p.id));
-      updated.stockMovements = (updated.stockMovements || []).filter(sm => !selectedProductIds.has(sm.productId));
+      updated.stockMovements = (updated.stockMovements || []).filter(sm => {
+        const rm = selectedProductIds.has(sm.productId);
+        if (rm) removedIds.push(sm.id);
+        return !rm;
+      });
+      markRecordsDeleted(updated, removedIds);
       logAudit(updated, 'حذف مجموعة أصناف', `تم حذف (${count}) صنف دفعة واحدة بواسطة ${db.currentUser?.name || 'المدير'}`);
       onUpdateDb(updated);
       setSelectedProductIds(new Set());
@@ -504,8 +511,14 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       if (!confirm(`هل أنت متأكد تماماً من حذف الصنف "${p.name}" (كود: ${p.code}) نهائياً؟`)) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const removedIds: string[] = [p.id];
       updated.products = updated.products.filter(item => item.id !== p.id);
-      updated.stockMovements = (updated.stockMovements || []).filter(sm => sm.productId !== p.id);
+      updated.stockMovements = (updated.stockMovements || []).filter(sm => {
+        const rm = sm.productId === p.id;
+        if (rm) removedIds.push(sm.id);
+        return !rm;
+      });
+      markRecordsDeleted(updated, removedIds);
       logAudit(updated, 'حذف صنف من المخزون', `${p.name} (${p.code}) بواسطة ${db.currentUser?.name || 'المدير'}`);
       onUpdateDb(updated);
       setSelectedProductIds(prev => {
