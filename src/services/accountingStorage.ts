@@ -45,13 +45,15 @@ import { DEFAULT_CATALOG_1001, mergeCatalogIntoDb } from '../data/defaultCatalog
 import {
   getDeterministicVoucherId,
   getDeterministicTreasuryId,
-  reconcileAndDeduplicateAllFinancialRecords
+  reconcileAndDeduplicateAllFinancialRecords,
+  isReturnRelatedVoucher
 } from './accountingEngine';
 
 export {
   getDeterministicVoucherId,
   getDeterministicTreasuryId,
-  reconcileAndDeduplicateAllFinancialRecords
+  reconcileAndDeduplicateAllFinancialRecords,
+  isReturnRelatedVoucher
 };
 
 const STORAGE_KEY = 'hesabaty_pro_db_v6';
@@ -3390,10 +3392,10 @@ export function mergeVouchers(
   };
 
   (existingList || []).forEach(v => {
-    if (v && v.id && !isDeleted(v)) map.set(getKey(v), v);
+    if (v && v.id && !isDeleted(v) && !isReturnRelatedVoucher(v)) map.set(getKey(v), v);
   });
   (incomingList || []).forEach(v => {
-    if (v && v.id && !isDeleted(v)) {
+    if (v && v.id && !isDeleted(v) && !isReturnRelatedVoucher(v)) {
       const key = getKey(v);
       const existing = map.get(key);
       map.set(key, existing ? { ...existing, ...v } : v);
@@ -4389,10 +4391,20 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
     const isSaleReturn = inv.invoiceKind === 'sale_return';
     const isPurchaseReturn = inv.invoiceKind === 'purchase_return';
     const isSale = !isSaleReturn && !isPurchaseReturn && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale');
-    const expectedType: 'receipt' | 'payment' = (isSale || isPurchaseReturn) ? 'receipt' : 'payment';
+    const expectedType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
     const numRegex = inv.number
       ? new RegExp(`رقم\\s*${inv.number.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![0-9A-Za-z])`)
       : null;
+
+    if (isSaleReturn || isPurchaseReturn) {
+      db.vouchers = db.vouchers.filter(v => {
+        if (!v) return false;
+        const isLinked = (v as any).invoiceId === inv.id || (v as any).sourceId === inv.id || isReturnRelatedVoucher(v);
+        if (isLinked && v.id) markRecordsDeleted(db, [v.id]);
+        return !isLinked;
+      });
+      return;
+    }
 
     const autoVouchers = db.vouchers.filter(v => {
       if (v.isManualInstallment || (!v.isAutoFromInvoice && !v.id.startsWith('vch_'))) return false;
@@ -4434,10 +4446,6 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
       primaryVoucher.paymentMethod = safeMethod;
       primaryVoucher.description = isSale
         ? `سند قبض مقابل فاتورة مبيعات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`
-        : isPurchaseReturn
-        ? `سند قبض مقابل فاتورة مرتجع مشتريات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`
-        : isSaleReturn
-        ? `سند صرف مقابل فاتورة مرتجع مبيعات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`
         : `سند صرف مقابل فاتورة مشتريات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`;
 
       if (autoVouchers.length > 1) {

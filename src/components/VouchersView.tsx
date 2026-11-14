@@ -30,7 +30,8 @@ import {
 } from '../services/accountingStorage';
 import {
   postManualVoucherTransaction,
-  cancelOrDeleteVoucherTransaction
+  cancelOrDeleteVoucherTransaction,
+  isReturnRelatedVoucher
 } from '../services/accountingEngine';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { VoucherPrintModal } from './VoucherPrintModal';
@@ -87,12 +88,13 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
     return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
   };
 
-  // Eligible unpaid / partially paid invoices for linking installments (aligned with voucher cash direction)
+  // Eligible unpaid / partially paid invoices for linking installments (aligned with voucher cash direction; exclude returns)
   const linkableInvoices = (db.invoices || []).filter(inv => {
     if (inv.invoiceKind === 'quote' || (inv.invoiceKind as string) === 'order') return false;
-    const isInvReceipt =
-      inv.invoiceKind === 'purchase_return' ||
-      (inv.invoiceKind !== 'sale_return' && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale'));
+    if (inv.invoiceKind === 'sale_return' || inv.invoiceKind === 'purchase_return' || (inv.type as string) === 'sale_return' || (inv.type as string) === 'purchase_return') {
+      return false;
+    }
+    const isInvReceipt = inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale';
     if (isInvReceipt !== isReceipt) return false;
     if (partyId && inv.partyId !== partyId) return false;
     const isCurrentlyLinked = editingVoucher?.invoiceId === inv.id;
@@ -102,7 +104,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   const selectedLinkedInvoice = linkableInvoices.find(inv => inv.id === linkedInvoiceId);
 
   const vouchersList = db.vouchers
-    .filter(v => v.type === type && isTargetBranch(v.branchId))
+    .filter(v => v.type === type && isTargetBranch(v.branchId) && !isReturnRelatedVoucher(v))
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   const totalAmount = vouchersList.reduce((sum, v) => sum + v.amount, 0);

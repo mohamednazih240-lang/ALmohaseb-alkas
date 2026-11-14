@@ -1098,6 +1098,25 @@ export function cancelOrDeleteVoucherTransaction(
  * 3. Removes phantom treasury deductions so treasury balance returns to exact truth
  * 4. Assigns deterministic IDs to prevent re-duplication
  */
+export function isReturnRelatedVoucher(
+  v: Voucher | null | undefined,
+  returnInvoiceIds?: Set<string>
+): boolean {
+  if (!v) return false;
+  const desc = (v.description || '').replace(/\s+/g, ' ').trim();
+  const id = (v.id || '').toLowerCase();
+  const invId = (v.invoiceId || '').trim();
+  const srcId = ((v as any).sourceId || '').trim();
+  const srcType = ((v as any).sourceType || '').trim();
+  if (returnInvoiceIds && ((invId && returnInvoiceIds.has(invId)) || (srcId && returnInvoiceIds.has(srcId)))) {
+    return true;
+  }
+  if (srcType === 'sale_return' || srcType === 'purchase_return') return true;
+  if (id.includes('sale_return') || id.includes('purchase_return')) return true;
+  if (desc.includes('مرتجع')) return true;
+  return false;
+}
+
 export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   db: AccountingDB;
   duplicateVouchersRemoved: number;
@@ -1131,48 +1150,67 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   if (!updated.suppliers) updated.suppliers = [];
 
   const purgedPhantomIds: string[] = [];
+  const purgedVoucherIds = new Set<string>();
+  const purgedVoucherJournalIds = new Set<string>();
   const invoiceIdsSet = new Set(updated.invoices.map(i => i.id));
+  const returnInvoiceIdsSet = new Set(
+    updated.invoices
+      .filter(i => i && (i.invoiceKind === 'sale_return' || i.invoiceKind === 'purchase_return' || (i.type as string) === 'sale_return' || (i.type as string) === 'purchase_return'))
+      .map(i => i.id)
+  );
   const returnIdsSet = new Set((updated.returns || []).map(r => r.id));
+  const allReturnSourceIds = new Set<string>([...returnInvoiceIdsSet, ...returnIdsSet]);
 
-  // Purge corrupted/phantom return auto-vouchers (returns must never appear inside Receipts/Payments unless user manually enters them)
+  // Purge any receipt/payment vouchers related to returns (normalized whitespace, regardless of ID prefix or flags)
   updated.vouchers = updated.vouchers.filter(v => {
     if (!v) return false;
-    const desc = v.description || '';
-    const isCorruptedEmptyRefReturn =
-      desc.includes('مقابل فاتورة مرتجع رقم (') ||
-      desc.includes('استرداد مرتجع مشتريات رقم (') ||
-      desc.includes('استرداد مرتجع مبيعات رقم (');
-    const isSystemReturnVoucher =
-      !v.isManualInstallment &&
-      (v.isAutoFromInvoice || v.id.startsWith('vch_')) &&
-      (desc.includes('مقابل فاتورة مرتجع') || desc.includes('استرداد مرتجع'));
-    if (isCorruptedEmptyRefReturn || isSystemReturnVoucher) {
-      purgedPhantomIds.push(v.id);
+    if (isReturnRelatedVoucher(v, allReturnSourceIds)) {
+      if (v.id) {
+        purgedPhantomIds.push(v.id);
+        purgedVoucherIds.add(v.id);
+      }
+      if (v.journalEntryId) {
+        purgedPhantomIds.push(v.journalEntryId);
+        purgedVoucherJournalIds.add(v.journalEntryId);
+      }
       return false;
     }
     return true;
   });
 
-  // Purge corrupted/orphan return treasury entries (e.g. "رقم (" empty number or orphan tr_voucher_*)
+  // Purge corrupted/orphan return treasury entries & treasury entries linked to purged return vouchers
   const validVoucherIdsAfterPurge = new Set(updated.vouchers.map(v => v.id));
   updated.treasury = updated.treasury.filter(tr => {
     if (!tr) return false;
-    const desc = tr.description || '';
-    const isCorruptedEmptyRef =
-      desc.includes('رقم (') &&
-      (desc.includes('مرتجع') || tr.sourceType === 'purchase_return' || tr.sourceType === 'sale_return');
+    const normDesc = (tr.description || '').replace(/\s+/g, ' ').trim();
+    const isLinkedToPurgedVoucher =
+      Boolean(tr.sourceId && purgedVoucherIds.has(tr.sourceId)) ||
+      purgedVoucherIds.has(tr.id) ||
+      Array.from(purgedVoucherIds).some(vid => vid && tr.id.includes(vid));
+    const isPhantomReturnVoucherTr =
+      normDesc.includes('مقابل فاتورة مرتجع') ||
+      (normDesc.includes('رقم (') && (normDesc.includes('مرتجع') || tr.sourceType === 'purchase_return' || tr.sourceType === 'sale_return'));
     const isOrphanVoucherTr =
       tr.id.startsWith('tr_voucher_') &&
       (!tr.sourceId || !validVoucherIdsAfterPurge.has(tr.sourceId));
     const isOrphanReturnTr =
       (tr.sourceType === 'purchase_return' || tr.sourceType === 'sale_return') &&
       (!tr.sourceId || (!invoiceIdsSet.has(tr.sourceId) && !returnIdsSet.has(tr.sourceId)));
-    if (isCorruptedEmptyRef || isOrphanVoucherTr || isOrphanReturnTr) {
-      purgedPhantomIds.push(tr.id);
+    if (isLinkedToPurgedVoucher || isPhantomReturnVoucherTr || isOrphanVoucherTr || isOrphanReturnTr) {
+      if (tr.id) purgedPhantomIds.push(tr.id);
       return false;
     }
     return true;
   });
+
+  if (purgedVoucherIds.size > 0 || purgedVoucherJournalIds.size > 0) {
+    updated.journals = (updated.journals || []).filter(j => {
+      if (!j) return false;
+      const rm = purgedVoucherJournalIds.has(j.id) || Boolean(j.sourceId && purgedVoucherIds.has(j.sourceId));
+      if (rm && j.id) purgedPhantomIds.push(j.id);
+      return !rm;
+    });
+  }
 
   if (purgedPhantomIds.length > 0) {
     markRecordsDeleted(updated, purgedPhantomIds);

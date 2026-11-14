@@ -81,6 +81,7 @@ import {
   subscribeToSyncStatus,
   normalizeCompanyCode,
   testFirestoreConnection,
+  doesCloudNeedCleanupSync,
   CloudSyncState
 } from './services/cloudSyncService';
 
@@ -341,7 +342,8 @@ export default function App() {
             const cloudDelSet = new Set<string>(ensuredCloud.deletedRecordIds || []);
             const hasUnsyncedDeletions = (merged.deletedRecordIds || []).some(id => !cloudDelSet.has(id));
             const needsCloudLogoRepair = Boolean(merged.settings.logo && !ensuredCloud.settings?.logo);
-            if (hasRicherLocal || hasUnsyncedDeletions || needsCloudLogoRepair) {
+            const needsCloudPhantomCleanup = doesCloudNeedCleanupSync(initialCompanyCode, merged);
+            if (hasRicherLocal || hasUnsyncedDeletions || needsCloudLogoRepair || needsCloudPhantomCleanup) {
               pushDatabaseToCloud(merged, true);
             }
 

@@ -162,6 +162,29 @@ const uploadedShardHashCache = new Map<string, string>();
 let uploadedLogoHashCache = new Map<string, string>();
 let activePushChain: Promise<boolean> = Promise.resolve(true);
 
+const rawCloudMetaByCompany = new Map<
+  string,
+  {
+    rawDeletedIds: Set<string>;
+    rawVouchersCount: number;
+    rawTreasuryCount: number;
+    rawJournalsCount: number;
+  }
+>();
+
+export function doesCloudNeedCleanupSync(companyCode: string | undefined, currentDb: AccountingDB): boolean {
+  const clean = normalizeCompanyCode(companyCode);
+  const meta = rawCloudMetaByCompany.get(clean);
+  if (!meta) return false;
+  if ((currentDb.vouchers?.length || 0) !== meta.rawVouchersCount) return true;
+  if ((currentDb.treasury?.length || 0) !== meta.rawTreasuryCount) return true;
+  if ((currentDb.journals?.length || 0) !== meta.rawJournalsCount) return true;
+  for (const id of currentDb.deletedRecordIds || []) {
+    if (id && !meta.rawDeletedIds.has(id)) return true;
+  }
+  return false;
+}
+
 const LOCAL_DEVICE_ID_KEY = 'hesabaty_device_instance_id';
 
 /**
@@ -726,6 +749,16 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
         ]).values())
       };
     }
+    rawCloudMetaByCompany.set(clean, {
+      rawDeletedIds: new Set<string>([
+        ...(unified.deletedRecordIds || []),
+        ...(unified.deletedInvoiceIds || [])
+      ]),
+      rawVouchersCount: (unified.vouchers || []).length,
+      rawTreasuryCount: (unified.treasury || []).length,
+      rawJournalsCount: (unified.journals || []).length
+    });
+
     const purgedUnified = purgeDeletedRecordsFromDb(unified, combinedDeletedSet);
     return verifyAndCorrectStockMovements(sanitizeCompanyDatabase(purgedUnified, clean)).db;
   } catch (err) {
