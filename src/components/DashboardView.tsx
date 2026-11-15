@@ -31,6 +31,7 @@ import {
   formatMoney, 
   calculateFinancialSummary, 
   calculateTreasuryBalance, 
+  calculateFrozenTreasuryBalance,
   calculateCustomerBalance, 
   calculateSupplierBalance,
   getProductForBranch
@@ -122,7 +123,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   // Treasury by channels for this branch (memoized)
   const channels = useMemo(() => [
-    { name: 'نقدي', balance: calculateTreasuryBalance(db, 'نقدي', targetBranch) },
+    { name: 'نقدي (الفكة بالدرج)', balance: calculateTreasuryBalance(db, 'نقدي', targetBranch) },
+    { name: 'المبلغ المجمد (محفوظ)', balance: calculateFrozenTreasuryBalance(db, targetBranch) },
     { name: 'فودافون كاش', balance: calculateTreasuryBalance(db, 'Vodafone Cash', targetBranch) },
     { name: 'إنستاباي', balance: calculateTreasuryBalance(db, 'InstaPay', targetBranch) },
     { name: 'فيزا POS', balance: calculateTreasuryBalance(db, 'Visa / POS', targetBranch) },
@@ -325,9 +327,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             {formatMoney(summary.totalTreasury, db.settings.currency)}
           </div>
           <div className="mt-2 text-[11px] text-slate-500 flex items-center justify-between border-t border-slate-100 pt-1.5">
-            <span>النقد السائل الفعلي:</span>
+            <span>النقد السائل بالدرج:</span>
             <span className="font-bold text-emerald-700 font-mono">
-              {formatMoney(calculateTreasuryBalance(db, 'نقدي'), db.settings.currency)}
+              {formatMoney(calculateTreasuryBalance(db, 'نقدي', targetBranch), db.settings.currency)}
             </span>
           </div>
         </div>

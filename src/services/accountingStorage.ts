@@ -25,6 +25,7 @@ import {
   AuditLog,
   AppSettings,
   PaymentMethod,
+  TreasuryChannelMethod,
   User,
   Branch,
   BranchProductData,
@@ -331,6 +332,8 @@ export function mergeArrayById<T extends { id?: string }>(
   return Array.from(map.values());
 }
 
+export const FROZEN_CASH_METHOD = 'المبلغ المجمد' as const;
+
 export const PAYMENT_METHODS: PaymentMethod[] = [
   'نقدي',
   'Vodafone Cash',
@@ -340,13 +343,14 @@ export const PAYMENT_METHODS: PaymentMethod[] = [
   'آجل'
 ];
 
-export function getMethodAccountId(method: PaymentMethod): string {
+export function getMethodAccountId(method: TreasuryChannelMethod): string {
   switch (method) {
     case 'نقدي': return 'acc_cash';
     case 'Vodafone Cash': return 'acc_vodafone';
     case 'InstaPay': return 'acc_instapay';
     case 'Visa / POS': return 'acc_visa';
     case 'تحويل بنكي': return 'acc_bank';
+    case 'المبلغ المجمد': return 'acc_frozen';
     case 'آجل': return 'acc_ar';
     default: return 'acc_cash';
   }
@@ -529,6 +533,7 @@ export function defaultAccounts(): Account[] {
     { id: 'acc_instapay', code: '1103', name: 'إنستاباي / التحويل الفوري', type: 'asset', isSystem: true },
     { id: 'acc_visa', code: '1104', name: 'نقاط البيع والفيزا (Visa/POS)', type: 'asset', isSystem: true },
     { id: 'acc_bank', code: '1105', name: 'الحساب البنكي الجاري', type: 'asset', isSystem: true },
+    { id: 'acc_frozen', code: '1106', name: 'المبلغ المجمد (نقدية محفوظة جانباً)', type: 'asset', isSystem: true },
     { id: 'acc_ar', code: '1201', name: 'العملاء (ذمم مدينة)', type: 'asset', isSystem: true },
     { id: 'acc_inv', code: '1301', name: 'مخزون البضاعة بالمستودعات', type: 'asset', isSystem: true },
     { id: 'acc_fixed_assets', code: '1401', name: 'الأصول الثابتة الإجمالية', type: 'asset', isSystem: true },
@@ -2634,17 +2639,248 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string, b
 }
 
 /**
- * Calculate total treasury balance for a specific payment method or all methods, optionally filtered by branch
+ * Compute live balance for a single payment channel in a specific branch,
+ * strictly anchored to the latest saved DailyClosing's nextDayOpeningBalances[channel]
+ * (plus any subsequent treasury movements after that closing).
+ * Falls back to full treasury sum if no closing exists yet for that branch/channel.
  */
-export function calculateTreasuryBalance(db: AccountingDB, method?: PaymentMethod, branchId?: string): number {
-  const totalCents = db.treasury
-    .filter(entry => !method || entry.method === method)
-    .filter(entry => isBranchMatch(entry.branchId, branchId))
+function calculateBranchChannelTreasuryBalance(
+  db: AccountingDB,
+  channel: TreasuryChannelMethod,
+  branchId: string
+): number {
+  const closings = (db.dailyClosings || [])
+    .filter(
+      c =>
+        c &&
+        isBranchMatch(c.branchId, branchId) &&
+        c.nextDayOpeningBalances &&
+        c.nextDayOpeningBalances[channel] !== undefined
+    )
+    .sort((a, b) =>
+      a.date === b.date
+        ? (b.createdAt || '').localeCompare(a.createdAt || '')
+        : b.date.localeCompare(a.date)
+    );
+
+  const latestClosing = closings[0];
+
+  if (latestClosing) {
+    const anchorCents = toCents(Number(latestClosing.nextDayOpeningBalances![channel]) || 0);
+    const deltaCents = (db.treasury || [])
+      .filter(entry => {
+        if (!entry || entry.method !== channel || !isBranchMatch(entry.branchId, branchId)) return false;
+        if (entry.date > latestClosing.date) return true;
+        if (entry.date === latestClosing.date) {
+          return Boolean(
+            entry.createdAt &&
+            latestClosing.createdAt &&
+            entry.createdAt > latestClosing.createdAt
+          );
+        }
+        return false;
+      })
+      .reduce((sumCents, entry) => {
+        const c = toCents(Number(entry.amount) || 0);
+        return sumCents + (entry.direction === 'in' ? c : -c);
+      }, 0);
+
+    return fromCents(anchorCents + deltaCents);
+  }
+
+  const totalCents = (db.treasury || [])
+    .filter(entry => entry && entry.method === channel && isBranchMatch(entry.branchId, branchId))
     .reduce((sumCents, entry) => {
       const c = toCents(Number(entry.amount) || 0);
       return sumCents + (entry.direction === 'in' ? c : -c);
     }, 0);
   return fromCents(totalCents);
+}
+
+/**
+ * Calculate total treasury balance for a specific channel or all treasury channels,
+ * optionally filtered by branch. Reconciled identically with Daily Closing opening anchors.
+ */
+export function calculateTreasuryBalance(
+  db: AccountingDB,
+  method?: TreasuryChannelMethod,
+  branchId?: string
+): number {
+  const channelsToSum: TreasuryChannelMethod[] = method
+    ? [method]
+    : [...PAYMENT_METHODS.filter(pm => pm !== 'آجل'), FROZEN_CASH_METHOD];
+
+  if (branchId && branchId !== 'all') {
+    const sumCents = channelsToSum.reduce(
+      (acc, ch) => acc + toCents(calculateBranchChannelTreasuryBalance(db, ch, branchId)),
+      0
+    );
+    return fromCents(sumCents);
+  }
+
+  // Sum across unique branches without double-counting primary aliases (br_main / br_mawan)
+  const rawBranches = db.branches && db.branches.length > 0 ? db.branches : [{ id: 'br_main', isMain: true }];
+  let seenPrimary = false;
+  const uniqueBranchIds: string[] = [];
+  rawBranches.forEach(b => {
+    const isPrim = Boolean((b as Branch).isMain || b.id === 'br_main' || b.id === 'br_mawan');
+    if (isPrim) {
+      if (!seenPrimary) {
+        seenPrimary = true;
+        uniqueBranchIds.push(b.id);
+      }
+    } else {
+      uniqueBranchIds.push(b.id);
+    }
+  });
+
+  const totalCents = uniqueBranchIds.reduce((branchAcc, bId) => {
+    const bSum = channelsToSum.reduce(
+      (chAcc, ch) => chAcc + toCents(calculateBranchChannelTreasuryBalance(db, ch, bId)),
+      0
+    );
+    return branchAcc + bSum;
+  }, 0);
+
+  return fromCents(totalCents);
+}
+
+/**
+ * Convenience helper: returns total Frozen Cash Reserve ('المبلغ المجمد') balance
+ */
+export function calculateFrozenTreasuryBalance(db: AccountingDB, branchId?: string): number {
+  return calculateTreasuryBalance(db, FROZEN_CASH_METHOD, branchId);
+}
+
+/**
+ * Execute an atomic Freeze ('نقدي' -> 'المبلغ المجمد') or Unfreeze ('المبلغ المجمد' -> 'نقدي') transfer
+ */
+export function executeCashFreezeTransfer(
+  db: AccountingDB,
+  params: {
+    direction: 'freeze' | 'unfreeze';
+    amount: number;
+    date?: string;
+    note?: string;
+    branchId: string;
+    branchName: string;
+  }
+): { ok: true; db: AccountingDB } | { ok: false; error: string } {
+  const cleanAmt = roundMoney(params.amount);
+  if (!isFinitePositive(cleanAmt)) {
+    return { ok: false, error: 'يرجى إدخال مبلغ صحيح أكبر من صفر.' };
+  }
+
+  const targetBranchId = params.branchId || db.branches?.[0]?.id || 'br_main';
+  const targetBranchName = params.branchName || db.branches?.[0]?.name || 'الفرع الرئيسي';
+  const entryDate = params.date || getTodayDate();
+  const nowIso = new Date().toISOString();
+
+  if (params.direction === 'freeze') {
+    const cashAvail = calculateTreasuryBalance(db, 'نقدي', targetBranchId);
+    if (cleanAmt > cashAvail + 0.001) {
+      return {
+        ok: false,
+        error: `الرصيد النقدي المتاح بالدرج حالياً (${formatMoney(cashAvail, db.settings.currency)}) لا يكفي لتجميد ${formatMoney(cleanAmt, db.settings.currency)}.`
+      };
+    }
+  } else {
+    const frozenAvail = calculateFrozenTreasuryBalance(db, targetBranchId);
+    if (cleanAmt > frozenAvail + 0.001) {
+      return {
+        ok: false,
+        error: `المبلغ المجمد المتاح حالياً (${formatMoney(frozenAvail, db.settings.currency)}) لا يكفي لفك تجميد ${formatMoney(cleanAmt, db.settings.currency)}.`
+      };
+    }
+  }
+
+  const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  if (!updated.treasury) updated.treasury = [];
+  if (!updated.journals) updated.journals = [];
+  if (!updated.accounts) updated.accounts = defaultAccounts();
+
+  // Ensure acc_frozen exists in Chart of Accounts when freeze feature is used
+  if (!updated.accounts.some(a => a.id === 'acc_frozen')) {
+    updated.accounts.push({
+      id: 'acc_frozen',
+      code: '1106',
+      name: 'المبلغ المجمد (نقدية محفوظة جانباً)',
+      type: 'asset',
+      isSystem: true
+    });
+  }
+
+  const cashAcc = updated.accounts.find(a => a.id === 'acc_cash') || updated.accounts[0];
+  const frozenAcc = updated.accounts.find(a => a.id === 'acc_frozen') || cashAcc;
+
+  const freezeId = generateId('frz');
+  const noteSuffix = params.note?.trim() ? ` — ${params.note.trim()}` : '';
+  const isFreeze = params.direction === 'freeze';
+
+  updated.treasury.unshift({
+    id: generateId('tr_frz_in'),
+    date: entryDate,
+    createdAt: nowIso,
+    direction: isFreeze ? 'in' : 'out',
+    amount: cleanAmt,
+    method: FROZEN_CASH_METHOD,
+    description: isFreeze
+      ? `تجميد مبلغ من الدرج النقدي إلى المجمد${noteSuffix}`
+      : `فك تجميد مبلغ من المجمد إلى الدرج النقدي${noteSuffix}`,
+    sourceType: 'freeze',
+    sourceId: freezeId,
+    branchId: targetBranchId,
+    branchName: targetBranchName
+  });
+
+  updated.treasury.unshift({
+    id: generateId('tr_frz_cash'),
+    date: entryDate,
+    createdAt: nowIso,
+    direction: isFreeze ? 'out' : 'in',
+    amount: cleanAmt,
+    method: 'نقدي',
+    description: isFreeze
+      ? `سحب لتجميد مبلغ (حفظ جانباً — تبقى الفكة بالدرج)${noteSuffix}`
+      : `إيداع بالدرج النقدي من فك تجميد${noteSuffix}`,
+    sourceType: 'freeze',
+    sourceId: freezeId,
+    branchId: targetBranchId,
+    branchName: targetBranchName
+  });
+
+  const journal: JournalEntry = {
+    id: generateId('jrn_frz'),
+    number: `J-${Date.now().toString().slice(-6)}`,
+    date: entryDate,
+    description: isFreeze
+      ? `تجميد مبلغ نقدي جانباً (${targetBranchName})${noteSuffix}`
+      : `فك تجميد مبلغ إلى الدرج النقدي (${targetBranchName})${noteSuffix}`,
+    sourceType: 'manual',
+    sourceId: freezeId,
+    lines: isFreeze
+      ? [
+          { accountId: frozenAcc.id, accountCode: frozenAcc.code, accountName: frozenAcc.name, debit: cleanAmt, credit: 0, notes: 'تجميد نقدية جانباً' },
+          { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: 0, credit: cleanAmt, notes: 'خروج من درج النقدي للمجمد' }
+        ]
+      : [
+          { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: cleanAmt, credit: 0, notes: 'إرجاع نقدية للدرج من المجمد' },
+          { accountId: frozenAcc.id, accountCode: frozenAcc.code, accountName: frozenAcc.name, debit: 0, credit: cleanAmt, notes: 'فك تجميد مبلغ' }
+        ],
+    createdAt: nowIso
+  };
+
+  if (cashAcc.id !== frozenAcc.id) {
+    updated.journals.unshift(journal);
+  }
+
+  logAudit(
+    updated,
+    isFreeze ? 'تجميد مبلغ نقدي' : 'فك تجميد مبلغ نقدي',
+    `${isFreeze ? 'تجميد' : 'فك تجميد'} ${formatMoney(cleanAmt, updated.settings.currency)} (${targetBranchName})${noteSuffix}`
+  );
+
+  return { ok: true, db: updated };
 }
 
 /**
@@ -4163,8 +4399,16 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
     }
   }
 
-  // 4. Hard-delete treasury entry itself
-  updated.treasury = updated.treasury.filter(t => t.id !== entryId);
+  // 4. Hard-delete treasury entry itself (and its paired leg if it is a freeze transfer)
+  if (tr.sourceType === 'freeze' && tr.sourceId) {
+    updated.treasury = updated.treasury.filter(t => {
+      const isPair = t.sourceType === 'freeze' && t.sourceId === tr.sourceId;
+      if (isPair && t.id) removedIds.push(t.id);
+      return !isPair;
+    });
+  } else {
+    updated.treasury = updated.treasury.filter(t => t.id !== entryId);
+  }
 
   // 5. Hard-delete associated journals (for non-invoice movements or treasury/voucher's own journal)
   updated.journals = (updated.journals || []).filter(j => {

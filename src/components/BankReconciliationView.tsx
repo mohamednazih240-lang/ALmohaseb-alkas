@@ -315,6 +315,7 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
       const trEntry: TreasuryEntry = {
         id: generateId('tr_fee'),
         date: statementDate,
+        createdAt: new Date().toISOString(),
         direction: 'out',
         amount: cleanAmt,
         method: activeMethod,

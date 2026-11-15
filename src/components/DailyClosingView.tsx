@@ -22,13 +22,16 @@ import {
   X,
   Eye,
   FileText,
-  Receipt
+  Receipt,
+  Lock,
+  Unlock
 } from 'lucide-react';
 import {
   AccountingDB,
   DailyClosing,
   DailyClosingChannelSummary,
-  PaymentMethod
+  PaymentMethod,
+  TreasuryChannelMethod
 } from '../types/accounting';
 import {
   formatMoney,
@@ -38,6 +41,8 @@ import {
   roundMoney,
   isFiniteNonNegative,
   PAYMENT_METHODS,
+  FROZEN_CASH_METHOD,
+  executeCashFreezeTransfer,
   buildProductFifoLedger,
   markRecordsDeleted,
   isBranchMatch
@@ -111,6 +116,15 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     () => PAYMENT_METHODS.filter(m => m !== 'آجل'),
     []
   );
+  const allClosingChannels = useMemo<TreasuryChannelMethod[]>(
+    () => [...treasuryMethods, FROZEN_CASH_METHOD],
+    [treasuryMethods]
+  );
+
+  // Quick Freeze / Unfreeze inline state
+  const [freezeMode, setFreezeMode] = useState<'freeze' | 'unfreeze'>('freeze');
+  const [freezeInputAmount, setFreezeInputAmount] = useState<string>('');
+  const [freezeInputNote, setFreezeInputNote] = useState<string>('');
 
   // Prior closing record for carried-over opening cash reference
   const latestPriorClosing = useMemo(() => {
@@ -127,10 +141,10 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const [showReconcileChannels, setShowReconcileChannels] = useState<boolean>(false);
   const [reconcileInputs, setReconcileInputs] = useState<Record<string, string>>({});
 
-  // Cumulative treasury book opening balances prior to selectedDate across all 5 payment channels
+  // Cumulative treasury book opening balances prior to selectedDate across all 5 payment channels + Frozen Reserve
   const priorChannelBookBalances = useMemo(() => {
     const map: Record<string, number> = {};
-    treasuryMethods.forEach(m => {
+    allClosingChannels.forEach(m => {
       map[m] = 0;
     });
 
@@ -143,9 +157,29 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
           .reduce((s, t) => s + (t.direction === 'in' ? (Number(t.amount) || 0) : -(Number(t.amount) || 0)), 0);
         map[m] = roundMoney(carried + betweenNet);
       });
+
+      if (latestPriorClosing.nextDayOpeningBalances[FROZEN_CASH_METHOD] !== undefined) {
+        const carriedFrozen = latestPriorClosing.nextDayOpeningBalances[FROZEN_CASH_METHOD] ?? 0;
+        const betweenFrozen = db.treasury
+          .filter(t => t.date > priorDate && t.date < selectedDate && t.method === FROZEN_CASH_METHOD && isTargetBranch(t.branchId))
+          .reduce((s, t) => s + (t.direction === 'in' ? (Number(t.amount) || 0) : -(Number(t.amount) || 0)), 0);
+        map[FROZEN_CASH_METHOD] = roundMoney(carriedFrozen + betweenFrozen);
+      } else {
+        map[FROZEN_CASH_METHOD] = roundMoney(
+          db.treasury
+            .filter(t => t.date < selectedDate && t.method === FROZEN_CASH_METHOD && isTargetBranch(t.branchId))
+            .reduce((s, t) => s + (t.direction === 'in' ? (Number(t.amount) || 0) : -(Number(t.amount) || 0)), 0)
+        );
+      }
+    } else {
+      map[FROZEN_CASH_METHOD] = roundMoney(
+        db.treasury
+          .filter(t => t.date < selectedDate && t.method === FROZEN_CASH_METHOD && isTargetBranch(t.branchId))
+          .reduce((s, t) => s + (t.direction === 'in' ? (Number(t.amount) || 0) : -(Number(t.amount) || 0)), 0)
+      );
     }
     return map;
-  }, [db.treasury, selectedDate, targetBranchId, treasuryMethods, latestPriorClosing]);
+  }, [db.treasury, selectedDate, targetBranchId, treasuryMethods, allClosingChannels, latestPriorClosing]);
 
   // Reset manual edit flags and sync baseline/audit mode when date, branch, or prior closing availability switches
   React.useEffect(() => {
@@ -195,33 +229,34 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     );
     const netSales = roundMoney(Math.max(0, salesTotal - returnsTotal));
 
-    // Authoritative Treasury movements on selected date for target branch (single source of truth - zero double counting)
+    // Authoritative Treasury movements on selected date for target branch (excluding internal freeze allocations from operational In/Out)
     const dayTreasury = db.treasury.filter(t => t.date === selectedDate && isTargetBranch(t.branchId));
+    const operationalDayTreasury = dayTreasury.filter(t => t.sourceType !== 'freeze' && t.method !== FROZEN_CASH_METHOD);
 
     const totalCashIn = roundMoney(
-      dayTreasury.filter(t => t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+      operationalDayTreasury.filter(t => t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
     const totalCashOut = roundMoney(
-      dayTreasury.filter(t => t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+      operationalDayTreasury.filter(t => t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
 
     const salesCashIn = roundMoney(
-      dayTreasury
+      operationalDayTreasury
         .filter(t => t.direction === 'in' && (t.sourceType === 'sale' || t.sourceType === 'wholesale' || t.sourceType === 'purchase_return'))
         .reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
     const purchasesCashOut = roundMoney(
-      dayTreasury
+      operationalDayTreasury
         .filter(t => t.direction === 'out' && (t.sourceType === 'purchase' || t.sourceType === 'sale_return'))
         .reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
     const vouchersCashIn = roundMoney(
-      dayTreasury
+      operationalDayTreasury
         .filter(t => t.direction === 'in' && (t.sourceType === 'receipt' || t.sourceType === 'voucher'))
         .reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
     const vouchersCashOut = roundMoney(
-      dayTreasury
+      operationalDayTreasury
         .filter(t => t.direction === 'out' && (t.sourceType === 'payment' || t.sourceType === 'voucher'))
         .reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
@@ -233,13 +268,24 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       db.revenues.filter(r => r.date === selectedDate && isTargetBranch(r.branchId)).reduce((sum, r) => sum + (Number(r.amount) || 0), 0)
     );
 
-    // Cash drawer ('نقدي') inflows/outflows specifically for drawer reconciliation
+    // Cash drawer ('نقدي') operational inflows/outflows (without freeze transfers)
     const drawerIn = roundMoney(
-      dayTreasury.filter(t => t.method === 'نقدي' && t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+      operationalDayTreasury.filter(t => t.method === 'نقدي' && t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
     const drawerOut = roundMoney(
-      dayTreasury.filter(t => t.method === 'نقدي' && t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+      operationalDayTreasury.filter(t => t.method === 'نقدي' && t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
+
+    // Frozen Cash Reserve movements today ('المبلغ المجمد')
+    const frozenOpeningCash = isBaselineMode ? 0 : roundMoney(priorChannelBookBalances[FROZEN_CASH_METHOD] || 0);
+    const frozenAddedToday = roundMoney(
+      dayTreasury.filter(t => t.method === FROZEN_CASH_METHOD && t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
+    const unfrozenToday = roundMoney(
+      dayTreasury.filter(t => t.method === FROZEN_CASH_METHOD && t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+    );
+    const frozenTodayNet = roundMoney(frozenAddedToday - unfrozenToday);
+    const rawExpectedFrozenCash = roundMoney(frozenOpeningCash + frozenTodayNet);
 
     // Cost of Goods Sold (COGS) & Gross Profit strictly via FIFO ledger (reconciled with ProfitsView)
     let rawVerifiedRev = 0;
@@ -279,8 +325,9 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     const grossProfit = roundMoney(rawVerifiedRev - rawCogs - returnsTotal);
     const profitMargin = rawVerifiedRev > 0 ? (grossProfit / rawVerifiedRev) * 100 : 0;
 
-    // Expected cash in drawer ('نقدي')
-    const rawExpectedCash = roundMoney(startingCash + drawerIn - drawerOut);
+    // Expected loose cash in drawer ('نقدي' = yesterday + inflows - outflows - net frozen today)
+    const drawerBeforeFreeze = roundMoney(startingCash + drawerIn - drawerOut);
+    const rawExpectedCash = roundMoney(drawerBeforeFreeze - frozenTodayNet);
     const cashBaselineRaw = baselineChannelInputs['نقدي'];
     const effectiveActualCash = isBaselineMode
       ? roundMoney(actualCashEdited ? actualCash : (cashBaselineRaw !== undefined && cashBaselineRaw.trim() !== '' ? (parseFloat(cashBaselineRaw) || 0) : 0))
@@ -290,19 +337,36 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
               ? roundMoney(parseFloat(reconcileInputs['نقدي']) || 0)
               : rawExpectedCash));
 
-    // On Day-1 baseline mode, user-entered values across all 5 channels become the exact opening balances with zero deficits/surpluses
+    // On Day-1 baseline mode, user-entered values across all channels become the exact opening balances with zero deficits/surpluses
     const expectedCash = isBaselineMode ? effectiveActualCash : rawExpectedCash;
 
-    // Per-channel summary & Next-Day Opening Balance for ALL 5 treasury payment methods
-    const channelSummaries: DailyClosingChannelSummary[] = treasuryMethods.map(m => {
-      const opening = isBaselineMode ? 0 : (m === 'نقدي' ? roundMoney(startingCash) : roundMoney(priorChannelBookBalances[m] || 0));
-      const chIn = roundMoney(
-        dayTreasury.filter(t => t.method === m && t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
-      );
-      const chOut = roundMoney(
-        dayTreasury.filter(t => t.method === m && t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
-      );
-      const closing = roundMoney(opening + chIn - chOut);
+    // Per-channel summary & Next-Day Opening Balance for ALL 5 payment channels + Frozen Reserve
+    const channelSummaries: DailyClosingChannelSummary[] = allClosingChannels.map(m => {
+      const isFrozen = m === FROZEN_CASH_METHOD;
+      const opening = isBaselineMode
+        ? 0
+        : isFrozen
+          ? frozenOpeningCash
+          : m === 'نقدي'
+            ? roundMoney(startingCash)
+            : roundMoney(priorChannelBookBalances[m] || 0);
+
+      const chIn = isFrozen
+        ? frozenAddedToday
+        : roundMoney(
+            operationalDayTreasury.filter(t => t.method === m && t.direction === 'in').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+          );
+      const chOut = isFrozen
+        ? unfrozenToday
+        : roundMoney(
+            operationalDayTreasury.filter(t => t.method === m && t.direction === 'out').reduce((s, t) => s + (Number(t.amount) || 0), 0)
+          );
+
+      const closing = isFrozen
+        ? rawExpectedFrozenCash
+        : m === 'نقدي'
+          ? rawExpectedCash
+          : roundMoney(opening + chIn - chOut);
 
       let actualBal = closing;
       if (isBaselineMode) {
@@ -310,7 +374,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
           actualBal = effectiveActualCash;
         } else {
           const raw = baselineChannelInputs[m];
-          actualBal = raw !== undefined && raw.trim() !== '' ? roundMoney(Math.max(0, parseFloat(raw) || 0)) : 0;
+          actualBal = raw !== undefined && raw.trim() !== '' ? roundMoney(Math.max(0, parseFloat(raw) || 0)) : closing;
         }
       } else {
         if (m === 'نقدي') {
@@ -344,9 +408,13 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     channelSummaries.forEach(cs => {
       nextDayOpeningBalances[cs.method] = cs.nextDayOpeningBalance;
     });
-    const totalNextDayOpening = roundMoney(
-      channelSummaries.reduce((s, cs) => s + cs.nextDayOpeningBalance, 0)
+    const effectiveFrozenCash = roundMoney(nextDayOpeningBalances[FROZEN_CASH_METHOD] ?? rawExpectedFrozenCash);
+    const totalWorkingNextDayOpening = roundMoney(
+      channelSummaries
+        .filter(cs => cs.method !== FROZEN_CASH_METHOD)
+        .reduce((s, cs) => s + cs.nextDayOpeningBalance, 0)
     );
+    const totalNextDayOpening = roundMoney(totalWorkingNextDayOpening + effectiveFrozenCash);
 
     return {
       salesCount: daySalesInvoices.length,
@@ -361,6 +429,13 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       totalCashOut,
       drawerIn,
       drawerOut,
+      drawerBeforeFreeze,
+      frozenOpeningCash,
+      frozenAddedToday,
+      unfrozenToday,
+      frozenTodayNet,
+      rawExpectedFrozenCash,
+      effectiveFrozenCash,
       salesCashIn,
       vouchersCashIn,
       dayRevenues,
@@ -374,9 +449,10 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       totalChannelVariance,
       channelSummaries,
       nextDayOpeningBalances,
+      totalWorkingNextDayOpening,
       totalNextDayOpening
     };
-  }, [db, fifoLedger, selectedDate, startingCash, actualCash, actualCashEdited, isBaselineMode, baselineChannelInputs, reconcileInputs, targetBranchId, treasuryMethods, priorChannelBookBalances]);
+  }, [db, fifoLedger, selectedDate, startingCash, actualCash, actualCashEdited, isBaselineMode, baselineChannelInputs, reconcileInputs, targetBranchId, allClosingChannels, priorChannelBookBalances]);
 
   // Keep actualCash synced to expectedCash in audit mode until cashier enters a manual drawer count
   React.useEffect(() => {
@@ -448,7 +524,34 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     };
   };
 
-  // Save current shift closing with full next-day opening balances for all payment methods
+  // Quick inline Freeze / Unfreeze cash reserve action
+  const handleQuickFreezeAction = (e: React.FormEvent) => {
+    e.preventDefault();
+    runWithLock(() => {
+      const amt = roundMoney(parseFloat(freezeInputAmount) || 0);
+      if (amt <= 0) {
+        alert('يرجى إدخال مبلغ صحيح أكبر من صفر.');
+        return;
+      }
+      const res = executeCashFreezeTransfer(db, {
+        direction: freezeMode,
+        amount: amt,
+        date: selectedDate,
+        note: freezeInputNote,
+        branchId: targetBranchId,
+        branchName: currentBranch.name
+      });
+      if (!res.ok) {
+        alert(res.error);
+        return;
+      }
+      onUpdateDb(res.db);
+      setFreezeInputAmount('');
+      setFreezeInputNote('');
+    });
+  };
+
+  // Save current shift closing with full next-day opening balances for all payment methods + Frozen Cash Reserve
   const handleSaveClosing = () => {
     runWithLock(() => {
       const cleanStarting = roundMoney(isBaselineMode ? 0 : startingCash);
@@ -498,6 +601,9 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         actualCash: cleanActual,
         expectedCash: expected,
         difference: diff,
+        frozenCash: roundMoney(liveStats.effectiveFrozenCash),
+        frozenOpeningCash: roundMoney(liveStats.frozenOpeningCash),
+        frozenTodayNet: roundMoney(liveStats.frozenTodayNet),
         status: 'مغلق',
         notes: isBaselineMode
           ? (shiftNotes ? `${shiftNotes} — [أول تقفيل يومية: تأسيس الرصيد الفعلي باليد]` : 'أول تقفيل يومية: إدخال الرصيد النقدي الفعلي يدوياً كبداية للمراجعة الحقيقية من الغد')
@@ -515,7 +621,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       logAudit(
         updated,
         isBaselineMode ? 'تأسيس رصيد أول تقفيل يومية' : 'تقفيل يومية ووردية',
-        `تم تقفيل ${shiftName} لفرع ${currentBranch.name} بتاريخ ${selectedDate} وترحيل الرصيد الافتتاحي (${formatMoney(cleanActual, db.settings.currency)}) ليوم ${nextDayDate}`
+        `تم تقفيل ${shiftName} لفرع ${currentBranch.name} بتاريخ ${selectedDate} وترحيل النقدي (${formatMoney(cleanActual, db.settings.currency)}) والمجمد (${formatMoney(liveStats.effectiveFrozenCash, db.settings.currency)}) ليوم ${nextDayDate}`
       );
 
       onUpdateDb(updated);
@@ -1105,32 +1211,53 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                 </div>
 
                 <div className="space-y-2 bg-slate-50 p-3 rounded-lg border border-slate-200">
-                  <div className="font-bold text-slate-900 border-b border-slate-200 pb-1">
-                    {isBaselineMode ? 'ملخص النقدية (كاش)' : 'مطابقة درج النقدية (الكاش فقط)'}
+                  <div className="font-bold text-slate-900 border-b border-slate-200 pb-1 flex items-center justify-between">
+                    <span>{isBaselineMode ? 'ملخص النقدية والمجمد (كاش)' : 'موقف درج النقدية (الكاش والفكة) والمجمد'}</span>
+                    {!isBaselineMode && (
+                      <span className="text-[10px] font-bold text-slate-500">
+                        أمس ← اليوم ← الفكة والمجمد
+                      </span>
+                    )}
                   </div>
                   {!isBaselineMode && (
                     <div className="flex justify-between">
-                      <span className="text-slate-600">رصيد الافتتاح (البداية):</span>
-                      <strong className="font-mono">{formatMoney(startingCash, db.settings.currency)}</strong>
+                      <span className="text-slate-700 font-bold">كان بالدرج أمس (افتتاحي اليوم):</span>
+                      <strong className="font-mono text-slate-900">{formatMoney(startingCash, db.settings.currency)}</strong>
                     </div>
                   )}
                   <div className="flex justify-between text-emerald-700">
-                    <span>(+) وارد الكاش للدرج:</span>
-                    <strong className="font-mono">{formatMoney(liveStats.drawerIn, db.settings.currency)}</strong>
+                    <span>(+) ما دخل الدرج اليوم (نقدي):</span>
+                    <strong className="font-mono">+{formatMoney(liveStats.drawerIn, db.settings.currency)}</strong>
                   </div>
                   <div className="flex justify-between text-rose-700">
-                    <span>(-) صادر الكاش من الدرج:</span>
-                    <strong className="font-mono">{formatMoney(liveStats.drawerOut, db.settings.currency)}</strong>
+                    <span>(-) ما خرج من الدرج اليوم (نقدي):</span>
+                    <strong className="font-mono">-{formatMoney(liveStats.drawerOut, db.settings.currency)}</strong>
                   </div>
+                  {liveStats.frozenTodayNet !== 0 && (
+                    <div className="flex justify-between text-amber-800 font-bold bg-amber-50/90 px-2 py-1 rounded border border-amber-200">
+                      <span>{liveStats.frozenTodayNet > 0 ? '(-) محوّل للمبلغ المجمد اليوم:' : '(+) مفكوك من المجمد للدرج اليوم:'}</span>
+                      <strong className="font-mono">
+                        {liveStats.frozenTodayNet > 0 ? '-' : '+'}
+                        {formatMoney(Math.abs(liveStats.frozenTodayNet), db.settings.currency)}
+                      </strong>
+                    </div>
+                  )}
                   {!isBaselineMode && (
                     <div className="flex justify-between font-bold border-t border-slate-200 pt-1">
-                      <span className="text-slate-800">النقد المتوقع بالدرج (دفترياً):</span>
-                      <strong className="font-mono">{formatMoney(liveStats.expectedCash, db.settings.currency)}</strong>
+                      <span className="text-slate-800">النقدي المتبقي بالدرج (الفكة المتوقعة):</span>
+                      <strong className="font-mono text-emerald-800">{formatMoney(liveStats.expectedCash, db.settings.currency)}</strong>
                     </div>
                   )}
                   <div className="flex justify-between font-bold text-slate-950">
-                    <span>النقد الفعلي الموجود بالدرج:</span>
+                    <span>الجرد الفعلي بالدرج (الفكة):</span>
                     <strong className="font-mono">{formatMoney(liveStats.effectiveActualCash, db.settings.currency)}</strong>
+                  </div>
+                  <div className="flex justify-between font-black text-amber-950 bg-amber-100/70 px-2 py-1.5 rounded-lg border border-amber-300">
+                    <span className="flex items-center gap-1">
+                      <Lock className="w-3.5 h-3.5 text-amber-700" />
+                      <span>المبلغ المجمد (محفوظ جانباً):</span>
+                    </span>
+                    <strong className="font-mono">{formatMoney(liveStats.effectiveFrozenCash, db.settings.currency)}</strong>
                   </div>
                   {!isBaselineMode && (
                     <div className={`flex justify-between font-black border-t border-slate-200 pt-1.5 ${
@@ -1153,16 +1280,99 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                 </div>
               </div>
 
-              {/* Next-Day Opening Balances & Day 2+ «تطابق» Reconciliation Across ALL 5 Treasury Channels */}
+              {/* Dedicated Frozen Cash Control Bar: Move cash between Drawer ('نقدي / الفكة') and Frozen Safe ('المبلغ المجمد') */}
+              <div className="bg-amber-50/90 border-2 border-amber-300 rounded-xl p-3 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 pb-2">
+                  <div className="flex items-center gap-2">
+                    <div className="p-1.5 bg-amber-600 text-white rounded-lg">
+                      <Lock className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-black text-amber-950">
+                        المبلغ المجمد (حفظ مبلغ جانباً وبقاء الفكة في النقدي)
+                      </h4>
+                      <p className="text-[10.5px] text-amber-800">
+                        مجمد سابق من أمس: <strong className="font-mono">{formatMoney(liveStats.frozenOpeningCash, db.settings.currency)}</strong>
+                        {' • '}
+                        صافي حركة التجميد اليوم: <strong className="font-mono">{liveStats.frozenTodayNet >= 0 ? '+' : ''}{formatMoney(liveStats.frozenTodayNet, db.settings.currency)}</strong>
+                        {' • '}
+                        الإجمالي المجمد الآن: <strong className="font-mono text-amber-950">{formatMoney(liveStats.effectiveFrozenCash, db.settings.currency)}</strong>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="bg-white border border-amber-300 rounded-lg px-2.5 py-1 text-center">
+                    <span className="text-[9.5px] font-bold text-amber-800 block">الفكة المتبقية بالدرج (نقدي)</span>
+                    <span className="text-xs font-black font-mono text-emerald-800">
+                      {formatMoney(liveStats.effectiveActualCash, db.settings.currency)}
+                    </span>
+                  </div>
+                </div>
+
+                <form onSubmit={handleQuickFreezeAction} className="flex flex-wrap items-center gap-2">
+                  <div className="inline-flex rounded-lg border border-amber-300 bg-white p-0.5 text-[11px] font-black">
+                    <button
+                      type="button"
+                      onClick={() => setFreezeMode('freeze')}
+                      className={`px-2.5 py-1 rounded-md flex items-center gap-1 cursor-pointer transition-colors ${
+                        freezeMode === 'freeze' ? 'bg-amber-600 text-white' : 'text-amber-900 hover:bg-amber-50'
+                      }`}
+                    >
+                      <Lock className="w-3 h-3" />
+                      <span>تجميد من النقدي</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFreezeMode('unfreeze')}
+                      className={`px-2.5 py-1 rounded-md flex items-center gap-1 cursor-pointer transition-colors ${
+                        freezeMode === 'unfreeze' ? 'bg-emerald-600 text-white' : 'text-amber-900 hover:bg-amber-50'
+                      }`}
+                    >
+                      <Unlock className="w-3 h-3" />
+                      <span>فك تجميد للنقدي</span>
+                    </button>
+                  </div>
+
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="any"
+                    value={freezeInputAmount}
+                    onFocus={e => e.target.select()}
+                    onChange={e => setFreezeInputAmount(e.target.value)}
+                    placeholder={freezeMode === 'freeze' ? 'المبلغ المراد تجميده...' : 'المبلغ المراد إرجاعه...'}
+                    className="w-40 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-mono font-black text-slate-950 outline-none focus:border-amber-600"
+                  />
+
+                  <input
+                    type="text"
+                    value={freezeInputNote}
+                    onChange={e => setFreezeInputNote(e.target.value)}
+                    placeholder="ملاحظة (مثال: تجنيب ورق كبير وترك الفكة)"
+                    className="flex-1 min-w-[160px] px-2.5 py-1.5 bg-white border border-amber-200 rounded-lg text-xs outline-none focus:border-amber-600"
+                  />
+
+                  <button
+                    type="submit"
+                    disabled={isSubmitting || !freezeInputAmount}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-black text-white shadow-2xs cursor-pointer disabled:opacity-50 ${
+                      freezeMode === 'freeze' ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'
+                    }`}
+                  >
+                    {freezeMode === 'freeze' ? 'تحويل إلى المجمد' : 'إرجاع إلى النقدي'}
+                  </button>
+                </form>
+              </div>
+
+              {/* Next-Day Opening Balances & Day 2+ «تطابق» Reconciliation Across ALL Treasury Channels + Frozen Reserve */}
               <div className="bg-slate-900 text-white rounded-xl p-3.5 border border-slate-700 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 pb-2">
                   <div className="flex items-center gap-2">
                     <Wallet className="w-4 h-4 text-emerald-400 shrink-0" />
                     <h4 className="text-xs font-black text-white">
-                      الرصيد الافتتاحي لليوم التالي ({nextDayDate}) في جميع وسائل الخزينة
+                      الرصيد الافتتاحي لليوم التالي ({nextDayDate}) في جميع وسائل الخزينة والمجمد
                     </h4>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     {!isBaselineMode && (
                       <button
                         type="button"
@@ -1186,8 +1396,14 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                         <span>{showReconcileChannels ? 'إخفاء المطابقة' : 'تطابق'}</span>
                       </button>
                     )}
+                    <div className="bg-amber-500/20 border border-amber-400/50 px-2.5 py-1 rounded-lg text-left">
+                      <span className="text-[9.5px] text-amber-200 block">المبلغ المجمد</span>
+                      <span className="text-xs font-black font-mono text-amber-300">
+                        {formatMoney(liveStats.effectiveFrozenCash, db.settings.currency)}
+                      </span>
+                    </div>
                     <div className="bg-emerald-500/20 border border-emerald-400/50 px-2.5 py-1 rounded-lg text-left">
-                      <span className="text-[9.5px] text-emerald-200 block">إجمالي الافتتاحي لليوم التالي</span>
+                      <span className="text-[9.5px] text-emerald-200 block">إجمالي الافتتاحي (شامل المجمد)</span>
                       <span className="text-xs font-black font-mono text-emerald-300">
                         {formatMoney(liveStats.totalNextDayOpening, db.settings.currency)}
                       </span>
@@ -1200,7 +1416,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                     <thead>
                       <tr className="bg-slate-800 text-slate-300 font-bold border-b border-slate-700">
                         <th className="py-1.5 px-2 text-right">وسيلة الدفع / الخزينة</th>
-                        {!isBaselineMode && <th className="py-1.5 px-2">افتتاحي اليوم</th>}
+                        {!isBaselineMode && <th className="py-1.5 px-2">افتتاحي اليوم (أمس)</th>}
                         <th className="py-1.5 px-2 text-emerald-300">الوارد (+)</th>
                         <th className="py-1.5 px-2 text-rose-300">الصادر (-)</th>
                         {!isBaselineMode && <th className="py-1.5 px-2 text-slate-200">رصيد النظام</th>}
@@ -1215,16 +1431,44 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                     <tbody className="divide-y divide-slate-800 font-mono">
                       {liveStats.channelSummaries.map(cs => {
                         const chDiff = cs.variance || 0;
+                        const isFrozenRow = cs.method === FROZEN_CASH_METHOD;
                         return (
-                          <tr key={cs.method} className="hover:bg-slate-800/60">
-                            <td className="py-1.5 px-2 text-right font-sans font-bold text-white">{cs.method}</td>
+                          <tr
+                            key={cs.method}
+                            className={isFrozenRow ? 'bg-amber-950/50 hover:bg-amber-950/70 border-t-2 border-amber-500/40' : 'hover:bg-slate-800/60'}
+                          >
+                            <td className="py-1.5 px-2 text-right font-sans font-bold text-white">
+                              <div className="flex flex-col">
+                                <span className={isFrozenRow ? 'text-amber-300 font-black flex items-center gap-1' : ''}>
+                                  {isFrozenRow && <Lock className="w-3 h-3 shrink-0" />}
+                                  <span>
+                                    {cs.method === 'نقدي'
+                                      ? 'نقدي (الفكة بالدرج)'
+                                      : isFrozenRow
+                                        ? 'المبلغ المجمد (محفوظ جانباً)'
+                                        : cs.method}
+                                  </span>
+                                </span>
+                                {cs.method === 'نقدي' && liveStats.frozenTodayNet !== 0 && (
+                                  <span className="text-[9.5px] font-mono text-amber-300">
+                                    {liveStats.frozenTodayNet > 0
+                                      ? `محول للمجمد اليوم: -${formatCleanNumber(liveStats.frozenTodayNet)}`
+                                      : `مفكوك من المجمد اليوم: +${formatCleanNumber(Math.abs(liveStats.frozenTodayNet))}`}
+                                  </span>
+                                )}
+                              </div>
+                            </td>
                             {!isBaselineMode && (
-                              <td className="py-1.5 px-2 text-slate-300">{formatCleanNumber(cs.openingBalance)}</td>
+                              <td className={`py-1.5 px-2 ${isFrozenRow ? 'text-amber-200' : 'text-slate-300'}`}>
+                                {formatCleanNumber(cs.openingBalance)}
+                              </td>
                             )}
                             <td className="py-1.5 px-2 text-emerald-400">+{formatCleanNumber(cs.cashIn)}</td>
                             <td className="py-1.5 px-2 text-rose-400">-{formatCleanNumber(cs.cashOut)}</td>
                             {!isBaselineMode && (
-                              <td className="py-1.5 px-2 text-slate-200 font-bold">{formatCleanNumber(cs.closingBalance)}</td>
+                              <td className={`py-1.5 px-2 font-bold ${isFrozenRow ? 'text-amber-200' : 'text-slate-200'}`}>
+                                {formatCleanNumber(cs.closingBalance)}
+                              </td>
                             )}
                             <td className="py-1.5 px-2">
                               {isBaselineMode ? (
@@ -1232,7 +1476,11 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                                   type="number"
                                   min="0"
                                   step="any"
-                                  value={cs.method === 'نقدي' ? (actualCashEdited ? actualCashInput : (baselineChannelInputs['نقدي'] ?? '')) : (baselineChannelInputs[cs.method] ?? '')}
+                                  value={
+                                    cs.method === 'نقدي'
+                                      ? (actualCashEdited ? actualCashInput : (baselineChannelInputs['نقدي'] ?? ''))
+                                      : (baselineChannelInputs[cs.method] ?? (isFrozenRow && cs.closingBalance > 0 ? String(cs.closingBalance) : ''))
+                                  }
                                   onFocus={e => e.target.select()}
                                   onChange={e => {
                                     const val = e.target.value;
@@ -1275,7 +1523,11 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                                   className="w-28 px-2 py-1 text-center bg-slate-800 border border-blue-400/80 text-white font-mono font-black rounded outline-none focus:border-emerald-400"
                                 />
                               ) : (
-                                <span className="inline-block bg-emerald-600/30 border border-emerald-400/50 text-emerald-200 font-black px-2 py-0.5 rounded">
+                                <span className={`inline-block font-black px-2 py-0.5 rounded border ${
+                                  isFrozenRow
+                                    ? 'bg-amber-500/25 border-amber-400/60 text-amber-200'
+                                    : 'bg-emerald-600/30 border-emerald-400/50 text-emerald-200'
+                                }`}>
                                   {formatMoney(cs.nextDayOpeningBalance, db.settings.currency)}
                                 </span>
                               )}
@@ -1362,6 +1614,9 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                       actualCash: liveStats.effectiveActualCash,
                       expectedCash: liveStats.expectedCash,
                       difference: liveStats.diff,
+                      frozenCash: liveStats.effectiveFrozenCash,
+                      frozenOpeningCash: liveStats.frozenOpeningCash,
+                      frozenTodayNet: liveStats.frozenTodayNet,
                       status: 'مفتوح',
                       notes: shiftNotes,
                       createdAt: new Date().toISOString(),

@@ -6,6 +6,8 @@ export type PaymentMethod =
   | 'تحويل بنكي' 
   | 'آجل';
 
+export type TreasuryChannelMethod = PaymentMethod | 'المبلغ المجمد';
+
 export interface Account {
   id: string;
   code: string;
@@ -337,9 +339,10 @@ export interface Voucher {
 export interface TreasuryEntry {
   id: string;
   date: string;
+  createdAt?: string;
   direction: 'in' | 'out';
   amount: number;
-  method: PaymentMethod;
+  method: TreasuryChannelMethod;
   description: string;
   sourceType?: string;
   sourceId?: string;
@@ -407,7 +410,7 @@ export interface FiscalPeriod {
 }
 
 export interface DailyClosingChannelSummary {
-  method: PaymentMethod;
+  method: TreasuryChannelMethod;
   openingBalance: number;
   cashIn: number;
   cashOut: number;
@@ -436,6 +439,9 @@ export interface DailyClosing {
   actualCash: number;
   expectedCash: number;
   difference: number;
+  frozenCash?: number;
+  frozenOpeningCash?: number;
+  frozenTodayNet?: number;
   status: 'مفتوح' | 'مغلق';
   notes?: string;
   createdAt: string;

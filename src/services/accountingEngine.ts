@@ -522,6 +522,7 @@ export function postInvoiceTransaction(
         const trEntry: TreasuryEntry = {
           id: deterministicTrId,
           date: workingInvoice.date,
+          createdAt: workingInvoice.createdAt || new Date().toISOString(),
           direction: trDirection,
           amount: lineAmt,
           method: pLine.method,
@@ -735,6 +736,7 @@ export function postManualVoucherTransaction(
   const trEntry: TreasuryEntry = {
     id: deterministicTrId,
     date: voucherToSave.date,
+    createdAt: voucherToSave.createdAt || new Date().toISOString(),
     direction: trDirection,
     amount: voucherToSave.amount,
     method: voucherToSave.paymentMethod,
@@ -1665,7 +1667,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   const revenueIds = new Set((updated.revenues || []).map(r => r.id));
 
   (updated.treasury || []).forEach(tr => {
-    if (!tr) return;
+    if (!tr || tr.sourceType === 'freeze') return;
     let targetDir: 'in' | 'out' | null = null;
     if (tr.sourceType === 'expense' || (tr.sourceId && expenseIds.has(tr.sourceId))) {
       targetDir = 'out';
@@ -1718,8 +1720,8 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   (updated.treasury || []).forEach(tr => {
     let key = tr.id;
     const splitMatch = tr.id.match(/_p(\d+)_/);
-    if (tr.sourceId && tr.sourceType === 'transfer') {
-      key = `transfer_${tr.sourceId}_${tr.direction}_${tr.method || 'cash'}`;
+    if (tr.sourceId && (tr.sourceType === 'transfer' || tr.sourceType === 'freeze')) {
+      key = `${tr.sourceType}_${tr.sourceId}_${tr.direction}_${tr.method || 'cash'}`;
     } else if (tr.sourceId && tr.sourceType && splitMatch) {
       key = `${tr.sourceType}_${tr.sourceId}_p${splitMatch[1]}_${tr.method || 'cash'}`;
     } else if (tr.sourceId && tr.sourceType && tr.sourceType !== 'manual' && tr.sourceType !== 'adjustment') {

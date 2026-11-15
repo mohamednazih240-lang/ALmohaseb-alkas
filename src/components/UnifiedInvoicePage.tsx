@@ -2419,6 +2419,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           const trEntry: TreasuryEntry = {
             id: deterministicTrId,
             date: savedInvoice.date,
+            createdAt: savedInvoice.updatedAt || savedInvoice.createdAt || new Date().toISOString(),
             direction: trDirection,
             amount: pLine.amount,
             method: pLine.method,

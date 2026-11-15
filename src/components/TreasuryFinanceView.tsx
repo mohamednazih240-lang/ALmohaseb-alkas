@@ -19,11 +19,13 @@ import {
   FileText,
   DollarSign,
   Eye,
-  ShieldCheck
+  ShieldCheck,
+  Lock
 } from 'lucide-react';
 import {
   AccountingDB,
   PaymentMethod,
+  TreasuryChannelMethod,
   SimpleRecord,
   Account,
   JournalEntry,
@@ -32,10 +34,13 @@ import {
 import {
   formatMoney,
   PAYMENT_METHODS,
+  FROZEN_CASH_METHOD,
   getMethodAccountId,
   generateId,
   getTodayDate,
   calculateTreasuryBalance,
+  calculateFrozenTreasuryBalance,
+  executeCashFreezeTransfer,
   logAudit,
   deleteTreasuryEntryAndRevert,
   isBranchMatch,
@@ -73,6 +78,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Modals
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
+  const [showFreezeModal, setShowFreezeModal] = useState(false);
   const [showSimpleModal, setShowSimpleModal] = useState(false);
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [showJournalModal, setShowJournalModal] = useState(false);
@@ -80,6 +86,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Mobile back buttons: close modal without leaving treasury view
   useModalBackHandler(showMoveModal, () => setShowMoveModal(false), 'treasury_move_modal');
   useModalBackHandler(showTransferModal, () => setShowTransferModal(false), 'treasury_transfer_modal');
+  useModalBackHandler(showFreezeModal, () => setShowFreezeModal(false), 'treasury_freeze_modal');
   useModalBackHandler(showSimpleModal, () => setShowSimpleModal(false), 'treasury_simple_modal');
   useModalBackHandler(showAccountModal, () => setShowAccountModal(false), 'treasury_account_modal');
   useModalBackHandler(showJournalModal, () => setShowJournalModal(false), 'treasury_journal_modal');
@@ -95,6 +102,11 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   const [toMethod, setToMethod] = useState<PaymentMethod>('InstaPay');
   const [transferAmount, setTransferAmount] = useState<number>(0);
   const [transferNote, setTransferNote] = useState('تحويل وتغذية رصيد داخلي');
+
+  // Cash freeze / unfreeze form
+  const [freezeDirection, setFreezeDirection] = useState<'freeze' | 'unfreeze'>('freeze');
+  const [freezeAmount, setFreezeAmount] = useState<number>(0);
+  const [freezeNote, setFreezeNote] = useState('');
 
   // Expense/Revenue form
   const [simpleDate, setSimpleDate] = useState(getTodayDate());
@@ -216,6 +228,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       updated.treasury.unshift({
         id: entryId,
         date: getTodayDate(),
+        createdAt: new Date().toISOString(),
         direction: moveDir,
         amount: cleanAmt,
         method: moveMethod,
@@ -252,10 +265,12 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       }
 
       const tId = generateId('tr');
+      const nowIso = new Date().toISOString();
       // 1. Out from source method
       updated.treasury.unshift({
         id: generateId('tr'),
         date: getTodayDate(),
+        createdAt: nowIso,
         direction: 'out',
         amount: cleanAmt,
         method: fromMethod,
@@ -270,6 +285,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       updated.treasury.unshift({
         id: generateId('tr'),
         date: getTodayDate(),
+        createdAt: nowIso,
         direction: 'in',
         amount: cleanAmt,
         method: toMethod,
@@ -312,6 +328,29 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       onUpdateDb(updated);
       setTransferAmount(0);
       setShowTransferModal(false);
+    });
+  };
+
+  // Freeze / Unfreeze cash reserve
+  const handleSaveFreeze = (e: React.FormEvent) => {
+    e.preventDefault();
+    runWithLock(() => {
+      const res = executeCashFreezeTransfer(db, {
+        direction: freezeDirection,
+        amount: freezeAmount,
+        date: getTodayDate(),
+        note: freezeNote,
+        branchId: targetBranchId,
+        branchName: currentBranch.name
+      });
+      if (!res.ok) {
+        alert(res.error);
+        return;
+      }
+      onUpdateDb(res.db);
+      setFreezeAmount(0);
+      setFreezeNote('');
+      setShowFreezeModal(false);
     });
   };
 
@@ -430,6 +469,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         updated.treasury.unshift({
           id: deterministicTrId,
           date: simpleDate,
+          createdAt: new Date().toISOString(),
           direction: 'out',
           amount: cleanAmt,
           method: simpleMethod,
@@ -466,6 +506,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         updated.treasury.unshift({
           id: deterministicTrId,
           date: simpleDate,
+          createdAt: new Date().toISOString(),
           direction: 'in',
           amount: cleanAmt,
           method: simpleMethod,
@@ -892,6 +933,18 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </button>
 
               <button
+                onClick={() => {
+                  setFreezeDirection('freeze');
+                  setFreezeAmount(0);
+                  setFreezeNote('');
+                  setShowFreezeModal(true);
+                }}
+                className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-950 border border-amber-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+              >
+                <Lock className="w-4 h-4 text-amber-700" />
+                <span>تجميد / فك تجميد</span>
+              </button>
+              <button
                 onClick={() => setShowTransferModal(true)}
                 className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
               >
@@ -911,13 +964,15 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           {/* Branch Isolation Filter Bar */}
           {renderBranchFilterBar('حركات وخزينة الفرع')}
 
-          {/* Cards for each method (with carried-over Next-Day Opening Balance from Daily Closing) */}
+          {/* Cards for each method + Frozen Cash Reserve (reconciled identically with Daily Closing) */}
           {(() => {
             const cashMethods = PAYMENT_METHODS.filter(m => m !== 'آجل');
+            const todayDate = getTodayDate();
+            const scopeBranch = branchFilter === 'current' ? targetBranchId : undefined;
             const sortByDateDesc = (a: { date: string; createdAt?: string }, b: { date: string; createdAt?: string }) =>
               a.date === b.date ? (b.createdAt || '').localeCompare(a.createdAt || '') : b.date.localeCompare(a.date);
 
-            const getNextDayForMethod = (method: PaymentMethod): { value: number; nextDate: string; closingDate: string } | null => {
+            const getNextDayForMethod = (method: TreasuryChannelMethod): { value: number; nextDate: string; closingDate: string } | null => {
               if (branchFilter === 'current') {
                 const latest = (db.dailyClosings || [])
                   .filter(c => isBranchMatch(c.branchId, targetBranchId) && c.nextDayOpeningBalances && c.nextDayOpeningBalances[method] !== undefined)
@@ -954,15 +1009,26 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               }
             };
 
+            const frozenBal = calculateFrozenTreasuryBalance(db, scopeBranch);
+            const frozenOpening = getNextDayForMethod(FROZEN_CASH_METHOD);
+
+            const formatOpeningCaption = (nextOpening: { nextDate: string; closingDate: string }) => {
+              if (nextOpening.nextDate === todayDate) return `افتتاحي اليوم (${nextOpening.nextDate}):`;
+              if (nextOpening.nextDate > todayDate) return `الافتتاحي لليوم التالي (${nextOpening.nextDate}):`;
+              return `مرحل من تقفيل (${nextOpening.nextDate}):`;
+            };
+
             return (
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
                 {cashMethods.map(m => {
-                  const bal = calculateTreasuryBalance(db, m, branchFilter === 'current' ? targetBranchId : undefined);
+                  const bal = calculateTreasuryBalance(db, m, scopeBranch);
                   const nextOpening = getNextDayForMethod(m);
                   return (
                     <div key={m} className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs flex flex-col justify-between gap-2">
                       <div>
-                        <span className="text-xs font-bold text-slate-600 block mb-1">{m}</span>
+                        <span className="text-xs font-bold text-slate-600 block mb-1">
+                          {m === 'نقدي' ? 'نقدي (الفكة بالدرج)' : m}
+                        </span>
                         <span className="text-base sm:text-lg font-black font-mono text-slate-950">
                           {formatMoney(bal, db.settings.currency)}
                         </span>
@@ -970,7 +1036,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                       {nextOpening && (
                         <div className="pt-1.5 border-t border-slate-100 text-[10px]">
                           <span className="text-emerald-700 font-bold block">
-                            الافتتاحي لليوم التالي ({nextOpening.nextDate}):
+                            {formatOpeningCaption(nextOpening)}
                           </span>
                           <span className="font-mono font-black text-emerald-900 text-xs">
                             {formatMoney(nextOpening.value, db.settings.currency)}
@@ -980,6 +1046,49 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                     </div>
                   );
                 })}
+
+                {/* Frozen / Set-Aside Cash Card */}
+                <div className="bg-amber-50/80 p-4 rounded-xl border-2 border-amber-300 shadow-2xs flex flex-col justify-between gap-2">
+                  <div>
+                    <div className="flex items-center justify-between gap-1 mb-1">
+                      <span className="text-xs font-black text-amber-950 flex items-center gap-1">
+                        <Lock className="w-3.5 h-3.5 text-amber-700" />
+                        <span>المبلغ المجمد</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFreezeDirection('freeze');
+                          setFreezeAmount(0);
+                          setFreezeNote('');
+                          setShowFreezeModal(true);
+                        }}
+                        className="px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-[10px] font-bold cursor-pointer"
+                      >
+                        تجميد / فك
+                      </button>
+                    </div>
+                    <span className="text-base sm:text-lg font-black font-mono text-amber-950">
+                      {formatMoney(frozenBal, db.settings.currency)}
+                    </span>
+                  </div>
+                  <div className="pt-1.5 border-t border-amber-200/80 text-[10px]">
+                    {frozenOpening ? (
+                      <>
+                        <span className="text-amber-800 font-bold block">
+                          {formatOpeningCaption(frozenOpening)}
+                        </span>
+                        <span className="font-mono font-black text-amber-950 text-xs">
+                          {formatMoney(frozenOpening.value, db.settings.currency)}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-amber-800 font-bold block">
+                        رصيد محفوظ جانباً (خارج فكة الدرج)
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
             );
           })()}
@@ -1586,6 +1695,92 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                 <button type="button" onClick={() => setShowTransferModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold">إلغاء</button>
                 <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-black disabled:opacity-50 text-white rounded text-xs font-bold">
                   {isSubmitting ? 'جارٍ التنفيذ...' : 'تنفيذ التحويل وقيده'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Freeze / Unfreeze Cash Reserve */}
+      {showFreezeModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-3">
+          <div className="bg-white rounded-2xl w-full max-w-sm p-4 space-y-3 border border-amber-200">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+              <h2 className="text-sm font-black text-slate-900 flex items-center gap-1.5">
+                <Lock className="w-4 h-4 text-amber-600" />
+                <span>إدارة المبلغ المجمد (فرع {currentBranch.name})</span>
+              </h2>
+              <button type="button" onClick={() => setShowFreezeModal(false)} className="text-slate-400 hover:text-slate-700 cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-center text-xs bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+              <div>
+                <span className="text-[10px] text-slate-500 block">نقدي بالدرج (الفكة)</span>
+                <strong className="font-mono text-slate-950">{formatMoney(calculateTreasuryBalance(db, 'نقدي', targetBranchId), db.settings.currency)}</strong>
+              </div>
+              <div>
+                <span className="text-[10px] text-amber-800 block">المبلغ المجمد الحالي</span>
+                <strong className="font-mono text-amber-950">{formatMoney(calculateFrozenTreasuryBalance(db, targetBranchId), db.settings.currency)}</strong>
+              </div>
+            </div>
+            <form onSubmit={handleSaveFreeze} className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">نوع العملية</label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setFreezeDirection('freeze')}
+                    className={`py-2 px-2 rounded-lg text-xs font-black border cursor-pointer ${
+                      freezeDirection === 'freeze'
+                        ? 'bg-amber-600 text-white border-amber-700'
+                        : 'bg-slate-50 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    تجميد من النقدي → المجمد
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFreezeDirection('unfreeze')}
+                    className={`py-2 px-2 rounded-lg text-xs font-black border cursor-pointer ${
+                      freezeDirection === 'unfreeze'
+                        ? 'bg-emerald-600 text-white border-emerald-700'
+                        : 'bg-slate-50 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    فك تجميد → النقدي بالدرج
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">المبلغ *</label>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="any"
+                  required
+                  value={freezeAmount === 0 ? '' : freezeAmount}
+                  placeholder="0.00"
+                  onFocus={e => e.target.select()}
+                  onChange={e => setFreezeAmount(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-black"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1">ملاحظة (اختياري)</label>
+                <input
+                  type="text"
+                  value={freezeNote}
+                  onChange={e => setFreezeNote(e.target.value)}
+                  placeholder="مثال: تجنيب فئة 200 وترك الفكة بالدرج"
+                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setShowFreezeModal(false)} className="px-3 py-1.5 bg-slate-100 rounded text-xs font-bold cursor-pointer">إلغاء</button>
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded text-xs font-black cursor-pointer">
+                  {isSubmitting ? 'جارٍ التنفيذ...' : freezeDirection === 'freeze' ? 'تحويل إلى المجمد' : 'إرجاع إلى النقدي'}
                 </button>
               </div>
             </form>
