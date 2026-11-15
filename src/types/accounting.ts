@@ -442,6 +442,7 @@ export interface DailyClosing {
   frozenCash?: number;
   frozenOpeningCash?: number;
   frozenTodayNet?: number;
+  withdrawnProfit?: number;
   status: 'مفتوح' | 'مغلق';
   notes?: string;
   createdAt: string;

@@ -1685,7 +1685,8 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
     } else if (
       tr.sourceType === 'purchase' ||
       tr.sourceType === 'sale_return' ||
-      tr.sourceType === 'payment'
+      tr.sourceType === 'payment' ||
+      tr.sourceType === 'profit_withdrawal'
     ) {
       targetDir = 'out';
     } else if (tr.description) {

@@ -542,6 +542,7 @@ export function defaultAccounts(): Account[] {
     { id: 'acc_vat', code: '2201', name: 'ضريبة القيمة المضافة المستحقة', type: 'liability', isSystem: true },
     { id: 'acc_equity', code: '3101', name: 'رأس المال وحقوق الملكية', type: 'equity', isSystem: true },
     { id: 'acc_retained_earnings', code: '3201', name: 'الأرباح والخسائر المرحلة (السنوات السابقة)', type: 'equity', isSystem: true },
+    { id: 'acc_profit_drawings', code: '3202', name: 'مسحوبات الأرباح الموزعة (يومية)', type: 'equity', isSystem: true },
     { id: 'acc_sales', code: '4101', name: 'إيراد المبيعات', type: 'revenue', isSystem: true },
     { id: 'acc_other_rev', code: '4201', name: 'إيرادات تشغيلية وأخرى', type: 'revenue', isSystem: true },
     { id: 'acc_cogs', code: '5101', name: 'تكلفة البضاعة المباعة (COGS)', type: 'expense', isSystem: true },
@@ -2878,6 +2879,101 @@ export function executeCashFreezeTransfer(
     updated,
     isFreeze ? 'تجميد مبلغ نقدي' : 'فك تجميد مبلغ نقدي',
     `${isFreeze ? 'تجميد' : 'فك تجميد'} ${formatMoney(cleanAmt, updated.settings.currency)} (${targetBranchName})${noteSuffix}`
+  );
+
+  return { ok: true, db: updated };
+}
+
+/**
+ * Permanently withdraw daily gross profit out of the cash drawer ('نقدي')
+ * without recording an Expense, so cumulative ProfitsView & Reports remain 100% untouched.
+ */
+export function executeProfitWithdrawalFromDrawer(
+  db: AccountingDB,
+  params: {
+    amount: number;
+    date?: string;
+    note?: string;
+    branchId: string;
+    branchName: string;
+  }
+): { ok: true; db: AccountingDB } | { ok: false; error: string } {
+  const cleanAmt = roundMoney(params.amount);
+  if (!isFinitePositive(cleanAmt)) {
+    return { ok: false, error: 'يرجى إدخال مبلغ أرباح صحيح أكبر من صفر.' };
+  }
+
+  const targetBranchId = params.branchId || db.branches?.[0]?.id || 'br_main';
+  const targetBranchName = params.branchName || db.branches?.[0]?.name || 'الفرع الرئيسي';
+  const cashAvail = calculateTreasuryBalance(db, 'نقدي', targetBranchId);
+  if (cleanAmt > cashAvail + 0.001) {
+    return {
+      ok: false,
+      error: `الرصيد النقدي المتاح بالدرج حالياً (${formatMoney(cashAvail, db.settings.currency)}) لا يكفي لسحب ${formatMoney(cleanAmt, db.settings.currency)}.`
+    };
+  }
+
+  const entryDate = params.date || getTodayDate();
+  const nowIso = new Date().toISOString();
+  const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+  if (!updated.treasury) updated.treasury = [];
+  if (!updated.journals) updated.journals = [];
+  if (!updated.accounts) updated.accounts = defaultAccounts();
+
+  if (!updated.accounts.some(a => a.id === 'acc_profit_drawings')) {
+    updated.accounts.push({
+      id: 'acc_profit_drawings',
+      code: '3202',
+      name: 'مسحوبات الأرباح الموزعة (يومية)',
+      type: 'equity',
+      isSystem: true
+    });
+  }
+
+  const cashAcc = updated.accounts.find(a => a.id === 'acc_cash') || updated.accounts[0];
+  const drawingsAcc =
+    updated.accounts.find(a => a.id === 'acc_profit_drawings') ||
+    updated.accounts.find(a => a.id === 'acc_retained_earnings') ||
+    updated.accounts.find(a => a.id === 'acc_equity') ||
+    cashAcc;
+
+  const prwId = generateId('prw');
+  const noteSuffix = params.note?.trim() ? ` — ${params.note.trim()}` : '';
+
+  updated.treasury.unshift({
+    id: generateId('tr_prw'),
+    date: entryDate,
+    createdAt: nowIso,
+    direction: 'out',
+    amount: cleanAmt,
+    method: 'نقدي',
+    description: `إخراج وسحب أرباح اليومية من الدرج النقدي (نهائي)${noteSuffix}`,
+    sourceType: 'profit_withdrawal',
+    sourceId: prwId,
+    branchId: targetBranchId,
+    branchName: targetBranchName
+  });
+
+  if (drawingsAcc.id !== cashAcc.id) {
+    updated.journals.unshift({
+      id: generateId('jrn_prw'),
+      number: `J-${Date.now().toString().slice(-6)}`,
+      date: entryDate,
+      description: `سحب وإخراج أرباح يومية من الدرج (${targetBranchName})${noteSuffix}`,
+      sourceType: 'manual',
+      sourceId: prwId,
+      lines: [
+        { accountId: drawingsAcc.id, accountCode: drawingsAcc.code, accountName: drawingsAcc.name, debit: cleanAmt, credit: 0, notes: 'سحب أرباح يومية من الدرج' },
+        { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: 0, credit: cleanAmt, notes: 'صرف نقدي من الدرج (سحب أرباح)' }
+      ],
+      createdAt: nowIso
+    });
+  }
+
+  logAudit(
+    updated,
+    'سحب وإخراج أرباح يومية',
+    `تم سحب أرباح بقيمة ${formatMoney(cleanAmt, updated.settings.currency)} من الدرج النقدي (${targetBranchName})${noteSuffix}`
   );
 
   return { ok: true, db: updated };
