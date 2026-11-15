@@ -1071,6 +1071,8 @@ export default function App() {
       <InvoicePrintModal
         invoice={previewInvoice}
         settings={db.settings}
+        branches={db.branches}
+        parties={[...(db.customers || []), ...(db.suppliers || [])]}
         autoPrint={previewAutoPrint}
         onClose={() => {
           setPreviewInvoice(null);

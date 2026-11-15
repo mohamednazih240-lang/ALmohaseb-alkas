@@ -272,15 +272,22 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
     }
 
     const isRet = purchasesSection === 'returns';
-    const docs: MovementPrintBlock[] = purchaseInvoices.map(inv => ({
+    const docs: MovementPrintBlock[] = purchaseInvoices.map(inv => {
+      const matchedSupp = db.suppliers.find(
+        s =>
+          (inv.partyId && s.id === inv.partyId) ||
+          (inv.partyCode && s.code && s.code.trim().toLowerCase() === inv.partyCode.trim().toLowerCase()) ||
+          (inv.partyName && inv.partyName !== 'نقدي' && inv.partyName !== 'مورد نقدي' && inv.partyName !== 'مورد عام' && s.name.trim().toLowerCase() === inv.partyName.trim().toLowerCase())
+      );
+      return {
       title: isRet ? 'فاتورة مرتجع مشتريات للمورد' : 'فاتورة مشتريات وتوريد',
       serialNo: inv.number,
       date: inv.date,
       time: inv.time,
       partyLabel: 'المورد',
       partyName: inv.partyName || 'مورد عام',
-      partyCode: inv.partyCode || inv.partyId,
-      partySubId: inv.partyPhone,
+      partyCode: inv.partyCode || matchedSupp?.code || inv.partyId,
+      partySubId: inv.partyPhone || matchedSupp?.phone,
       statement: inv.notes || inv.jobSite,
       badge: inv.status,
       typeTitle: isRet ? 'فاتورة مرتجع مشتريات للمورد' : 'فاتورة مشتريات وتوريد',
@@ -309,7 +316,8 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
         { label: isRet ? 'المتبقي خصماً من رصيد المورد' : 'المتبقي آجل للمورد', value: `${formatCleanNumber(inv.remaining)} ${db.settings.currency}`, highlight: inv.remaining > 0 }
       ].filter(Boolean) as any[],
       footerNotes: inv.notes || db.settings.notes || (isRet ? 'تم إرجاع البضاعة للمورد واسترداد القيمة وتحديث المخزن' : 'تم استلام وتوريد البضاعة للمخزن وقيد الحساب')
-    }));
+      };
+    });
 
     setPrintDocuments(docs);
     setPrintDocTitle(`${isRet ? 'فواتير مرتجع المشتريات' : 'فواتير المشتريات'} (${purchaseInvoices.length} فاتورة)`);

@@ -630,6 +630,7 @@ export interface AppSettings {
   company: string;
   companyCode?: string; // كود الشركة الفريد لتسجيل الدخول والمزامنة المتعددة (Tenant Code)
   companyPin?: string; // الرقم السري للدخول إلى الشركة (قابل للتعديل من قبل المدير)
+  mainBranchName?: string; // اسم الفرع الرئيسي للمعرض / المحل (يظهر في الفواتير)
   phone: string;
   address: string;
   currency: string;

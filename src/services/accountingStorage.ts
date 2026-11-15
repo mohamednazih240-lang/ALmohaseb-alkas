@@ -2012,23 +2012,28 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
 
   db.users = cleanUsers;
 
-  // Single unified branch: synchronized with user-defined company name
+  // Single unified branch: respect user-defined main branch name without overwriting
   const compName = db.settings.company?.trim() || 'شركة الموان';
+  const savedMainBranchName = db.settings.mainBranchName?.trim();
   if (!db.branches || db.branches.length === 0) {
     db.branches = [
       {
         id: 'br_mawan',
-        name: `الفرع الرئيسي - ${compName}`,
+        name: savedMainBranchName || `الفرع الرئيسي - ${compName}`,
         code: 'BR-01',
         isMain: true,
         pin: db.settings.companyPin || '2919'
       }
     ];
   } else {
-    db.branches[0].pin = db.settings.companyPin || db.branches[0].pin || '2919';
-    if (db.branches[0].name.startsWith('الفرع الرئيسي')) {
-      db.branches[0].name = `الفرع الرئيسي - ${compName}`;
+    const mainBr = db.branches.find(b => b.isMain) || db.branches[0];
+    mainBr.pin = db.settings.companyPin || mainBr.pin || '2919';
+    if (savedMainBranchName) {
+      mainBr.name = savedMainBranchName;
+    } else if (!mainBr.name || !mainBr.name.trim()) {
+      mainBr.name = `الفرع الرئيسي - ${compName}`;
     }
+    db.settings.mainBranchName = mainBr.name;
   }
 
   // Warehouses: synchronized with user-defined company name

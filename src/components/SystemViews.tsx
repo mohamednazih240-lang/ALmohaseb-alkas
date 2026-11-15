@@ -324,12 +324,18 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
   // Settings form states
   const [settingsForm, setSettingsForm] = useState<AppSettings>({ ...db.settings });
+  const [mainBranchName, setMainBranchName] = useState<string>(() => {
+    const primaryBr = db.branches?.find(b => b.isMain) || db.branches?.[0];
+    return primaryBr?.name || db.settings.mainBranchName || 'الفرع الرئيسي';
+  });
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [settingsNotice, setSettingsNotice] = useState<{ type: 'success' | 'warning' | 'error'; text: string } | null>(null);
 
   React.useEffect(() => {
     setSettingsForm({ ...db.settings });
-  }, [db.settings]);
+    const primaryBr = db.branches?.find(b => b.isMain) || db.branches?.[0];
+    setMainBranchName(primaryBr?.name || db.settings.mainBranchName || 'الفرع الرئيسي');
+  }, [db.settings, db.branches]);
 
   // Compress logo to crisp dimensions (max 320x160) and guaranteed <= 250KB
   // Guarantees zero rejection by Firestore 1MB document limit and zero quota crashes
@@ -687,16 +693,39 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
       if (editingBranch) {
         const idx = updated.branches.findIndex(b => b.id === editingBranch.id);
         if (idx !== -1) {
+          const cleanBrName = branchName.trim();
           updated.branches[idx] = {
             ...updated.branches[idx],
-            name: branchName.trim(),
+            name: cleanBrName,
             code: branchCode.trim() || `BR-${Date.now().toString().slice(-3)}`,
             address: branchAddress.trim(),
             phone: branchPhone.trim(),
             isMain: branchIsMain,
             pin: cleanPin
           };
-          logAudit(updated, 'تعديل فرع ورقم سري', branchName);
+          if (branchIsMain || idx === 0) {
+            const brId = updated.branches[idx].id;
+            updated.settings.mainBranchName = cleanBrName;
+            updated.users = (updated.users || []).map(u =>
+              !u.branchId || u.branchId === brId || u.branchId === 'br_main' || u.branchId === 'br_mawan'
+                ? { ...u, branchName: cleanBrName }
+                : u
+            );
+            if (updated.currentUser && (!updated.currentUser.branchId || updated.currentUser.branchId === brId || updated.currentUser.branchId === 'br_main' || updated.currentUser.branchId === 'br_mawan')) {
+              updated.currentUser = { ...updated.currentUser, branchName: cleanBrName };
+            }
+            updated.invoices = (updated.invoices || []).map(inv =>
+              !inv.branchId || inv.branchId === brId || inv.branchId === 'br_main' || inv.branchId === 'br_mawan'
+                ? { ...inv, branchName: cleanBrName }
+                : inv
+            );
+            updated.quotes = (updated.quotes || []).map(qt =>
+              !qt.branchId || qt.branchId === brId || qt.branchId === 'br_main' || qt.branchId === 'br_mawan'
+                ? { ...qt, branchName: cleanBrName }
+                : qt
+            );
+          }
+          logAudit(updated, 'تعديل فرع ورقم سري', cleanBrName);
         }
       } else {
         const newBranch: Branch = {
@@ -815,13 +844,40 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
       updated.settings = { ...settingsForm };
       logAudit(updated, 'تحديث إعدادات المنشأة', updated.settings.company);
 
-      // Sync company name to primary branch and warehouse so invoices display the user-defined name
+      // Save user-defined main branch name and sync across branches, invoices, quotes, and users
       const compName = updated.settings.company?.trim() || 'شركة الموان';
+      const primaryIdx = updated.branches ? updated.branches.findIndex(b => b.isMain) : -1;
+      const targetBranchIdx = primaryIdx !== -1 ? primaryIdx : 0;
+      const customMainBranch =
+        mainBranchName.trim() ||
+        updated.branches?.[targetBranchIdx]?.name?.trim() ||
+        `الفرع الرئيسي - ${compName}`;
+
+      updated.settings.mainBranchName = customMainBranch;
+
       if (updated.branches && updated.branches.length > 0) {
-        if (updated.branches[0].name.startsWith('الفرع الرئيسي')) {
-          updated.branches[0].name = `الفرع الرئيسي - ${compName}`;
+        updated.branches[targetBranchIdx].name = customMainBranch;
+        updated.branches[targetBranchIdx].pin = updated.settings.companyPin || updated.branches[targetBranchIdx].pin || '2919';
+        const mainBrId = updated.branches[targetBranchIdx].id;
+
+        updated.users = (updated.users || []).map(u =>
+          !u.branchId || u.branchId === mainBrId || u.branchId === 'br_main' || u.branchId === 'br_mawan'
+            ? { ...u, branchName: customMainBranch }
+            : u
+        );
+        if (updated.currentUser && (!updated.currentUser.branchId || updated.currentUser.branchId === mainBrId || updated.currentUser.branchId === 'br_main' || updated.currentUser.branchId === 'br_mawan')) {
+          updated.currentUser = { ...updated.currentUser, branchName: customMainBranch };
         }
-        updated.branches[0].pin = updated.settings.companyPin || '2919';
+        updated.invoices = (updated.invoices || []).map(inv =>
+          !inv.branchId || inv.branchId === mainBrId || inv.branchId === 'br_main' || inv.branchId === 'br_mawan'
+            ? { ...inv, branchName: customMainBranch }
+            : inv
+        );
+        updated.quotes = (updated.quotes || []).map(qt =>
+          !qt.branchId || qt.branchId === mainBrId || qt.branchId === 'br_main' || qt.branchId === 'br_mawan'
+            ? { ...qt, branchName: customMainBranch }
+            : qt
+        );
       }
       if (updated.warehouses && updated.warehouses.length > 0) {
         if (updated.warehouses[0].name.includes('الرئيسي')) {
@@ -1728,6 +1784,18 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
                   onChange={e => setSettingsForm({ ...settingsForm, phone: e.target.value })}
                   placeholder="مثال: 01012345678 / 01198765432"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono focus:bg-white focus:border-black outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">اسم الفرع الرئيسي للمعرض / المحل (يظهر في الفواتير)</label>
+                <input
+                  type="text"
+                  required
+                  value={mainBranchName}
+                  onChange={e => setMainBranchName(e.target.value)}
+                  placeholder="مثال: الفرع الرئيسي - معرض الموان"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold focus:bg-white focus:border-black outline-none"
                 />
               </div>
 

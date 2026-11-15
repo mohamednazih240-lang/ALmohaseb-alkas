@@ -21,7 +21,9 @@ import {
 import {
   Invoice,
   AppSettings,
-  InvoiceAuditEntry
+  InvoiceAuditEntry,
+  Branch,
+  Party
 } from '../types/accounting';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { formatAuditDateTime } from './InvoiceAuditLogModal';
@@ -29,6 +31,8 @@ import { formatAuditDateTime } from './InvoiceAuditLogModal';
 interface InvoicePrintModalProps {
   invoice: Invoice | null;
   settings: AppSettings;
+  branches?: Branch[];
+  parties?: Party[];
   onClose: () => void;
   autoPrint?: boolean;
 }
@@ -51,6 +55,8 @@ export const formatMoneyClean = (val: number | string | undefined): string => {
 export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
   invoice,
   settings,
+  branches = [],
+  parties = [],
   onClose,
   autoPrint = false
 }) => {
@@ -94,19 +100,45 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
     ? (isTaxTitle ? 'بيان' : customTitle)
     : 'بيان مشتريات';
 
-  // Deduplicate branch/address sub-line when branchName repeats the company name
+  // Resolve active branch name (respecting user-edited main branch name in Settings)
+  const matchedBranch =
+    branches.find(b => b.id === invoice.branchId) ||
+    branches.find(b => b.isMain) ||
+    branches[0];
+  const resolvedBranchName = (matchedBranch?.name || invoice.branchName || settings.mainBranchName || '').trim();
+
+  // Deduplicate sub-line only when it literally equals company name or repeats the default "الفرع الرئيسي - <company>"
   const companyNameClean = (settings.company || '').trim();
-  const rawSubLine = (invoice.branchName || settings.address || 'المقر الرئيسي').trim();
+  const rawSubLine = (resolvedBranchName || settings.address || 'المقر الرئيسي').trim();
   let displaySubLine = rawSubLine;
-  if (companyNameClean && displaySubLine.includes(companyNameClean)) {
-    displaySubLine = displaySubLine
-      .replace(companyNameClean, '')
-      .replace(/^[\s\-–—•|/]+|[\s\-–—•|/]+$/g, '')
-      .trim();
+  if (companyNameClean) {
+    if (displaySubLine === companyNameClean) {
+      displaySubLine = '';
+    } else if (displaySubLine === `الفرع الرئيسي - ${companyNameClean}`) {
+      displaySubLine = 'الفرع الرئيسي';
+    }
   }
-  if (!displaySubLine && settings.address && !settings.address.includes(companyNameClean)) {
+  if (!displaySubLine && settings.address && settings.address.trim() !== companyNameClean) {
     displaySubLine = settings.address.trim();
   }
+
+  // Resolve customer/supplier code, name, and phone from invoice or live parties directory
+  const rawPartyName = (invoice.partyName || '').trim();
+  const isGenericCashParty =
+    !rawPartyName ||
+    rawPartyName === 'نقدي' ||
+    rawPartyName === 'عميل نقدي' ||
+    rawPartyName === 'مورد نقدي' ||
+    rawPartyName === 'مورد عام';
+  const matchedParty = parties.find(
+    p =>
+      (invoice.partyId && p.id === invoice.partyId) ||
+      (!isGenericCashParty && invoice.partyCode && p.code && p.code.trim().toLowerCase() === invoice.partyCode.trim().toLowerCase()) ||
+      (!isGenericCashParty && p.name && p.name.trim().toLowerCase() === rawPartyName.toLowerCase())
+  );
+  const resolvedPartyCode = (invoice.partyCode || matchedParty?.code || invoice.partyId || '—').trim();
+  const resolvedPartyName = (rawPartyName || matchedParty?.name || (isSale ? 'عميل نقدي' : 'مورد عام')).trim();
+  const resolvedPartyPhone = (invoice.partyPhone || matchedParty?.phone || '').trim();
 
   // Helper to extract sequential number starting from 1
   const rawInvoiceNo = invoice.number?.trim() || (invoice as any).id?.replace(/\D/g, '') || '1';
@@ -443,16 +475,16 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                     >
                       <div className="text-[10px] mb-0.5">
                         <strong>كود {isSale ? 'العميل' : 'المورد'}: </strong>
-                        <bdi dir="ltr" className="font-mono font-bold mr-1">{invoice.partyCode || invoice.partyId || '—'}</bdi>
+                        <bdi dir="ltr" className="font-mono font-bold mr-1">{resolvedPartyCode}</bdi>
                       </div>
                       <div className="text-[10.5px]">
                         <strong>اسم {isSale ? 'العميل' : 'المورد'}: </strong>
-                        <span className="font-bold">{invoice.partyName || (isSale ? 'عميل نقدي' : 'مورد عام')}</span>
+                        <span className="font-bold">{resolvedPartyName}</span>
                       </div>
-                      {invoice.partyPhone ? (
-                        <div className="text-[9.5px] mt-0.5 text-slate-700">
-                          <strong>الهاتف: </strong>
-                          <span dir="ltr">{invoice.partyPhone}</span>
+                      {resolvedPartyPhone ? (
+                        <div className="text-[10px] mt-0.5 text-slate-800 font-semibold">
+                          <strong>رقم الهاتف: </strong>
+                          <bdi dir="ltr" className="font-mono font-bold">{resolvedPartyPhone}</bdi>
                         </div>
                       ) : null}
                     </div>
@@ -725,7 +757,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                 <div className="flex items-center gap-2 text-slate-500 text-[11px]">
                   <span>الأصناف: <strong className="text-slate-800">{invoice.items.length}</strong></span>
                   <span>•</span>
-                  <span>الفرع: <strong className="text-slate-800">{invoice.branchName || 'الرئيسي'}</strong></span>
+                  <span>الفرع: <strong className="text-slate-800">{resolvedBranchName || 'الرئيسي'}</strong></span>
                   <span>•</span>
                   <span>العمليات: <strong className="text-blue-700 font-mono font-bold">{auditLogs.length}</strong></span>
                 </div>

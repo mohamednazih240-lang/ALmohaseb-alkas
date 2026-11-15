@@ -276,15 +276,22 @@ export const SalesView: React.FC<SalesViewProps> = ({
       return;
     }
 
-    const docs: MovementPrintBlock[] = salesInvoices.map(inv => ({
+    const docs: MovementPrintBlock[] = salesInvoices.map(inv => {
+      const matchedCust = db.customers.find(
+        c =>
+          (inv.partyId && c.id === inv.partyId) ||
+          (inv.partyCode && c.code && c.code.trim().toLowerCase() === inv.partyCode.trim().toLowerCase()) ||
+          (inv.partyName && inv.partyName !== 'نقدي' && inv.partyName !== 'عميل نقدي' && c.name.trim().toLowerCase() === inv.partyName.trim().toLowerCase())
+      );
+      return {
       title: inv.invoiceKind === 'wholesale' ? 'فاتورة مبيعات جملة' : 'فاتورة مبيعات',
       serialNo: inv.number,
       date: inv.date,
       time: inv.time,
       partyLabel: 'العميل',
       partyName: inv.partyName || 'عميل نقدي',
-      partyCode: inv.partyCode || inv.partyId,
-      partySubId: inv.partyPhone,
+      partyCode: inv.partyCode || matchedCust?.code || inv.partyId,
+      partySubId: inv.partyPhone || matchedCust?.phone,
       statement: inv.notes || inv.jobSite,
       badge: inv.status,
       typeTitle: inv.invoiceKind === 'wholesale' ? 'فاتورة مبيعات جملة' : 'فاتورة مبيعات',
@@ -313,7 +320,8 @@ export const SalesView: React.FC<SalesViewProps> = ({
         { label: 'المتبقي آجل', value: `${formatCleanNumber(inv.remaining)} ${db.settings.currency}`, highlight: inv.remaining > 0 }
       ].filter(Boolean) as any[],
       footerNotes: inv.notes || db.settings.notes || 'البضاعة المباعة ترد وتستبدل خلال 14 يوماً وفقاً للشروط والأحكام'
-    }));
+      };
+    });
 
     setPrintDocuments(docs);
     setPrintDocTitle(`فواتير المبيعات المحددة (${salesInvoices.length} فاتورة)`);

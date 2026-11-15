@@ -340,9 +340,11 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                         <h2>{settings.company || 'اسم المنشأة'}</h2>
                         {(() => {
                           const comp = (settings.company || '').trim();
-                          let addr = (settings.address || 'المقر الرئيسي').trim();
-                          if (comp && addr.includes(comp)) {
-                            addr = addr.replace(comp, '').replace(/^[\s\-–—]+|[\s\-–—]+$/g, '').trim();
+                          let addr = (settings.mainBranchName || settings.address || 'المقر الرئيسي').trim();
+                          if (comp && addr === comp) {
+                            addr = '';
+                          } else if (comp && addr === `الفرع الرئيسي - ${comp}`) {
+                            addr = 'الفرع الرئيسي';
                           }
                           return addr ? <p>{addr}</p> : null;
                         })()}
@@ -398,9 +400,9 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                             <span className="font-bold">{doc.partyName || 'طرف نقدي عام'}</span>
                           </div>
                           {doc.partySubId ? (
-                            <div className="text-[9.5px] mt-0.5 text-slate-700">
-                              <strong>الهاتف / المعرف: </strong>
-                              <span dir="ltr">{doc.partySubId}</span>
+                            <div className="text-[10px] mt-0.5 text-slate-800 font-semibold">
+                              <strong>رقم الهاتف: </strong>
+                              <bdi dir="ltr" className="font-mono font-bold">{doc.partySubId}</bdi>
                             </div>
                           ) : null}
                         </div>

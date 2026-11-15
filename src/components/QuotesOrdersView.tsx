@@ -86,6 +86,16 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       : roundMoney((q.items || []).reduce((s, it) => s + (Number(it.total) || 0), 0));
     const payMethod: PaymentMethod = q.paymentMethod || 'نقدي';
     const isCredit = payMethod === 'آجل';
+    const matchedCust = db.customers.find(
+      c =>
+        (q.partyId && c.id === q.partyId) ||
+        (q.partyCode && c.code && c.code.trim().toLowerCase() === q.partyCode.trim().toLowerCase()) ||
+        (q.partyName && q.partyName !== 'نقدي' && c.name.trim().toLowerCase() === q.partyName.trim().toLowerCase())
+    );
+    const resolvedBranch =
+      (db.branches || []).find(b => b.id === q.branchId) ||
+      (db.branches || []).find(b => b.isMain) ||
+      (db.branches || [])[0];
     return {
       id: q.id,
       number: q.number,
@@ -95,10 +105,10 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       time: q.time,
       jobSite: q.jobSite || q.notes,
       priceType: q.priceType,
-      partyId: q.partyId,
-      partyCode: q.partyCode,
+      partyId: q.partyId || matchedCust?.id,
+      partyCode: q.partyCode || matchedCust?.code,
       partyName: q.partyName,
-      partyPhone: q.partyPhone,
+      partyPhone: q.partyPhone || matchedCust?.phone,
       warehouseId: db.warehouses?.[0]?.id || 'wh_main',
       paymentMethod: payMethod,
       payments: !isCredit ? [{ method: payMethod, amount: roundMoney(q.total) }] : [],
@@ -115,7 +125,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       status: isCredit ? 'آجل' : 'مدفوع',
       notes: q.notes || q.jobSite,
       branchId: q.branchId || targetBranchId,
-      branchName: q.branchName || currentBranch.name,
+      branchName: resolvedBranch?.name || q.branchName || currentBranch.name,
       createdBy: q.createdBy,
       createdAt: q.createdAt,
       items: q.items || []
@@ -210,6 +220,13 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       const remainingVal = isCredit ? cleanTotal : 0;
       const nowTime = new Date().toTimeString().slice(0, 5);
 
+      const matchedCustForConv = workingDb.customers.find(
+        c =>
+          (q.partyId && c.id === q.partyId) ||
+          (q.partyCode && c.code && c.code.trim().toLowerCase() === q.partyCode.trim().toLowerCase()) ||
+          (q.partyName && q.partyName !== 'نقدي' && c.name.trim().toLowerCase() === q.partyName.trim().toLowerCase())
+      );
+
       const newInvoice: Invoice = {
         id: invId,
         number: invNumber,
@@ -219,10 +236,10 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
         time: nowTime,
         jobSite: q.jobSite,
         priceType: q.priceType || 'cash',
-        partyId: q.partyId,
-        partyCode: q.partyCode,
+        partyId: q.partyId || matchedCustForConv?.id,
+        partyCode: q.partyCode || matchedCustForConv?.code,
         partyName: q.partyName === 'نقدي' ? 'عميل نقدي' : q.partyName,
-        partyPhone: q.partyPhone,
+        partyPhone: q.partyPhone || matchedCustForConv?.phone,
         warehouseId,
         paymentMethod: chosenMethod,
         payments: !isCredit && cleanTotal > 0 ? [{ method: chosenMethod, amount: cleanTotal }] : [],
