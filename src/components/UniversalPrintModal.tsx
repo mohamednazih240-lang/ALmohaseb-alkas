@@ -338,7 +338,14 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                     <div className="company-header" id={`invoiceHeader-${docIdx}`}>
                       <div className="header-right">
                         <h2>{settings.company || 'اسم المنشأة'}</h2>
-                        <p>{settings.address || 'المقر الرئيسي'}</p>
+                        {(() => {
+                          const comp = (settings.company || '').trim();
+                          let addr = (settings.address || 'المقر الرئيسي').trim();
+                          if (comp && addr.includes(comp)) {
+                            addr = addr.replace(comp, '').replace(/^[\s\-–—]+|[\s\-–—]+$/g, '').trim();
+                          }
+                          return addr ? <p>{addr}</p> : null;
+                        })()}
                       </div>
 
                       <div className="header-center">
@@ -542,9 +549,9 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
                             key={smIdx}
                             className="total-row"
                             style={{
-                              fontWeight: sm.isTotal ? 900 : 700,
+                              fontWeight: sm.isTotal ? 800 : 600,
                               fontSize: sm.isTotal ? '12px' : '11px',
-                              borderTop: sm.isTotal ? '1.5px dashed #000' : 'none',
+                              borderTop: sm.isTotal ? '1px dashed #94a3b8' : 'none',
                               paddingTop: sm.isTotal ? '4px' : '2px',
                               marginTop: sm.isTotal ? '3px' : '0'
                             }}

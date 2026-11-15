@@ -262,14 +262,33 @@ export interface Quote {
   id: string;
   number: string;
   date: string;
+  time?: string;
   partyId?: string;
+  partyCode?: string;
   partyName: string;
+  partyPhone?: string;
+  jobSite?: string;
+  priceType?: 'cash' | 'wholesale' | 'buy';
+  paymentMethod?: PaymentMethod;
+  subtotal?: number;
+  discount?: number;
+  discountType?: 'val' | 'percent';
+  tax?: number;
+  taxType?: 'val' | 'percent';
+  extraIncomeName?: string;
+  extraIncomeVal?: number;
   items: InvoiceItem[];
   total: number;
   status: 'جديد' | 'مقبول' | 'مرفوض' | 'تم التحويل';
   notes?: string;
   branchId?: string;
   branchName?: string;
+  createdBy?: string;
+  createdAt?: string;
+  updatedBy?: string;
+  updatedAt?: string;
+  convertedInvoiceId?: string;
+  convertedInvoiceNumber?: string;
 }
 
 export interface Order {

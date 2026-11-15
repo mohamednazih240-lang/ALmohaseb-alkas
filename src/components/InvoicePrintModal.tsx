@@ -84,12 +84,29 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
 
   if (!invoice) return null;
 
+  const isQuote = invoice.invoiceKind === 'quote';
   const isSale = invoice.type === 'sale';
   const customTitle = settings.invoiceTitle?.trim();
   const isTaxTitle = !customTitle || customTitle.includes('ضريب') || customTitle.includes('فاتورة مبيعات') || customTitle.includes('فاتورة ضريبية');
-  const invoiceTypeTitle = isSale
+  const invoiceTypeTitle = isQuote
+    ? 'عرض سعر'
+    : isSale
     ? (isTaxTitle ? 'بيان' : customTitle)
     : 'بيان مشتريات';
+
+  // Deduplicate branch/address sub-line when branchName repeats the company name
+  const companyNameClean = (settings.company || '').trim();
+  const rawSubLine = (invoice.branchName || settings.address || 'المقر الرئيسي').trim();
+  let displaySubLine = rawSubLine;
+  if (companyNameClean && displaySubLine.includes(companyNameClean)) {
+    displaySubLine = displaySubLine
+      .replace(companyNameClean, '')
+      .replace(/^[\s\-–—•|/]+|[\s\-–—•|/]+$/g, '')
+      .trim();
+  }
+  if (!displaySubLine && settings.address && !settings.address.includes(companyNameClean)) {
+    displaySubLine = settings.address.trim();
+  }
 
   // Helper to extract sequential number starting from 1
   const rawInvoiceNo = invoice.number?.trim() || (invoice as any).id?.replace(/\D/g, '') || '1';
@@ -226,7 +243,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-xs sm:text-sm font-black text-slate-900">
-                معاينة الفاتورة ({rawInvoiceNo})
+                معاينة {isQuote ? 'عرض السعر' : 'الفاتورة'} ({rawInvoiceNo})
               </h2>
 
               {/* Tab Switcher: Preview vs Audit Log */}
@@ -241,7 +258,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                   }`}
                 >
                   <Eye className="w-3.5 h-3.5" />
-                  <span>معاينة الفاتورة</span>
+                  <span>معاينة {isQuote ? 'عرض السعر' : 'الفاتورة'}</span>
                 </button>
                 <button
                   type="button"
@@ -288,7 +305,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                     title="طباعة فورية بكامل الإطارات صفحة واحدة"
                   >
                     <Printer className="w-4 h-4" />
-                    <span>طباعة الفاتورة</span>
+                    <span>طباعة {isQuote ? 'عرض السعر' : 'الفاتورة'}</span>
                   </button>
                 </>
               ) : (
@@ -384,7 +401,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                 <div className="company-header">
                   <div className="header-right">
                     <h2>{settings.company || 'اسم الشركة'}</h2>
-                    <p>{invoice.branchName || settings.address || 'المقر الرئيسي'}</p>
+                    {displaySubLine ? <p>{displaySubLine}</p> : null}
                   </div>
                   <div className="header-center">
                     {settings.logo ? (
@@ -532,8 +549,8 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
 
                     return (
                       <>
-                        <div className="total-row" style={{ color: '#475569', fontSize: '10px' }}>
-                          <span>إجمالي عدد الأصناف / الكميات:</span>
+                        <div className="total-row" style={{ color: '#475569', fontSize: '10px', fontWeight: 600 }}>
+                          <span>إجمالي الكميات:</span>
                           <strong className="font-mono text-slate-800">{formatMoneyClean(invoice.items.reduce((s, it) => s + (Number(it.qty) || 0), 0))}</strong>
                         </div>
 
@@ -546,7 +563,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
 
                         {hasFees ? (
                           <div className="total-row" style={{ fontWeight: 600, fontSize: '11px', color: '#334155' }}>
-                            <span>رسوم النقل / الشحن (+):</span>
+                            <span>رسوم النقل (+):</span>
                             <span>{formatMoneyClean(feesAmount)} {settings.currency || 'ج.م'}</span>
                           </div>
                         ) : null}
@@ -565,39 +582,39 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
                           </div>
                         ) : null}
 
-                        <div className="total-row" style={{ borderTop: '1px solid #0f172a', paddingTop: '3px', marginTop: '2px' }}>
-                          <span>{discVal > 0 ? 'صافي إجمالي الفاتورة:' : 'إجمالي الفاتورة:'}</span>
+                        <div className="total-row" style={{ borderTop: '1px solid #94a3b8', paddingTop: '4px', marginTop: '3px', color: '#0f172a' }}>
+                          <span>{isQuote ? 'إجمالي عرض السعر:' : discVal > 0 ? 'صافي إجمالي الفاتورة:' : 'إجمالي الفاتورة:'}</span>
                           <span>{formatMoneyClean(effectiveTotal)} {settings.currency || 'ج.م'}</span>
                         </div>
 
-                        <div className="total-row" style={{ borderTop: '1px dashed #666', paddingTop: '4px', marginTop: '3px' }}>
+                        <div className="total-row" style={{ borderTop: '1px dashed #cbd5e1', paddingTop: '4px', marginTop: '3px', color: '#334155', fontWeight: 700 }}>
                           <span>
                             طريقة الدفع:{' '}
                             <span className="payment-status-badge">
                               {(() => {
                                 const methodLabels: Record<string, string> = {
-                                  'نقدي': 'كاش / نقدي',
-                                  'Vodafone Cash': 'فودافون كاش (Vodafone Cash)',
-                                  'InstaPay': 'إنستاباي (InstaPay)',
-                                  'Visa / POS': 'فيزا / ماكينة (Visa/POS)',
+                                  'نقدي': 'نقدي',
+                                  'Vodafone Cash': 'فودافون كاش',
+                                  'InstaPay': 'إنستاباي',
+                                  'Visa / POS': 'فيزا POS',
                                   'تحويل بنكي': 'تحويل بنكي',
-                                  'آجل': 'آجل ذمم'
+                                  'آجل': 'آجل'
                                 };
-                                if (effectivePaid <= 0) return 'آجل ذمم';
+                                if (effectivePaid <= 0) return 'آجل';
                                 const splits = (invoice.payments || []).filter(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0);
                                 const primaryLabel = splits.length > 1
                                   ? splits.map(s => `${methodLabels[s.method] || s.method} (${formatMoneyClean(s.amount)})`).join(' + ')
-                                  : (methodLabels[splits[0]?.method || invoice.paymentMethod || 'نقدي'] || invoice.paymentMethod || 'كاش / نقدي');
-                                return effectiveRemaining > 0 ? `${primaryLabel} (سداد جزئي)` : primaryLabel;
+                                  : (methodLabels[splits[0]?.method || invoice.paymentMethod || 'نقدي'] || invoice.paymentMethod || 'نقدي');
+                                return effectiveRemaining > 0 ? `${primaryLabel} (جزئي)` : primaryLabel;
                               })()}
                             </span>
                           </span>
-                          <span>المدفوع: <strong>{formatMoneyClean(effectivePaid)} {settings.currency || 'ج.م'}</strong></span>
+                          <span>المدفوع: <strong style={{ color: '#0f172a' }}>{formatMoneyClean(effectivePaid)} {settings.currency || 'ج.م'}</strong></span>
                         </div>
 
                         {effectiveRemaining > 0 ? (
                           <div className="total-row" style={{ color: '#b91c1c' }}>
-                            <span>المبلغ المتبقي (الآجل):</span>
+                            <span>المتبقي:</span>
                             <strong>{formatMoneyClean(effectiveRemaining)} {settings.currency || 'ج.م'}</strong>
                           </div>
                         ) : null}
@@ -778,7 +795,7 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
             title="طباعة الفاتورة فوراً"
           >
             <Printer className="w-4 h-4" />
-            <span>طباعة الفاتورة الآن ({paperSize === 'A5' ? 'مقاس A5' : paperSize === 'A4' ? 'مقاس A4' : 'حراري'})</span>
+            <span>طباعة {isQuote ? 'عرض السعر الآن' : 'الفاتورة الآن'} ({paperSize === 'A5' ? 'مقاس A5' : paperSize === 'A4' ? 'مقاس A4' : 'حراري'})</span>
           </button>
           <button
             type="button"

@@ -468,6 +468,8 @@ export default function App() {
 
             const hasCountDiff =
               (cloudDb.invoices?.length || 0) !== (prevDb.invoices?.length || 0) ||
+              (cloudDb.quotes?.length || 0) !== (prevDb.quotes?.length || 0) ||
+              (cloudDb.orders?.length || 0) !== (prevDb.orders?.length || 0) ||
               (cloudDb.vouchers?.length || 0) !== (prevDb.vouchers?.length || 0) ||
               (cloudDb.treasury?.length || 0) !== (prevDb.treasury?.length || 0) ||
               (cloudDb.dailyClosings?.length || 0) !== (prevDb.dailyClosings?.length || 0) ||

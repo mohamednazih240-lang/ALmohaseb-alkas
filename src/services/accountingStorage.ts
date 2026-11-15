@@ -2050,6 +2050,53 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
     db.currentUser = db.users[0];
   }
 
+  // ترحيل أي عروض أسعار تم حفظها خطأً سابقاً داخل db.invoices إلى سجل db.quotes وإزالة أي آثار مخزنية أو مالية خاطئة لها
+  const legacyQuoteInvoices = (db.invoices || []).filter(inv => inv.invoiceKind === 'quote');
+  if (legacyQuoteInvoices.length > 0) {
+    const quoteIdsToClean = new Set<string>();
+    for (const qInv of legacyQuoteInvoices) {
+      quoteIdsToClean.add(qInv.id);
+      const alreadyInQuotes = (db.quotes || []).some(
+        q => q.id === qInv.id || (String(q.number).trim() === String(qInv.number).trim() && q.date === qInv.date)
+      );
+      if (!alreadyInQuotes && !blockedIds.has(qInv.id)) {
+        db.quotes.unshift({
+          id: qInv.id,
+          number: qInv.number,
+          date: qInv.date,
+          time: qInv.time,
+          partyId: qInv.partyId,
+          partyCode: qInv.partyCode,
+          partyName: qInv.partyName,
+          partyPhone: qInv.partyPhone,
+          jobSite: qInv.jobSite,
+          priceType: qInv.priceType,
+          paymentMethod: qInv.paymentMethod,
+          subtotal: qInv.subtotal,
+          discount: qInv.discount,
+          discountType: qInv.discountType,
+          tax: qInv.tax,
+          taxType: qInv.taxType,
+          extraIncomeName: qInv.extraIncomeName,
+          extraIncomeVal: qInv.extraIncomeVal,
+          items: qInv.items || [],
+          total: qInv.total,
+          status: 'جديد',
+          notes: qInv.notes || qInv.jobSite,
+          branchId: qInv.branchId,
+          branchName: qInv.branchName,
+          createdBy: qInv.createdBy,
+          createdAt: qInv.createdAt
+        });
+      }
+    }
+    db.invoices = (db.invoices || []).filter(inv => inv.invoiceKind !== 'quote');
+    db.stockMovements = (db.stockMovements || []).filter(sm => !sm.sourceId || !quoteIdsToClean.has(sm.sourceId));
+    db.treasury = (db.treasury || []).filter(tr => !tr.sourceId || !quoteIdsToClean.has(tr.sourceId));
+    db.journals = (db.journals || []).filter(j => !j.sourceId || !quoteIdsToClean.has(j.sourceId));
+    db.vouchers = (db.vouchers || []).filter(v => !v.invoiceId || !quoteIdsToClean.has(v.invoiceId));
+  }
+
   // التدقيق غير التوليدي: تصحيح الأرصدة وتنظيف التكرارات والسجلات الشبحية فقط دون إنشاء أي حركة أو سند أو صنف جديد لم يسجله المستخدم
   db = verifyAndCorrectStockMovements(db).db;
   db = reconcileAndDeduplicateAllFinancialRecords(db).db;
@@ -4147,8 +4194,21 @@ export function isDuplicateInvoiceNumber(db: AccountingDB, number: string, exclu
   if (!number || !number.trim()) return false;
   const target = number.trim();
 
+  if (mode === 'quote') {
+    const inQuotes = (db.quotes || []).some(q => {
+      if (excludeId && q.id === excludeId) return false;
+      return String(q.number).trim() === target;
+    });
+    const inLegacyQuoteInvoices = (db.invoices || []).some(inv => {
+      if (excludeId && inv.id === excludeId) return false;
+      return inv.invoiceKind === 'quote' && String(inv.number).trim() === target;
+    });
+    return inQuotes || inLegacyQuoteInvoices;
+  }
+
   return (db.invoices || []).some(inv => {
     if (excludeId && inv.id === excludeId) return false;
+    if (inv.invoiceKind === 'quote') return false;
     if (mode) {
       if (mode === 'sale' || mode === 'wholesale') {
         const isThisSale = (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') && inv.invoiceKind !== 'sale_return';
@@ -4169,8 +4229,33 @@ export function isDuplicateInvoiceNumber(db: AccountingDB, number: string, exclu
 }
 
 export function getNextUniqueInvoiceNumber(db: AccountingDB, mode?: string): { number: string; nextSeq: number } {
+  if (mode === 'quote') {
+    const allQuoteNumbers = [
+      ...(db.quotes || []).map(q => String(q.number || '').trim()),
+      ...(db.invoices || []).filter(inv => inv.invoiceKind === 'quote').map(inv => String(inv.number || '').trim())
+    ];
+    let maxQuoteSeq = 0;
+    allQuoteNumbers.forEach(raw => {
+      const digits = raw.replace(/\D/g, '');
+      if (digits) {
+        const n = parseInt(digits, 10);
+        if (!isNaN(n) && n > maxQuoteSeq) {
+          maxQuoteSeq = n;
+        }
+      }
+    });
+    let seq = Math.max(1, maxQuoteSeq + 1);
+    let candidate = String(seq);
+    while (allQuoteNumbers.includes(candidate)) {
+      seq += 1;
+      candidate = String(seq);
+    }
+    return { number: candidate, nextSeq: seq };
+  }
+
   // Pure integer numbering starting from 1 with NO letter prefixes, independent per section
   const sectionInvoices = (db.invoices || []).filter(inv => {
+    if (inv.invoiceKind === 'quote') return false;
     if (mode === 'sale' || mode === 'wholesale') {
       return (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') && inv.invoiceKind !== 'sale_return';
     }

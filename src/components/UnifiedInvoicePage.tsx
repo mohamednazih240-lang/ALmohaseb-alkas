@@ -42,7 +42,8 @@ import {
   Product,
   Party,
   TreasuryEntry,
-  StockMovement
+  StockMovement,
+  Quote
 } from '../types/accounting';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import {
@@ -113,6 +114,7 @@ interface UnifiedInvoicePageProps {
   onUpdateDb: (updated: AccountingDB) => void;
   onPreviewInvoice: (invoice: Invoice) => void;
   editingInvoice?: Invoice | null;
+  editingQuote?: Quote | null;
   onCloseEdit?: () => void;
   onClose?: () => void;
   activeBranchId?: string;
@@ -124,11 +126,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   onUpdateDb,
   onPreviewInvoice,
   editingInvoice,
+  editingQuote,
   onCloseEdit,
   onClose,
   activeBranchId
 }) => {
-  const invoiceBranchId = editingInvoice?.branchId || activeBranchId || db.currentUser?.branchId || db.branches?.[0]?.id || 'br_main';
+  const invoiceBranchId = editingInvoice?.branchId || editingQuote?.branchId || activeBranchId || db.currentUser?.branchId || db.branches?.[0]?.id || 'br_main';
   const invoiceBranch = (db.branches || []).find(b => b.id === invoiceBranchId) || { id: 'br_main', name: 'الفرع الرئيسي' };
 
   // Live chronological FIFO ledger for exact original remaining stock calculation (accounting for all prior purchases & sales)
@@ -572,11 +575,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   // Safe close handler that warns before exiting
   const handleAttemptClose = () => {
     if (invoiceItems.length > 0) {
+      const docLabel = mode === 'quote' ? 'عرض السعر' : 'الفاتورة';
       const confirmExit = confirm(
-        '⚠️ تنبيه مهم: يوجد أصناف مدخلة بالفاتورة لم يتم حفظها بعد.\n\n' +
-        'هل تريد الخروج وإلغاء هذه الفاتورة؟\n\n' +
-        '• اضغط «موافق» للخروج وتجاهل الفاتورة (سيتم حفظها كمسودة يمكنك استعادتها).\n' +
-        '• اضغط «إلغاء» للبقاء في شاشة الفاتورة لحفظها.'
+        `⚠️ تنبيه مهم: يوجد أصناف مدخلة في ${docLabel} لم يتم حفظها بعد.\n\n` +
+        `هل تريد الخروج وإلغاء ${docLabel}؟\n\n` +
+        `• اضغط «موافق» للخروج وتجاهل ${docLabel} (سيتم حفظه كمسودة يمكنك استعادتها).\n` +
+        `• اضغط «إلغاء» للبقاء في شاشة ${docLabel} لحفظه.`
       );
       if (!confirmExit) return;
     }
@@ -605,7 +609,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (data.paymentRows) setPaymentRows(data.paymentRows);
     if (data.selectedParty) setSelectedParty(data.selectedParty);
     setHasUnsavedDraft(false);
-    showToast(`✓ تم استعادة مسودة الفاتورة بنجاح (${data.invoiceItems?.length || 0} أصناف)`);
+    showToast(`✓ تم استعادة مسودة ${mode === 'quote' ? 'عرض السعر' : 'الفاتورة'} بنجاح (${data.invoiceItems?.length || 0} أصناف)`);
   };
 
   const discardDraft = () => {
@@ -618,7 +622,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Auto-save draft on every change
   useEffect(() => {
-    if (editingInvoice) return;
+    if (editingInvoice || editingQuote) return;
     if (invoiceItems.length === 0) return;
 
     const timer = setTimeout(() => {
@@ -672,9 +676,34 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     invoiceItems
   ]);
 
-  // Initialize or load editing invoice
+  // Initialize or load editing invoice / quote
   useEffect(() => {
-    if (editingInvoice) {
+    if (editingQuote) {
+      setInvNum(editingQuote.number);
+      setInvDate(editingQuote.date);
+      setInvTime(editingQuote.time || '12:00');
+      setJobSite(editingQuote.jobSite || editingQuote.notes || '');
+      setPriceType(editingQuote.priceType || theme.defaultPriceType);
+      setCustCode(editingQuote.partyCode || '1');
+      setCustSearchInput(editingQuote.partyName || 'نقدي');
+      setCustPhone(editingQuote.partyPhone || '');
+      setInvoiceItems([...(editingQuote.items || [])]);
+
+      setGlobalInvDisc(editingQuote.discount && editingQuote.discount > 0 ? String(editingQuote.discount) : '');
+      setInvDiscType(editingQuote.discountType || 'val');
+      setGlobalInvTax(editingQuote.tax && editingQuote.tax > 0 ? String(editingQuote.tax) : '');
+      setInvTaxType(editingQuote.taxType || 'percent');
+      setExtraIncomeName(editingQuote.extraIncomeName || 'خدمات شحن ونقل');
+      setExtraIncomeVal(editingQuote.extraIncomeVal ? String(editingQuote.extraIncomeVal) : '');
+
+      setSettlementType('cash');
+      setPartialPaidInput('');
+      setSelectedPaymentMethod(editingQuote.paymentMethod && editingQuote.paymentMethod !== 'آجل' ? editingQuote.paymentMethod : 'نقدي');
+      setPaymentRows([]);
+
+      const found = db.customers.find(p => p.id === editingQuote.partyId);
+      setSelectedParty(found || null);
+    } else if (editingInvoice) {
       setInvNum(editingInvoice.number);
       setInvDate(editingInvoice.date);
       setInvTime(editingInvoice.time || '12:00');
@@ -761,14 +790,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         const rawDraft = localStorage.getItem(`hesabaty_draft_${mode}`) || localStorage.getItem('hesabaty_last_uncommitted_invoice');
         if (rawDraft) {
           const parsed = JSON.parse(rawDraft);
-          if (parsed && Array.isArray(parsed.invoiceItems) && parsed.invoiceItems.length > 0) {
+          if (parsed && Array.isArray(parsed.invoiceItems) && parsed.invoiceItems.length > 0 && parsed.mode === mode) {
             setHasUnsavedDraft(true);
             setUnsavedDraftData(parsed);
           }
         }
       } catch (e) {}
     }
-  }, [editingInvoice, mode]);
+  }, [editingInvoice, editingQuote, mode]);
 
   // Parties list based on role (memoized to prevent recomputing on every keystroke)
   const partiesList = React.useMemo(
@@ -1754,9 +1783,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     try {
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
 
-      // Strict duplicate check for invoice number within the current section
-      if (isDuplicateInvoiceNumber(updated, invNum, editingInvoice?.id, mode)) {
-        alert(`⚠️ منع التكرار: رقم الفاتورة (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`);
+      // Strict duplicate check for invoice/quote number within the current section
+      if (isDuplicateInvoiceNumber(updated, invNum, editingInvoice?.id || editingQuote?.id, mode)) {
+        alert(`⚠️ منع التكرار: رقم ${mode === 'quote' ? 'عرض السعر' : 'الفاتورة'} (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`);
         return;
       }
 
@@ -1843,6 +1872,128 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       let status: 'مدفوع' | 'جزئي' | 'آجل' = 'مدفوع';
       if (finalPaid <= 0) status = 'آجل';
       else if (finalRemaining > 0) status = 'جزئي';
+
+      // ============================================================
+      // مسار حفظ عرض السعر (بدون ترحيل مخزني أو قيود أو خزينة أو إلغاء)
+      // ============================================================
+      if (mode === 'quote') {
+        if (!updated.quotes) updated.quotes = [];
+        const quoteId = editingQuote?.id || generateId('qt');
+        const nowIsoQuote = new Date().toISOString();
+        const quoteUserName = activeOperator?.name || db.currentUser?.name || 'مدير النظام';
+        const cleanQuoteItems: InvoiceItem[] = JSON.parse(JSON.stringify(invoiceItems)).map((it: InvoiceItem) => ({
+          ...it,
+          qty: roundQty(it.qty),
+          unitPrice: roundMoney(it.unitPrice),
+          discount: roundMoney(it.discount || 0),
+          total: roundMoney(it.total)
+        }));
+
+        const savedQuote: Quote = {
+          id: quoteId,
+          number: invNum,
+          date: invDate,
+          time: invTime,
+          partyId: activePartyId,
+          partyCode: activePartyCode,
+          partyName: isCash ? 'نقدي' : partyName,
+          partyPhone: custPhone,
+          jobSite: jobSite || undefined,
+          priceType,
+          paymentMethod: mainPaymentMethod,
+          subtotal: itemsSubTotal,
+          discount: globalDiscCalculated,
+          discountType: invDiscType,
+          tax: globalTaxCalculated,
+          taxType: invTaxType,
+          extraIncomeName: extraIncome > 0 ? extraIncomeName : undefined,
+          extraIncomeVal: extraIncome > 0 ? extraIncome : undefined,
+          items: cleanQuoteItems,
+          total: netTotal,
+          status: editingQuote?.status && editingQuote.status !== 'تم التحويل' ? editingQuote.status : 'جديد',
+          notes: jobSite || undefined,
+          branchId: invoiceBranchId,
+          branchName: invoiceBranch.name,
+          createdBy: editingQuote?.createdBy || quoteUserName,
+          createdAt: editingQuote?.createdAt || nowIsoQuote,
+          updatedBy: editingQuote ? quoteUserName : undefined,
+          updatedAt: editingQuote ? nowIsoQuote : undefined,
+          convertedInvoiceId: editingQuote?.convertedInvoiceId,
+          convertedInvoiceNumber: editingQuote?.convertedInvoiceNumber
+        };
+
+        const existingQuoteIdx = updated.quotes.findIndex(q => q.id === quoteId);
+        if (existingQuoteIdx > -1) {
+          updated.quotes[existingQuoteIdx] = savedQuote;
+        } else {
+          updated.quotes.unshift(savedQuote);
+          const numDigits = parseInt(savedQuote.number.replace(/\D/g, '')) || 0;
+          updated.settings.nextQuote = Math.max(updated.settings.nextQuote || 1, numDigits + 1);
+        }
+
+        logAudit(
+          updated,
+          editingQuote ? 'تعديل عرض سعر' : 'حفظ عرض سعر جديد',
+          `عرض سعر رقم ${savedQuote.number} للعميل ${savedQuote.partyName} بقيمة ${formatMoney(savedQuote.total, updated.settings.currency)}`
+        );
+
+        onUpdateDb(updated);
+
+        localStorage.removeItem(`hesabaty_draft_${mode}`);
+        localStorage.removeItem('hesabaty_last_uncommitted_invoice');
+        setHasUnsavedDraft(false);
+        setUnsavedDraftData(null);
+
+        const quotePreviewObj: Invoice = {
+          id: savedQuote.id,
+          number: savedQuote.number,
+          type: 'sale',
+          invoiceKind: 'quote',
+          date: savedQuote.date,
+          time: savedQuote.time,
+          jobSite: savedQuote.jobSite,
+          priceType: savedQuote.priceType,
+          partyId: savedQuote.partyId,
+          partyCode: savedQuote.partyCode,
+          partyName: savedQuote.partyName,
+          partyPhone: savedQuote.partyPhone,
+          warehouseId: updated.warehouses[0]?.id || 'wh_main',
+          paymentMethod: savedQuote.paymentMethod || 'نقدي',
+          payments: savedQuote.paymentMethod && savedQuote.paymentMethod !== 'آجل'
+            ? [{ method: savedQuote.paymentMethod, amount: savedQuote.total }]
+            : [],
+          subtotal: savedQuote.subtotal || savedQuote.total,
+          discount: savedQuote.discount || 0,
+          discountType: savedQuote.discountType,
+          tax: savedQuote.tax || 0,
+          taxType: savedQuote.taxType,
+          extraIncomeName: savedQuote.extraIncomeName,
+          extraIncomeVal: savedQuote.extraIncomeVal,
+          total: savedQuote.total,
+          paid: savedQuote.paymentMethod === 'آجل' ? 0 : savedQuote.total,
+          remaining: savedQuote.paymentMethod === 'آجل' ? savedQuote.total : 0,
+          status: savedQuote.paymentMethod === 'آجل' ? 'آجل' : 'مدفوع',
+          notes: savedQuote.notes,
+          branchId: savedQuote.branchId,
+          branchName: savedQuote.branchName,
+          createdBy: savedQuote.createdBy,
+          createdAt: savedQuote.createdAt,
+          items: savedQuote.items
+        };
+
+        setInvoiceItems([]);
+        const wantsPrintQuote = confirm(`✓ تم حفظ عرض السعر رقم ${savedQuote.number} بنجاح في سجل عروض الأسعار!\n\nهل ترغب في معاينة وطباعة عرض السعر الآن؟`);
+        if (wantsPrintQuote) {
+          onPreviewInvoice(quotePreviewObj);
+        }
+
+        if (onCloseEdit) {
+          onCloseEdit();
+        } else if (onClose) {
+          onClose();
+        }
+        return;
+      }
 
     // Reverse previous effects if editing
     if (editingInvoice) {
@@ -2477,7 +2628,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 animate-bounce" />
                 <div className="text-right">
                   <div className="text-xs font-black text-amber-950">
-                    تم العثور على مسودة فاتورة {mode === 'purchase' ? 'مشتريات' : 'مبيعات'} سابقة لم تُحفظ بعد ({unsavedDraftData?.invoiceItems?.length || 0} أصناف)
+                    تم العثور على مسودة {mode === 'quote' ? 'عرض سعر' : mode === 'purchase' ? 'فاتورة مشتريات' : 'فاتورة مبيعات'} سابقة لم تُحفظ بعد ({unsavedDraftData?.invoiceItems?.length || 0} أصناف)
                   </div>
                   <div className="text-[10px] text-amber-800">
                     يمكنك استعادة كافة الأصناف والبيانات المدخلة فوراً بنقرة زر واحدة لمتابعة الحفظ بدون فقد أي بيانات
@@ -2491,7 +2642,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-black shadow-xs flex items-center gap-1 cursor-pointer transition-all"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  <span>استعادة الفاتورة الآن ✓</span>
+                  <span>{mode === 'quote' ? 'استعادة عرض السعر الآن ✓' : 'استعادة الفاتورة الآن ✓'}</span>
                 </button>
                 <button
                   type="button"
@@ -2563,7 +2714,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           {/* Invoice Card: 3 Columns Grid (matches user HTML code) */}
           <div className="bg-slate-50 border border-slate-300 rounded p-1.5 grid grid-cols-3 sm:grid-cols-6 gap-1 text-[9px]">
             <div className="flex flex-col gap-0.5">
-              <label className="font-bold text-slate-600 text-[8px]">رقم الفاتورة</label>
+              <label className="font-bold text-slate-600 text-[8px]">{mode === 'quote' ? 'رقم عرض السعر' : 'رقم الفاتورة'}</label>
               <input
                 type="text"
                 value={invNum}
@@ -3410,7 +3561,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               className="flex-1 min-w-[120px] py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white rounded font-bold text-[10px] flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer"
             >
               <Save className="w-3.5 h-3.5" />
-              <span>{isSavingInvoice ? 'جارٍ الحفظ والترحيل...' : 'حفظ وترحيل الحسابات'}</span>
+              <span>
+                {isSavingInvoice
+                  ? 'جارٍ الحفظ...'
+                  : mode === 'quote'
+                    ? (editingQuote ? 'حفظ تعديلات عرض السعر' : 'حفظ عرض السعر')
+                    : 'حفظ وترحيل الحسابات'}
+              </span>
             </button>
             {(onClose || onCloseEdit) && (
               <button
