@@ -15,6 +15,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { AppSettings, User as UserType, Branch } from '../types/accounting';
+import { CloudSyncState } from '../services/cloudSyncService';
 import { PWAInstallButton } from './PWAInstallBanner';
 
 interface HeaderProps {
@@ -33,6 +34,7 @@ interface HeaderProps {
   onOpenLogin?: () => void;
   onLogout?: () => void;
   onManualSync?: () => void;
+  syncState?: CloudSyncState;
 }
 
 const HeaderComponent: React.FC<HeaderProps> = ({
@@ -50,7 +52,8 @@ const HeaderComponent: React.FC<HeaderProps> = ({
   onOpenDriveBackup,
   onOpenLogin,
   onLogout,
-  onManualSync
+  onManualSync,
+  syncState
 }) => {
   const [showQuickDropdown, setShowQuickDropdown] = useState(false);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
@@ -157,14 +160,38 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             type="button"
             onClick={handleSyncClick}
             disabled={isSyncing}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-bold transition-all shadow-2xs cursor-pointer"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 border rounded-lg text-xs font-bold transition-all shadow-2xs cursor-pointer ${
+              syncState?.status === 'offline' || syncState?.status === 'error'
+                ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                : syncState?.status === 'syncing' || isSyncing
+                  ? 'bg-blue-50 hover:bg-blue-100 text-blue-800 border-blue-200'
+                  : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
+            }`}
             title="مزامنة لحظية مباشرة بين كافة التليفونات"
           >
             <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                syncState?.status === 'offline' || syncState?.status === 'error'
+                  ? 'bg-amber-400'
+                  : syncState?.status === 'syncing' || isSyncing
+                    ? 'bg-blue-400'
+                    : 'bg-emerald-400'
+              }`}></span>
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                syncState?.status === 'offline' || syncState?.status === 'error'
+                  ? 'bg-amber-500'
+                  : syncState?.status === 'syncing' || isSyncing
+                    ? 'bg-blue-500'
+                    : 'bg-emerald-500'
+              }`}></span>
             </span>
-            <span className="text-[11px]">{isSyncing ? 'جارٍ التحديث...' : 'مزامنة لحظية'}</span>
+            <span className="text-[11px]">
+              {isSyncing || syncState?.status === 'syncing'
+                ? 'جارٍ المزامنة...'
+                : syncState?.status === 'offline' || syncState?.status === 'error'
+                  ? 'محفوظ محلياً (اضغط للمزامنة)'
+                  : 'مزامنة لحظية'}
+            </span>
           </button>
 
           {/* Backup & Data Protection Button */}
@@ -354,14 +381,32 @@ const HeaderComponent: React.FC<HeaderProps> = ({
             type="button"
             onClick={handleSyncClick}
             disabled={isSyncing}
-            className="flex items-center gap-1 px-1.5 py-1 bg-emerald-50 active:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-[10px] font-bold cursor-pointer shrink-0"
+            className={`flex items-center gap-1 px-1.5 py-1 border rounded-lg text-[10px] font-bold cursor-pointer shrink-0 ${
+              syncState?.status === 'offline' || syncState?.status === 'error'
+                ? 'bg-amber-50 active:bg-amber-100 text-amber-800 border-amber-300'
+                : syncState?.status === 'syncing' || isSyncing
+                  ? 'bg-blue-50 active:bg-blue-100 text-blue-800 border-blue-300'
+                  : 'bg-emerald-50 active:bg-emerald-100 text-emerald-800 border-emerald-300'
+            }`}
             title="مزامنة لحظية مباشرة بين الأجهزة (انقر للتحديث الفوري)"
           >
             <span className="relative flex h-1.5 w-1.5">
-              <span className={`absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 ${isSyncing ? 'animate-ping' : ''}`}></span>
-              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+              <span className={`absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                isSyncing || syncState?.status === 'syncing' ? 'animate-ping bg-blue-400' :
+                (syncState?.status === 'offline' || syncState?.status === 'error') ? 'animate-ping bg-amber-400' : 'bg-emerald-400'
+              }`}></span>
+              <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${
+                isSyncing || syncState?.status === 'syncing' ? 'bg-blue-500' :
+                (syncState?.status === 'offline' || syncState?.status === 'error') ? 'bg-amber-500' : 'bg-emerald-500'
+              }`}></span>
             </span>
-            <span className="text-[10px] font-bold whitespace-nowrap">{isSyncing ? 'تحديث...' : 'مزامنة'}</span>
+            <span className="text-[10px] font-bold whitespace-nowrap">
+              {isSyncing || syncState?.status === 'syncing'
+                ? 'تحديث...'
+                : syncState?.status === 'offline' || syncState?.status === 'error'
+                  ? 'غير متزامن'
+                  : 'مزامنة'}
+            </span>
           </button>
 
           {/* User Avatar Circle */}

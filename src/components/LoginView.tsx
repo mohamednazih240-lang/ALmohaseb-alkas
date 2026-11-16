@@ -39,7 +39,9 @@ import {
   getBranchExpectedPin,
   ensurePrimaryBranches,
   isCompanyMawan,
-  loadTenantDatabase
+  loadTenantDatabase,
+  loadFromIndexedDB,
+  mergeDatabasesSafely
 } from '../services/accountingStorage';
 import {
   fetchDatabaseFromCloud,
@@ -338,15 +340,25 @@ export const LoginView: React.FC<LoginViewProps> = ({
     setIsLoading(true);
 
     try {
-      // 1. Fetch freshest database state from Cloud Firestore to ensure accurate password verification
+      // 1. Fetch freshest database state from Cloud Firestore and safely merge with local unsynced records
       let targetDb: AccountingDB = loadedCompany?.db || currentDb;
       const codeToQuery = normalizeCompanyCode(loadedCompany?.companyCode || companyCodeInput || defaultCode);
       const freshCloud = await fetchCompanyUsersAndBranchesByCode(codeToQuery);
+      const localIdb = await loadFromIndexedDB().catch(() => null);
+      const localSnapshot = localIdb && localIdb.settings
+        ? mergeDatabasesSafely(currentDb, localIdb, currentDb.currentUser)
+        : currentDb;
 
       if (freshCloud && freshCloud.db) {
-        targetDb = freshCloud.db;
+        const sameCompany = normalizeCompanyCode(localSnapshot.settings?.companyCode) === codeToQuery;
+        targetDb = sameCompany
+          ? mergeDatabasesSafely(localSnapshot, freshCloud.db, localSnapshot.currentUser)
+          : freshCloud.db;
       } else if (loadedCompany?.db) {
-        targetDb = loadedCompany.db;
+        const sameCompany = normalizeCompanyCode(localSnapshot.settings?.companyCode) === codeToQuery;
+        targetDb = sameCompany
+          ? mergeDatabasesSafely(localSnapshot, loadedCompany.db, localSnapshot.currentUser)
+          : loadedCompany.db;
       }
 
       // 2. Find the selected user by ID (or username) in the freshest database

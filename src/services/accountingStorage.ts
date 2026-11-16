@@ -3746,8 +3746,6 @@ export function updateProductBranchData(
 export function isPurgedEkhwaInvoice(inv: Invoice | null | undefined): boolean {
   if (!inv) return true;
   if (inv.id && PURGED_COMP101_INVOICE_IDS.has(inv.id)) return true;
-  const creator = (inv.createdBy || '').trim();
-  if (creator === 'Muhammed Raşad') return true;
   return false;
 }
 
@@ -3758,14 +3756,29 @@ export function mergeInvoices(
 ): Invoice[] {
   const map = new Map<string, Invoice>();
 
+  const getInvoiceKey = (inv: Invoice): string => {
+    if (inv.id && String(inv.id).trim()) return String(inv.id).trim();
+    const kind = inv.invoiceKind || inv.type || 'sale';
+    return `legacy_${kind}_${String(inv.number || '').trim()}_${inv.date || ''}`;
+  };
+
   const mergeTwoInvoices = (a: Invoice, b: Invoice): Invoice => {
     const timeA = new Date(a.updatedAt || a.createdAt || a.date || 0).getTime();
     const timeB = new Date(b.updatedAt || b.createdAt || b.date || 0).getTime();
     const itemsA = a.items?.length || 0;
     const itemsB = b.items?.length || 0;
 
-    // Prefer the richer one if items count differs; otherwise newer timestamp
-    const primary = itemsA !== itemsB ? (itemsA > itemsB ? a : b) : (timeB >= timeA ? b : a);
+    // Prefer newer edit timestamp if updatedAt exists on one/both; otherwise richer items
+    const aEdited = Boolean(a.updatedAt);
+    const bEdited = Boolean(b.updatedAt);
+    let primary: Invoice;
+    if (aEdited && bEdited) {
+      primary = timeB >= timeA ? b : a;
+    } else if (itemsA !== itemsB) {
+      primary = itemsA > itemsB ? a : b;
+    } else {
+      primary = timeB >= timeA ? b : a;
+    }
     const secondary = primary === b ? a : b;
 
     // Original creator is preserved
@@ -3805,36 +3818,22 @@ export function mergeInvoices(
   (existingList || []).forEach(inv => {
     if (!inv || isPurgedEkhwaInvoice(inv) || (inv.id && deletedIds?.has(inv.id))) return;
     if (inv.id || inv.number) {
-      if (inv.id) map.set(inv.id, inv);
-      if (inv.number) map.set(`${inv.type || inv.invoiceKind}_${inv.number}`, inv);
+      const key = getInvoiceKey(inv);
+      const prev = map.get(key);
+      map.set(key, prev ? mergeTwoInvoices(prev, inv) : inv);
     }
   });
 
   (incomingList || []).forEach(inv => {
     if (!inv || isPurgedEkhwaInvoice(inv) || (inv.id && deletedIds?.has(inv.id))) return;
     if (inv.id || inv.number) {
-      const byId = inv.id ? map.get(inv.id) : undefined;
-      const byNum = inv.number ? map.get(`${inv.type || inv.invoiceKind}_${inv.number}`) : undefined;
-      const existing = byId || byNum;
-
-      if (!existing) {
-        if (inv.id) map.set(inv.id, inv);
-        if (inv.number) map.set(`${inv.type || inv.invoiceKind}_${inv.number}`, inv);
-      } else {
-        const merged = mergeTwoInvoices(existing, inv);
-        if (merged.id) map.set(merged.id, merged);
-        if (merged.number) map.set(`${merged.type || merged.invoiceKind}_${merged.number}`, merged);
-      }
+      const key = getInvoiceKey(inv);
+      const existing = map.get(key);
+      map.set(key, existing ? mergeTwoInvoices(existing, inv) : inv);
     }
   });
 
-  const unique = new Map<string, Invoice>();
-  Array.from(map.values()).forEach(inv => {
-    const key = inv.id || `${inv.type || inv.invoiceKind}_${inv.number}`;
-    unique.set(key, inv);
-  });
-
-  return Array.from(unique.values()).sort((a, b) => (b.createdAt || b.date || '').localeCompare(a.createdAt || a.date || ''));
+  return Array.from(map.values()).sort((a, b) => (b.createdAt || b.date || '').localeCompare(a.createdAt || a.date || ''));
 }
 
 /**
@@ -5153,6 +5152,76 @@ export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: Accounti
   return { db: res.db, createdCount: res.vouchersReconciledCount };
 }
 
+/**
+ * Safely merges two AccountingDB snapshots (e.g. local vs IndexedDB or local vs Cloud)
+ * without overwriting unsynced invoices, vouchers, or treasury records on either side.
+ */
+export function mergeDatabasesSafely(
+  prevDb: AccountingDB,
+  incomingDb: AccountingDB,
+  resolvedUser?: User
+): AccountingDB {
+  const ensuredIncoming = sanitizeCompanyDatabase(incomingDb);
+  const deletedIdsSet = getAllDeletedRecordIds(prevDb, getAllDeletedRecordIds(ensuredIncoming));
+  saveLocalDeletedRecordIds(ensuredIncoming.settings?.companyCode || prevDb.settings?.companyCode, deletedIdsSet);
 
+  const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredIncoming.invoices || [], deletedIdsSet);
+  const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredIncoming.vouchers || [], deletedIdsSet);
+  const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredIncoming.treasury || [], deletedIdsSet);
+  const validMergedInvIds = new Set(mergedInvoices.map(i => i.id));
+  const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredIncoming.stockMovements || [], deletedIdsSet)
+    .filter(sm => {
+      if (sm.sourceId && deletedIdsSet.has(sm.sourceId)) return false;
+      if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
+      return true;
+    });
 
+  const mergedProducts = mergeProducts(prevDb.products || [], ensuredIncoming.products || [], deletedIdsSet);
 
+  const rawMerged: AccountingDB = {
+    ...ensuredIncoming,
+    settings: {
+      ...prevDb.settings,
+      ...ensuredIncoming.settings,
+      logo: (ensuredIncoming.settings?.logo && ensuredIncoming.settings.logo.trim())
+        ? ensuredIncoming.settings.logo
+        : (prevDb.settings?.logo || ''),
+      nextSale: Math.max(prevDb.settings?.nextSale || 1, ensuredIncoming.settings?.nextSale || 1),
+      nextPurchase: Math.max(prevDb.settings?.nextPurchase || 1, ensuredIncoming.settings?.nextPurchase || 1),
+      nextSaleReturn: Math.max(prevDb.settings?.nextSaleReturn || 1, ensuredIncoming.settings?.nextSaleReturn || 1),
+      nextPurchaseReturn: Math.max(prevDb.settings?.nextPurchaseReturn || 1, ensuredIncoming.settings?.nextPurchaseReturn || 1),
+      nextReceipt: Math.max(prevDb.settings?.nextReceipt || 1, ensuredIncoming.settings?.nextReceipt || 1),
+      nextPayment: Math.max(prevDb.settings?.nextPayment || 1, ensuredIncoming.settings?.nextPayment || 1)
+    },
+    products: mergedProducts,
+    invoices: mergedInvoices,
+    vouchers: mergedVouchers,
+    treasury: mergedTreasury,
+    stockMovements: mergedStockMovements,
+    dailyClosings: mergeArrayById(prevDb.dailyClosings || [], ensuredIncoming.dailyClosings || [], deletedIdsSet),
+    expenses: mergeArrayById(prevDb.expenses || [], ensuredIncoming.expenses || [], deletedIdsSet),
+    revenues: mergeArrayById(prevDb.revenues || [], ensuredIncoming.revenues || [], deletedIdsSet),
+    returns: mergeArrayById(prevDb.returns || [], ensuredIncoming.returns || [], deletedIdsSet),
+    journals: mergeArrayById(prevDb.journals || [], ensuredIncoming.journals || [], deletedIdsSet),
+    quotes: mergeArrayById(prevDb.quotes || [], ensuredIncoming.quotes || [], deletedIdsSet),
+    orders: mergeArrayById(prevDb.orders || [], ensuredIncoming.orders || [], deletedIdsSet),
+    adjustments: mergeArrayById(prevDb.adjustments || [], ensuredIncoming.adjustments || [], deletedIdsSet),
+    transfers: mergeArrayById(prevDb.transfers || [], ensuredIncoming.transfers || [], deletedIdsSet),
+    customers: mergeArrayById(prevDb.customers || [], ensuredIncoming.customers || [], deletedIdsSet),
+    suppliers: mergeArrayById(prevDb.suppliers || [], ensuredIncoming.suppliers || [], deletedIdsSet),
+    fixedAssets: mergeArrayById(prevDb.fixedAssets || [], ensuredIncoming.fixedAssets || [], deletedIdsSet),
+    costCenters: mergeArrayById(prevDb.costCenters || [], ensuredIncoming.costCenters || [], deletedIdsSet),
+    currencies: mergeArrayById(prevDb.currencies || [], ensuredIncoming.currencies || [], deletedIdsSet),
+    bankReconciliations: mergeArrayById(prevDb.bankReconciliations || [], ensuredIncoming.bankReconciliations || [], deletedIdsSet),
+    goodsReceivedNotes: mergeArrayById(prevDb.goodsReceivedNotes || [], ensuredIncoming.goodsReceivedNotes || [], deletedIdsSet),
+    audit: mergeArrayById(prevDb.audit || [], ensuredIncoming.audit || [])
+      .sort((a, b) => (b.at || '').localeCompare(a.at || ''))
+      .slice(0, 2000),
+    deletedInvoiceIds: Array.from(new Set([...PURGED_COMP101_INVOICE_IDS, ...(prevDb.deletedInvoiceIds || []), ...(ensuredIncoming.deletedInvoiceIds || [])])),
+    deletedRecordIds: Array.from(deletedIdsSet),
+    currentUser: resolvedUser || prevDb.currentUser || ensuredIncoming.users[0]
+  };
+
+  const purged = purgeDeletedRecordsFromDb(rawMerged, deletedIdsSet);
+  return verifyAndCorrectStockMovements(purged).db;
+}

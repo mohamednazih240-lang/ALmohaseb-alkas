@@ -7,17 +7,8 @@ import {
   loadFromIndexedDB,
   isCompanyMawan,
   sanitizeCompanyDatabase,
-  mergeInvoices,
-  mergeVouchers,
-  mergeTreasury,
-  mergeStockMovements,
-  mergeProducts,
-  verifyAndCorrectStockMovements,
-  PURGED_COMP101_INVOICE_IDS,
   getAllDeletedRecordIds,
-  purgeDeletedRecordsFromDb,
-  mergeArrayById,
-  saveLocalDeletedRecordIds
+  mergeDatabasesSafely
 } from './services/accountingStorage';
 import {
   AccountingDB,
@@ -271,55 +262,21 @@ export default function App() {
   }, []);
 
   const mergeLocalAndCloudDb = useCallback((prevDb: AccountingDB, remoteDb: AccountingDB, resolvedUser?: AccountingDB['currentUser']): AccountingDB => {
-    const ensuredCloud = sanitizeCompanyDatabase(remoteDb);
-    const deletedIdsSet = getAllDeletedRecordIds(prevDb, getAllDeletedRecordIds(ensuredCloud));
-    saveLocalDeletedRecordIds(ensuredCloud.settings?.companyCode || prevDb.settings?.companyCode, deletedIdsSet);
-
-    const mergedInvoices = mergeInvoices(prevDb.invoices || [], ensuredCloud.invoices || [], deletedIdsSet);
-    const mergedVouchers = mergeVouchers(prevDb.vouchers || [], ensuredCloud.vouchers || [], deletedIdsSet);
-    const mergedTreasury = mergeTreasury(prevDb.treasury || [], ensuredCloud.treasury || [], deletedIdsSet);
-    const validMergedInvIds = new Set(mergedInvoices.map(i => i.id));
-    const mergedStockMovements = mergeStockMovements(prevDb.stockMovements || [], ensuredCloud.stockMovements || [], deletedIdsSet)
-      .filter(sm => {
-        if (sm.sourceId && deletedIdsSet.has(sm.sourceId)) return false;
-        if ((sm.type === 'purchase' || sm.type === 'sale' || sm.type === 'purchase_return' || sm.type === 'sale_return') && sm.sourceId && !validMergedInvIds.has(sm.sourceId)) return false;
-        return true;
-      });
-
-    const safeSettings = mergeSafeSettings(prevDb.settings, ensuredCloud.settings);
-    const mergedProducts = mergeProducts(prevDb.products || [], ensuredCloud.products || [], deletedIdsSet);
-
-    const rawMerged: AccountingDB = {
-      ...ensuredCloud,
-      settings: safeSettings,
-      products: mergedProducts,
-      invoices: mergedInvoices,
-      vouchers: mergedVouchers,
-      treasury: mergedTreasury,
-      stockMovements: mergedStockMovements,
-      dailyClosings: mergeArrayById(prevDb.dailyClosings || [], ensuredCloud.dailyClosings || [], deletedIdsSet),
-      expenses: mergeArrayById(prevDb.expenses || [], ensuredCloud.expenses || [], deletedIdsSet),
-      revenues: mergeArrayById(prevDb.revenues || [], ensuredCloud.revenues || [], deletedIdsSet),
-      returns: mergeArrayById(prevDb.returns || [], ensuredCloud.returns || [], deletedIdsSet),
-      journals: mergeArrayById(prevDb.journals || [], ensuredCloud.journals || [], deletedIdsSet),
-      quotes: mergeArrayById(prevDb.quotes || [], ensuredCloud.quotes || [], deletedIdsSet),
-      orders: mergeArrayById(prevDb.orders || [], ensuredCloud.orders || [], deletedIdsSet),
-      adjustments: mergeArrayById(prevDb.adjustments || [], ensuredCloud.adjustments || [], deletedIdsSet),
-      transfers: mergeArrayById(prevDb.transfers || [], ensuredCloud.transfers || [], deletedIdsSet),
-      customers: mergeArrayById(prevDb.customers || [], ensuredCloud.customers || [], deletedIdsSet),
-      suppliers: mergeArrayById(prevDb.suppliers || [], ensuredCloud.suppliers || [], deletedIdsSet),
-      fixedAssets: mergeArrayById(prevDb.fixedAssets || [], ensuredCloud.fixedAssets || [], deletedIdsSet),
-      costCenters: mergeArrayById(prevDb.costCenters || [], ensuredCloud.costCenters || [], deletedIdsSet),
-      currencies: mergeArrayById(prevDb.currencies || [], ensuredCloud.currencies || [], deletedIdsSet),
-      bankReconciliations: mergeArrayById(prevDb.bankReconciliations || [], ensuredCloud.bankReconciliations || [], deletedIdsSet),
-      goodsReceivedNotes: mergeArrayById(prevDb.goodsReceivedNotes || [], ensuredCloud.goodsReceivedNotes || [], deletedIdsSet),
-      deletedInvoiceIds: Array.from(new Set([...PURGED_COMP101_INVOICE_IDS, ...(prevDb.deletedInvoiceIds || []), ...(ensuredCloud.deletedInvoiceIds || [])])),
-      deletedRecordIds: Array.from(deletedIdsSet),
-      currentUser: resolvedUser || prevDb.currentUser || ensuredCloud.users[0]
+    const merged = mergeDatabasesSafely(prevDb, remoteDb, resolvedUser);
+    const safeSettings = mergeSafeSettings(prevDb.settings, remoteDb.settings);
+    return {
+      ...merged,
+      settings: {
+        ...merged.settings,
+        ...safeSettings,
+        nextSale: merged.settings.nextSale,
+        nextPurchase: merged.settings.nextPurchase,
+        nextSaleReturn: merged.settings.nextSaleReturn,
+        nextPurchaseReturn: merged.settings.nextPurchaseReturn,
+        nextReceipt: merged.settings.nextReceipt,
+        nextPayment: merged.settings.nextPayment
+      }
     };
-
-    const purged = purgeDeletedRecordsFromDb(rawMerged, deletedIdsSet);
-    return verifyAndCorrectStockMovements(purged).db;
   }, [mergeSafeSettings]);
 
   // Hydrate database sequentially from IndexedDB first, then merge fresh cloud database cleanly
@@ -337,10 +294,11 @@ export default function App() {
           const readyDb = sanitizeCompanyDatabase(idbData);
           initialCompanyCode = normalizeCompanyCode(readyDb.settings.companyCode);
           setDb(prevDb => {
-            const safeSettings = mergeSafeSettings(readyDb.settings, prevDb.settings);
-            const hydrated: AccountingDB = { ...readyDb, settings: safeSettings };
-            saveDatabase(hydrated);
-            return hydrated;
+            const hydrated = mergeLocalAndCloudDb(prevDb, readyDb, prevDb.currentUser);
+            const safeSettings = mergeSafeSettings(prevDb.settings, hydrated.settings);
+            const finalHydrated: AccountingDB = { ...hydrated, settings: safeSettings };
+            saveDatabase(finalHydrated);
+            return finalHydrated;
           });
         }
       } catch (e) {
@@ -374,7 +332,7 @@ export default function App() {
 
             // If local had richer invoice data, local deletions missing from cloud, or a local logo missing from cloud, sync back immediately
             const hasRicherLocal = merged.invoices.some(inv => {
-              const cloudInv = (ensuredCloud.invoices || []).find(ci => ci.id === inv.id || (ci.number === inv.number && ci.type === inv.type));
+              const cloudInv = (ensuredCloud.invoices || []).find(ci => ci.id === inv.id);
               return !cloudInv || (inv.items?.length || 0) > (cloudInv.items?.length || 0);
             });
             const cloudDelSet = new Set<string>(ensuredCloud.deletedRecordIds || []);
@@ -518,7 +476,7 @@ export default function App() {
               (cloudDb.deletedRecordIds?.length || 0) !== (prevDb.deletedRecordIds?.length || 0) ||
               (cloudDb.deletedInvoiceIds?.length || 0) !== (prevDb.deletedInvoiceIds?.length || 0);
             const hasMissingInvoice = (cloudDb.invoices || []).some(
-              ci => !deletedIdsSet.has(ci.id) && !(prevDb.invoices || []).some(pi => pi.id === ci.id || (pi.number === ci.number && pi.type === ci.type))
+              ci => !deletedIdsSet.has(ci.id) && !(prevDb.invoices || []).some(pi => pi.id === ci.id)
             );
             const hasNewerAudit = cloudAuditTime > prevAuditTime || (cloudDb.audit?.length || 0) !== (prevDb.audit?.length || 0);
 
@@ -779,6 +737,7 @@ export default function App() {
           setShowLoginView(true);
         }}
         onManualSync={handleManualSync}
+        syncState={syncState}
         onQuickAction={(action) => {
           if (action === 'open_quick_menu') navigateToPage('quick_menu');
           else if (action === 'new_sale') navigateToPage('sales');
@@ -1143,10 +1102,15 @@ export default function App() {
               setShowLoginView(false);
 
               const baseDb = tenantDb || (session.tenantId ? loadTenantDatabase(session.tenantId) : loadDatabase());
-              const targetDb = { ...baseDb, currentUser: session.user };
+              const sameCompany = normalizeCompanyCode(db.settings.companyCode) === normalizeCompanyCode(baseDb.settings?.companyCode);
+              const targetDb = sameCompany
+                ? mergeLocalAndCloudDb(db, baseDb, session.user)
+                : { ...baseDb, currentUser: session.user };
               setDb(targetDb);
               saveDatabase(targetDb);
-              pushDatabaseToCloud(targetDb, true);
+              if (isCompanyMawan(targetDb.settings?.companyCode)) {
+                pushDatabaseToCloud(targetDb, true);
+              }
 
               if (session.branchId) {
                 setActiveBranchId(session.branchId);

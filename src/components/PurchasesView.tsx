@@ -138,7 +138,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   );
 
   // Filter purchase invoices for active branch (memoized)
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getTodayDate();
   const currentMonthStr = todayStr.slice(0, 7);
 
   // 1. Regular purchases (excluding returns)

@@ -2103,7 +2103,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         return true;
       });
       updated.journals = updated.journals.filter(j => j.sourceId !== editingInvoice.id && j.id !== editingInvoice.journalEntryId);
-      updated.invoices = updated.invoices.filter(i => i.id !== editingInvoice.id && !(i.number === editingInvoice.number && i.type === editingInvoice.type));
+      updated.invoices = updated.invoices.filter(i => i.id !== editingInvoice.id);
       // Linked vouchers will be updated in-place by syncInvoiceVouchers below without duplicating or changing voucher numbers
     }
 

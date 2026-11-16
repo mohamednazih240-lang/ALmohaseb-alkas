@@ -144,7 +144,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
   );
 
   // Filter sales invoices for active branch (memoized)
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getTodayDate();
   const currentMonthStr = todayStr.slice(0, 7);
 
   // 1. Regular sales (excluding returns)
