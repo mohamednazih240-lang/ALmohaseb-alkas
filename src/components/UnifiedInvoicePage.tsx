@@ -78,9 +78,13 @@ import {
   roundQty,
   toCents,
   isFiniteNonNegative,
-  isFinitePositive
+  isFinitePositive,
+  isAutoInvoiceVoucher,
+  isVoucherLinkedToInvoice,
+  partitionInvoicePaymentsForAutoPortion,
+  unblockActiveRecordIds
 } from '../services/accountingStorage';
-import { validateDbTransactionIntegrity } from '../services/accountingEngine';
+import { validateDbTransactionIntegrity, getDeterministicJournalId } from '../services/accountingEngine';
 import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
   InvoicePriceValidationModal,
@@ -966,7 +970,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   const onRapidItemNameChange = (val: string) => {
     setRapidItemName(val);
-    setShowRapidDropdown(true);
+    setShowRapidDropdown(val.trim().length > 0);
     const matchRes = matchProductStrictly(db, { name: val, code: val });
     const matched = matchRes.exactMatch;
     if (matched) {
@@ -2035,6 +2039,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         return;
       }
 
+    const priorTrCreatedAtMap = new Map<string, string>();
     // Reverse previous effects if editing
     if (editingInvoice) {
       // Revert stock specifically for the branch of that invoice
@@ -2079,12 +2084,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         sm => sm.sourceId !== editingInvoice.id && !(!sm.sourceId && sm.refNumber === editingInvoice.number && sm.type === editSmType)
       );
       updated.treasury = updated.treasury.filter(tr => {
-        if (tr.sourceId === editingInvoice.id || (tr as any).invoiceId === editingInvoice.id) return false;
-        if ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(editingInvoice.number).trim() && tr.sourceType === editTrSourceType) return false;
-        if (editingInvoice.number && tr.description && tr.sourceType === editTrSourceType && (
-          tr.description.includes(editTrPrefix) ||
-          tr.description.includes(`مرتجع رقم ${editingInvoice.number}`)
-        )) {
+        const explicitInv = tr.invoiceId || tr.sourceId;
+        const hasOtherExplicitInv = Boolean(explicitInv && explicitInv !== editingInvoice.id && tr.sourceType === editTrSourceType);
+        const matchesThisInv =
+          tr.sourceId === editingInvoice.id ||
+          tr.invoiceId === editingInvoice.id ||
+          (!hasOtherExplicitInv && Boolean(tr.refNumber && String(tr.refNumber).trim() === String(editingInvoice.number).trim() && tr.sourceType === editTrSourceType)) ||
+          (!hasOtherExplicitInv && Boolean(editingInvoice.number && tr.description && tr.sourceType === editTrSourceType && (
+            tr.description.includes(editTrPrefix) ||
+            tr.description.includes(`مرتجع رقم ${editingInvoice.number}`)
+          )));
+        if (matchesThisInv) {
+          if (tr.id && tr.createdAt && tr.date === invDate) {
+            priorTrCreatedAtMap.set(tr.id, tr.createdAt);
+          }
           return false;
         }
         return true;
@@ -2399,9 +2412,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
     });
 
-    // 2. Treasury entries for each payment belonging to this branch & chosen payment channel (in for sales, out for purchases)
-    updated.treasury = updated.treasury.filter(t => t.sourceId !== invId && (t as any).invoiceId !== invId);
-    if (finalPaid > 0) {
+    // 2. Treasury entries for auto/direct payments belonging to this branch & chosen payment channel (in for sales, out for purchases)
+    updated.treasury = updated.treasury.filter(t => t.sourceId !== invId && t.invoiceId !== invId);
+    const manualInstallmentsPaid = (updated.vouchers || [])
+      .filter(v => isVoucherLinkedToInvoice(v, savedInvoice) && !isAutoInvoiceVoucher(v))
+      .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+    const autoPaidPortion = roundMoney(Math.max(0, finalPaid - manualInstallmentsPaid));
+
+    if (autoPaidPortion > 0) {
       const isOutflow = mode === 'purchase' || mode === 'sale_return';
       const trDirection: 'in' | 'out' = isOutflow ? 'out' : 'in';
       const trActionDesc = mode === 'purchase' ? `سداد فاتورة مشتريات رقم ${savedInvoice.number}` :
@@ -2409,23 +2427,25 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                            mode === 'purchase_return' ? `استرداد مرتجع مشتريات رقم ${savedInvoice.number}` :
                            `تحصيل فاتورة مبيعات رقم ${savedInvoice.number}`;
 
-      const activePayments = (savedInvoice.payments && savedInvoice.payments.length > 0)
-        ? savedInvoice.payments
-        : [{ method: mainPaymentMethod, amount: finalPaid }];
+      const activePayments = partitionInvoicePaymentsForAutoPortion(savedInvoice, autoPaidPortion);
+      const createdTrIds: string[] = [];
 
       activePayments.forEach((pLine, pIdx) => {
         if (pLine.amount > 0 && pLine.method !== 'آجل') {
           const deterministicTrId = getDeterministicTreasuryId(mode, invId, pIdx, trDirection);
+          createdTrIds.push(deterministicTrId);
           const trEntry: TreasuryEntry = {
             id: deterministicTrId,
             date: savedInvoice.date,
-            createdAt: savedInvoice.updatedAt || savedInvoice.createdAt || new Date().toISOString(),
+            createdAt: priorTrCreatedAtMap.get(deterministicTrId) || savedInvoice.createdAt || new Date().toISOString(),
             direction: trDirection,
             amount: pLine.amount,
             method: pLine.method,
             description: `${trActionDesc} (${invoiceBranch.name}) - ${partyName} عبر ${pLine.method}`,
             sourceType: mode,
             sourceId: invId,
+            invoiceId: invId,
+            refNumber: savedInvoice.number,
             branchId: invoiceBranchId,
             branchName: invoiceBranch.name
           };
@@ -2438,6 +2458,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           }
         }
       });
+      if (createdTrIds.length > 0) {
+        unblockActiveRecordIds(updated, createdTrIds);
+      }
     }
 
     // 2.5 Update customer / supplier current balances
@@ -2455,9 +2478,23 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
     }
 
-    // 3. Automated balanced double-entry journal
-    const journal = createInvoiceJournal(updated, savedInvoice);
-    savedInvoice.journalEntryId = journal.id;
+    // 3. Automated balanced double-entry journal (auto-payment portion to avoid double counting manual installment vouchers)
+    const detJournalId = getDeterministicJournalId(mode, invId);
+    const invForJournal: Invoice = manualInstallmentsPaid > 0
+      ? {
+          ...savedInvoice,
+          paid: autoPaidPortion,
+          remaining: roundMoney(Math.max(0, savedInvoice.total - autoPaidPortion)),
+          payments: autoPaidPortion > 0 ? partitionInvoicePaymentsForAutoPortion(savedInvoice, autoPaidPortion) : [],
+          paymentMethod: autoPaidPortion <= 0 ? 'آجل' : savedInvoice.paymentMethod
+        }
+      : savedInvoice;
+    const journal = createInvoiceJournal(updated, invForJournal);
+    journal.id = detJournalId;
+    journal.sourceId = invId;
+    savedInvoice.journalEntryId = detJournalId;
+    unblockActiveRecordIds(updated, [detJournalId]);
+    updated.journals = updated.journals.filter(j => j.id !== detJournalId && j.sourceId !== invId);
     updated.journals.unshift(journal);
 
     // 4. Increment sequence if new
@@ -2599,10 +2636,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     <div className="w-full flex justify-center p-0 transition-all select-none">
       {/* Container: exact compact mobile dimensions on phone, responsive on larger viewports */}
       <div
-        className={`w-full bg-white rounded-lg border border-slate-300 shadow-md flex flex-col relative transition-all ${
+        className={`w-full bg-white rounded-lg border border-slate-300 shadow-md flex flex-col relative transition-all min-h-[60dvh] sm:min-h-[80dvh] ${
           layoutWidth === 'mobile' ? 'max-w-[480px]' : 'max-w-4xl'
         }`}
-        style={{ minHeight: '80vh' }}
       >
         {/* Header Title with live time, responsive toggle, and prominent Close X button */}
         <div
@@ -2661,7 +2697,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         </div>
 
         {/* Main Workspace Content */}
-        <div className="p-1.5 sm:p-2 flex flex-col gap-1.5 flex-1">
+        <div className="p-1.5 sm:p-2 pb-24 sm:pb-2 flex flex-col gap-1.5 flex-1">
           {/* Unsaved Draft Recovery Banner (User Request: استعادة الفاتورة غير المحفوظة وحمايتها من الضياع) */}
           {hasUnsavedDraft && (
             <div className="bg-amber-50 border-2 border-amber-400 p-2.5 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-xs animate-in slide-in-from-top-2">
@@ -2867,7 +2903,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
               {/* Wide & Tall Dropdown - Responsive: Centered floating sheet on mobile, anchored on desktop */}
               {showCustDropdown && (
-                <div className="fixed inset-x-2.5 top-16 bottom-4 sm:absolute sm:inset-auto sm:top-full sm:right-0 sm:w-[580px] md:w-[660px] sm:max-h-[460px] bg-white border-2 border-emerald-600 rounded-xl sm:rounded-2xl overflow-hidden z-[100] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
+                <div className="fixed inset-x-2.5 top-14 max-h-[58dvh] sm:inset-x-auto sm:absolute sm:inset-auto sm:top-full sm:right-0 sm:w-[580px] md:w-[660px] sm:max-h-[460px] bg-white border-2 border-emerald-600 rounded-xl sm:rounded-2xl overflow-hidden z-[100] shadow-2xl flex flex-col animate-in fade-in zoom-in-95 duration-150">
                   {/* Dropdown Header */}
                   <div className="bg-gradient-to-r from-slate-800 to-slate-900 text-white p-2.5 flex items-center justify-between text-xs font-bold shrink-0">
                     <span className="flex items-center gap-1.5">
@@ -2977,7 +3013,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   })()}
 
                   {/* 4. Scrollable Dynamic Results List */}
-                  <div className="flex-1 overflow-y-auto divide-y divide-slate-100 p-1 min-h-[140px] max-h-[50vh] sm:max-h-[290px]">
+                  <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain divide-y divide-slate-100 p-1 pb-20 sm:pb-2">
                     {partiesList
                       .filter(p => {
                         const q = custSearchInput.trim().toLowerCase();
@@ -3102,12 +3138,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               {showPhoneDropdown && (
                 <>
                   <div className="fixed inset-0 z-[95] bg-black/40" onClick={() => setShowPhoneDropdown(false)} />
-                  <div className="fixed inset-x-4 top-24 max-h-[50vh] sm:absolute sm:inset-auto sm:top-full sm:right-0 sm:w-[380px] sm:max-h-48 bg-white border border-blue-600 rounded-xl overflow-hidden z-[100] shadow-2xl divide-y divide-slate-100 p-1 flex flex-col">
-                    <div className="p-1.5 bg-slate-800 text-white font-bold text-[9px] flex items-center justify-between">
+                  <div className="fixed inset-x-4 top-16 max-h-[50dvh] sm:inset-x-auto sm:absolute sm:inset-auto sm:top-full sm:right-0 sm:w-[380px] sm:max-h-56 bg-white border border-blue-600 rounded-xl overflow-hidden z-[100] shadow-2xl divide-y divide-slate-100 p-1 flex flex-col">
+                    <div className="p-1.5 bg-slate-800 text-white font-bold text-[9px] flex items-center justify-between shrink-0">
                       <span>البحث برقم الهاتف</span>
                       <button type="button" onClick={() => setShowPhoneDropdown(false)}><X className="w-3 h-3" /></button>
                     </div>
-                    <div className="overflow-y-auto max-h-[40vh] sm:max-h-40 divide-y divide-slate-100">
+                    <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain pb-14 sm:pb-1 divide-y divide-slate-100">
                       {partiesList
                         .filter(p => p.phone && p.phone.includes(custPhone.trim()))
                         .map(p => (
@@ -3384,7 +3420,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
             {/* Instant Product Search Suggestions Dropdown */}
             {showInlineDropdown && inlineProductSearch.trim().length > 0 && (
-              <div className="absolute top-full right-0 left-0 bg-white border border-blue-500 rounded-lg max-h-56 overflow-y-auto z-50 shadow-xl mt-0.5 divide-y divide-slate-100">
+              <div className="absolute top-full right-0 left-0 bg-white border border-blue-500 rounded-lg max-h-[40dvh] sm:max-h-56 overflow-y-auto overscroll-contain z-50 shadow-xl mt-0.5 divide-y divide-slate-100">
                 {(() => {
                   const s = inlineProductSearch.trim().toLowerCase();
                   const matches = db.products.filter(p =>
@@ -3487,7 +3523,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
 
           {/* Invoice Items Table */}
-          <div className="flex-1 border border-slate-300 rounded bg-white overflow-y-auto max-h-[360px] min-h-[160px]">
+          <div className="flex-1 border border-slate-300 rounded bg-white overflow-y-auto overscroll-contain max-h-[40dvh] sm:max-h-[360px] min-h-[130px]">
             <table className="w-full table-fixed text-center text-[8.5px] border-collapse">
               <thead>
                 <tr className="bg-slate-100 text-slate-800 font-bold border-b border-slate-300 sticky top-0 z-10">
@@ -3559,8 +3595,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
         </div>
 
-        {/* Bottom Fixed Area: Summary bar + Action buttons */}
-        <div className="bg-white border-t border-slate-300 p-1.5 flex flex-col gap-1 sticky bottom-0 z-20 rounded-b-lg">
+        {/* Bottom Summary bar + Action buttons (sticky on sm+ so mobile keyboard never crushes viewport) */}
+        <div className="bg-white border-t border-slate-300 p-1.5 flex flex-col gap-1 sm:sticky sm:bottom-0 z-20 rounded-b-lg">
           {/* Summary Grid Bar (7 stats) */}
           <div className="bg-slate-900 text-white rounded p-1 grid grid-cols-3 sm:grid-cols-6 gap-1 text-center text-[8px]">
             <div className="bg-white/10 p-1 rounded">
@@ -3695,16 +3731,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       {/* MODAL 1: Options Modal (الخصم والضريبة والدفع المتعدد) */}
       {showOptionsModal && (
-        <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-2">
-          <div className="bg-white rounded-lg w-full max-w-[390px] border border-slate-300 shadow-2xl overflow-hidden flex flex-col">
-            <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold">
+        <div className="fixed inset-0 z-[100] bg-black/60 flex items-start sm:items-center justify-center p-2 pt-3 sm:p-3 overflow-y-auto">
+          <div className="bg-white rounded-lg w-full max-w-[390px] max-h-[90dvh] my-auto border border-slate-300 shadow-2xl overflow-hidden flex flex-col">
+            <div className="bg-blue-600 text-white px-3 py-2 flex items-center justify-between text-xs font-bold shrink-0">
               <span>خصومات، ضرائب، إيرادات وطرق الدفع</span>
-              <button onClick={() => setShowOptionsModal(false)} className="hover:opacity-75">
+              <button onClick={() => setShowOptionsModal(false)} className="hover:opacity-75 p-0.5">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-3 space-y-2.5 text-[9.5px]">
+            <div className="p-3 pb-24 sm:pb-3 space-y-2.5 text-[9.5px] overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body">
               {/* Pricing System Option */}
               <div className="space-y-1 bg-slate-50 p-2 rounded border border-slate-200">
                 <label className="font-bold text-slate-700 block">نظام التسعير للفاتورة</label>
@@ -3909,17 +3945,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       {/* MODAL 2: Lookup Modal (دليل الأصناف - إضافة سريعة) */}
       {showLookupModal && (
-        <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-2">
-          <div className="bg-slate-200 rounded-lg w-[96vw] max-w-4xl h-[92vh] border-2 border-slate-500 shadow-2xl flex flex-col overflow-hidden">
-            <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold">
-              <div className="flex items-center gap-2">
-                <Boxes className="w-4 h-4" />
-                <span>دليل الأصناف (اضغط على أي صنف لتحديد الكمية والسعر)</span>
-                <span className="bg-white/20 text-white px-2 py-0.5 rounded text-[9px] font-normal">
+        <div className="fixed inset-0 z-[100] bg-black/60 flex items-start sm:items-center justify-center p-1.5 pt-2 sm:p-2 overflow-y-auto">
+          <div className="bg-slate-200 rounded-lg w-full sm:w-[96vw] max-w-4xl h-[90dvh] max-h-[90dvh] my-auto border-2 border-slate-500 shadow-2xl flex flex-col overflow-hidden">
+            <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <Boxes className="w-4 h-4 shrink-0" />
+                <span className="truncate">دليل الأصناف (اضغط على أي صنف لتحديد الكمية والسعر)</span>
+                <span className="bg-white/20 text-white px-2 py-0.5 rounded text-[9px] font-normal shrink-0 hidden sm:inline">
                   مدرج بالفاتورة: {invoiceItems.length} صنف ({formatMoney(itemsSubTotal, db.settings.currency)})
                 </span>
               </div>
-              <button onClick={() => setShowLookupModal(false)} className="hover:opacity-75">
+              <button onClick={() => setShowLookupModal(false)} className="hover:opacity-75 shrink-0 p-0.5">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -3993,7 +4029,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   )}
                 </div>
 
-                <div className="flex-1 overflow-y-auto flex flex-col gap-1 p-0.5">
+                <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain flex flex-col gap-1 p-0.5 pb-20 sm:pb-2">
                   {(() => {
                     const filtered = db.products
                       .filter(p => selectedCategory === 'all' || p.category === selectedCategory)
@@ -4122,16 +4158,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       {/* MODAL 3: Add New Item Modal (إضافة صنف جديد للمخزون) */}
       {showEditItemModal && (
-        <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-2">
-          <div className="bg-white rounded-lg w-full max-w-[390px] border border-slate-300 shadow-2xl overflow-hidden flex flex-col">
-            <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold">
+        <div className="fixed inset-0 z-[100] bg-black/60 flex items-start sm:items-center justify-center p-2 pt-3 sm:p-3 overflow-y-auto">
+          <div className="bg-white rounded-lg w-full max-w-[390px] max-h-[90dvh] my-auto border border-slate-300 shadow-2xl overflow-hidden flex flex-col">
+            <div className="bg-blue-600 text-white px-3 py-2 flex items-center justify-between text-xs font-bold shrink-0">
               <span>إضافة صنف جديد للمخزون</span>
-              <button onClick={() => setShowEditItemModal(false)} className="hover:opacity-75">
+              <button onClick={() => setShowEditItemModal(false)} className="hover:opacity-75 p-0.5">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-3 space-y-2 text-[9.5px]">
+            <div className="p-3 pb-24 sm:pb-3 space-y-2 text-[9.5px] overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body">
               <div className="bg-blue-50 text-blue-800 p-1 rounded font-bold text-[8.5px]">
                 إضافة مباشرة للمخزون
               </div>
@@ -4259,16 +4295,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       {/* MODAL 4: Modify Item Inside Invoice (تعديل صنف في الفاتورة) */}
       {showModifyModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-2">
-          <div className="bg-white rounded-lg w-full max-w-[340px] border border-slate-300 shadow-2xl overflow-hidden flex flex-col">
-            <div className="bg-blue-600 text-white px-3 py-1.5 flex items-center justify-between text-xs font-bold">
+        <div className="fixed inset-0 z-[100] bg-black/60 flex items-start sm:items-center justify-center p-2 pt-3 sm:p-3 overflow-y-auto">
+          <div className="bg-white rounded-lg w-full max-w-[340px] max-h-[90dvh] my-auto border border-slate-300 shadow-2xl overflow-hidden flex flex-col">
+            <div className="bg-blue-600 text-white px-3 py-2 flex items-center justify-between text-xs font-bold shrink-0">
               <span>تعديل صنف في الفاتورة</span>
-              <button onClick={() => setShowModifyModal(false)} className="hover:opacity-75">
+              <button onClick={() => setShowModifyModal(false)} className="hover:opacity-75 p-0.5">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="p-3 space-y-2 text-[9.5px]">
+            <div className="p-3 pb-24 sm:pb-3 space-y-2 text-[9.5px] overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body">
               <div>
                 <label className="font-bold text-slate-700 block mb-0.5">اسم الصنف</label>
                 <input
@@ -4331,15 +4367,21 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         </div>
       )}
 
-      {/* Toast Notification */}
+      {/* Toast Notification (compact non-blocking top banner above modals) */}
       {toastMessage && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[100] bg-slate-900/95 backdrop-blur-md text-white px-4 py-2.5 rounded-xl shadow-2xl border border-emerald-500/80 flex items-center gap-2.5 text-xs font-bold animate-in fade-in slide-in-from-top-2 duration-200">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{toastMessage}</span>
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-[calc(env(safe-area-inset-top,0px)+3.5rem)] sm:top-4 left-1/2 -translate-x-1/2 z-[120] w-[calc(100vw-1.5rem)] max-w-sm bg-slate-900/95 backdrop-blur-md text-white px-3.5 py-2 rounded-xl shadow-xl border border-emerald-500/70 flex items-center justify-between gap-2 text-xs font-bold animate-in fade-in slide-in-from-top-2 duration-200 pointer-events-none"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="truncate">{toastMessage}</span>
+          </div>
           <button
             type="button"
             onClick={() => setToastMessage(null)}
-            className="text-slate-400 hover:text-white p-0.5 mr-1 cursor-pointer"
+            className="pointer-events-auto text-slate-400 hover:text-white p-0.5 shrink-0 cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -4364,7 +4406,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
         return (
           <div
-            className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-3 animate-in fade-in duration-150"
+            className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-[2px] flex items-start sm:items-center justify-center p-2 pt-3 sm:p-3 overflow-y-auto animate-in fade-in duration-150"
             onKeyDown={e => {
               if (e.key === 'Escape') {
                 setShowItemCardModal(false);
@@ -4372,9 +4414,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               }
             }}
           >
-            <div className="bg-white rounded-xl w-full max-w-lg border-2 border-blue-600 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+            <div className="bg-white rounded-xl w-full max-w-lg border-2 border-blue-600 shadow-2xl overflow-hidden flex flex-col max-h-[90dvh] my-auto">
               {/* Modal Header */}
-              <div className="bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 text-white px-4 py-3 flex items-center justify-between">
+              <div className="bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 text-white px-3.5 py-2.5 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-2">
                   <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center">
                     <Boxes className="w-4 h-4 text-white" />
@@ -4408,7 +4450,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </div>
 
               {/* Modal Content */}
-              <div className="p-4 space-y-3.5 overflow-y-auto flex-1">
+              <div className="p-3 sm:p-4 pb-24 sm:pb-4 space-y-3 overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body">
                 {/* Product Info Bar */}
                 <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
                   <div className="flex items-start justify-between gap-2">
@@ -4736,7 +4778,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </div>
 
               {/* Action Buttons Footer */}
-              <div className="bg-slate-100 border-t border-slate-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="bg-slate-100 border-t border-slate-200 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => {
@@ -4774,9 +4816,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       {/* MODAL 6: Fast On-the-fly Item Creation (إضافة صنف غير موجود فوراً بالمخزون والفاتورة) */}
       {showFastCreateModal && (
-        <div className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-3 animate-in fade-in duration-150">
-          <div className="bg-white rounded-xl w-full max-w-md border-2 border-emerald-600 shadow-2xl overflow-hidden flex flex-col">
-            <div className="bg-gradient-to-r from-emerald-700 to-teal-800 text-white px-4 py-3 flex items-center justify-between">
+        <div className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-[2px] flex items-start sm:items-center justify-center p-2 pt-3 sm:p-3 overflow-y-auto animate-in fade-in duration-150">
+          <div className="bg-white rounded-xl w-full max-w-md max-h-[90dvh] my-auto border-2 border-emerald-600 shadow-2xl overflow-hidden flex flex-col">
+            <div className="bg-gradient-to-r from-emerald-700 to-teal-800 text-white px-3.5 py-2.5 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2">
                 <Boxes className="w-5 h-5 text-white" />
                 <div>
@@ -4795,7 +4837,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </button>
             </div>
 
-            <div className="p-4 space-y-3 text-xs">
+            <div className="p-3.5 sm:p-4 pb-24 sm:pb-4 space-y-3 text-xs overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body">
               {/* Notice regarding stock */}
               <div className="bg-amber-50 border border-amber-300 rounded-lg p-2.5 text-[10px] text-amber-900 leading-relaxed font-medium">
                 {mode === 'sale' || mode === 'wholesale' ? (
@@ -4910,7 +4952,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               )}
             </div>
 
-            <div className="bg-slate-100 border-t border-slate-200 px-4 py-2.5 flex items-center justify-between gap-2">
+            <div className="bg-slate-100 border-t border-slate-200 px-3.5 py-2 flex items-center justify-between gap-2 shrink-0">
               <button
                 type="button"
                 onClick={() => setShowFastCreateModal(false)}
@@ -4934,7 +4976,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       {/* MODAL: Rapid Add / Edit Item Card */}
       {showRapidItemModal && (
         <div
-          className="fixed inset-0 z-[80] bg-black/75 backdrop-blur-[2px] flex items-center justify-center p-3 animate-in fade-in duration-150"
+          className="fixed inset-0 z-[80] bg-black/75 backdrop-blur-[2px] flex items-start sm:items-center justify-center p-2 pt-3 sm:p-3 overflow-y-auto animate-in fade-in duration-150"
           onClick={(e) => {
             if (e.target === e.currentTarget) {
               e.stopPropagation();
@@ -4944,14 +4986,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           }}
         >
           <div
-            className="bg-[#151e32] border border-[#273754] text-[#f8fafc] rounded-xl w-full max-w-[430px] shadow-2xl overflow-hidden flex flex-col"
+            className="bg-[#151e32] border border-[#273754] text-[#f8fafc] rounded-xl w-full max-w-[430px] max-h-[90dvh] my-auto shadow-2xl overflow-hidden flex flex-col"
             onClick={(e) => {
               e.stopPropagation();
               if (showRapidDropdown) setShowRapidDropdown(false);
             }}
           >
             {/* Modal Header */}
-            <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-[#273754] bg-[#0b1120]/70">
+            <div className="flex items-center justify-between px-3.5 py-2 border-b border-[#273754] bg-[#0b1120]/80 shrink-0">
               <h3 className="text-xs sm:text-sm font-bold flex items-center gap-2 text-white">
                 <Boxes className="w-4 h-4 text-blue-400" />
                 <span>
@@ -4973,7 +5015,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             </div>
 
             {/* Modal Form Content */}
-            <div className="p-3.5 space-y-2.5 text-xs">
+            <div className="p-3 sm:p-3.5 pb-24 sm:pb-3.5 space-y-2.5 text-xs overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body">
               {/* Item Name with Live Searchable Dropdown & Original Remaining Stock Display */}
               {(() => {
                 const trimmedQ = rapidItemName.trim();
@@ -4994,14 +5036,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     )
                   : null;
                 const rapidSearchLower = trimmedQ.toLowerCase();
-                const rapidCandidates = db.products
-                  .filter(p =>
-                    !rapidSearchLower ||
-                    p.name.toLowerCase().includes(rapidSearchLower) ||
-                    p.code.toLowerCase().includes(rapidSearchLower) ||
-                    (p.barcode && p.barcode.toLowerCase().includes(rapidSearchLower))
-                  )
-                  .slice(0, 25);
+                const rapidCandidates = trimmedQ.length > 0
+                  ? db.products
+                      .filter(p =>
+                        p.name.toLowerCase().includes(rapidSearchLower) ||
+                        p.code.toLowerCase().includes(rapidSearchLower) ||
+                        (p.barcode && p.barcode.toLowerCase().includes(rapidSearchLower))
+                      )
+                      .slice(0, 25)
+                  : [];
 
                 return (
                   <div className="flex flex-col gap-1.5 relative" onClick={e => e.stopPropagation()}>
@@ -5015,7 +5058,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         value={rapidItemName}
                         placeholder="ابحث باسم الصنف أو الكود..."
                         onFocus={() => {
-                          if (!suppressRapidFocusRef.current) setShowRapidDropdown(true);
+                          if (!suppressRapidFocusRef.current && rapidItemName.trim().length > 0) {
+                            setShowRapidDropdown(true);
+                          }
                         }}
                         onBlur={() => setTimeout(() => setShowRapidDropdown(false), 180)}
                         onChange={e => onRapidItemNameChange(e.target.value)}
@@ -5039,7 +5084,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                             setRapidItemName('');
                             setRapidItemPrice('');
                             setRapidItemTotal('');
-                            setShowRapidDropdown(true);
+                            setShowRapidDropdown(false);
                             rapidNameRef.current?.focus();
                           }}
                           className="absolute left-2 text-[#94a3b8] hover:text-white p-0.5 cursor-pointer"
@@ -5052,9 +5097,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       )}
                     </div>
 
-                    {/* Searchable Candidates Dropdown with Live Remaining Stock & Last Purchase Price */}
-                    {showRapidDropdown && (
-                      <div className="absolute top-[56px] right-0 left-0 z-50 bg-[#0f172a] border border-blue-500/70 rounded-lg shadow-2xl max-h-52 overflow-y-auto divide-y divide-[#1e293b]">
+                    {/* Searchable Candidates Dropdown with Live Remaining Stock & Last Purchase Price (shown only while searching) */}
+                    {showRapidDropdown && trimmedQ.length > 0 && (
+                      <div className="absolute top-[56px] right-0 left-0 z-50 bg-[#0f172a] border border-blue-500/70 rounded-lg shadow-2xl max-h-40 sm:max-h-52 overflow-y-auto overscroll-contain divide-y divide-[#1e293b]">
                         {rapidCandidates.length === 0 ? (
                           <div className="p-2.5 text-center text-[10px] text-slate-400">
                             لا يوجد صنف مسجل بهذا الاسم — سيتم {mode === 'purchase' ? 'تسجيله بكود فريد تلقائياً' : 'التحقق قبل الإدراج'}
@@ -5371,13 +5416,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   className="bg-[#1a263d] border border-blue-500 text-blue-300 px-3 py-1.5 rounded-md text-sm font-mono font-black outline-none text-center"
                 />
               </div>
+            </div>
 
-              {/* Action Button */}
+            {/* Sticky Pinned Modal Action Footer */}
+            <div className="px-3.5 py-2.5 bg-[#0b1120]/95 border-t border-[#273754] shrink-0">
               <button
                 type="button"
                 disabled={isModalSubmitting}
                 onClick={saveRapidItemToInvoice}
-                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 active:scale-[0.99] text-white rounded-lg font-bold text-xs shadow transition-all cursor-pointer flex items-center justify-center gap-1.5 mt-1"
+                className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 active:scale-[0.99] text-white rounded-lg font-bold text-xs shadow transition-all cursor-pointer flex items-center justify-center gap-1.5"
               >
                 <Check className="w-4 h-4" />
                 <span>

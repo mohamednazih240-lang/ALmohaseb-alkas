@@ -420,10 +420,10 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-center justify-center p-2 sm:p-3 overflow-y-auto overflow-x-hidden">
-      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-start sm:items-center justify-center p-2 pt-3 sm:p-3 overflow-y-auto overflow-x-hidden">
+      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90dvh] my-auto flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
-        <div className="flex items-center justify-between p-3.5 sm:p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl gap-2">
+        <div className="flex items-center justify-between p-3.5 sm:p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl gap-2 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <div className="p-1.5 bg-blue-600 text-white rounded-lg shadow-2xs shrink-0">
               <Package className="w-5 h-5" />
@@ -446,7 +446,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           </button>
         </div>
 
-        <form onSubmit={e => handleSave(e, false)} className="p-3.5 sm:p-4 space-y-3.5 overflow-y-auto overflow-x-hidden flex-1 min-w-0">
+        <form onSubmit={e => handleSave(e, false)} className="p-3.5 sm:p-4 pb-28 sm:pb-4 space-y-3.5 overflow-y-auto overscroll-contain overflow-x-hidden flex-1 min-h-0 min-w-0 mobile-modal-body">
           {/* Continuous addition success banner */}
           {continuousNotification && (
             <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between gap-2 text-xs text-emerald-900 animate-in fade-in duration-200">

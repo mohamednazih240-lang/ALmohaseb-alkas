@@ -241,6 +241,85 @@ export function markRecordsDeleted(
   return db;
 }
 
+export function unblockActiveRecordIds(db: AccountingDB, ids: Array<string | undefined | null>): void {
+  const toUnblock = new Set(ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0));
+  if (toUnblock.size === 0) return;
+  const currentSet = getAllDeletedRecordIds(db);
+  let changed = false;
+  toUnblock.forEach(id => {
+    if (currentSet.delete(id)) changed = true;
+  });
+  if (changed) {
+    db.deletedRecordIds = saveLocalDeletedRecordIds(db.settings?.companyCode, currentSet);
+  }
+}
+
+export function isAutoInvoiceVoucher(v?: Voucher | null): boolean {
+  if (!v) return false;
+  if (v.isManualInstallment) return false;
+  if (v.isAutoFromInvoice) return true;
+  return Boolean(v.id && v.id.startsWith('vch_'));
+}
+
+export function isVoucherLinkedToInvoice(v?: Voucher | null, inv?: Invoice | null): boolean {
+  if (!v || !inv) return false;
+  if (v.invoiceId) return v.invoiceId === inv.id;
+  if (v.sourceId) return v.sourceId === inv.id;
+  const kind = (inv.invoiceKind || inv.type) as string;
+  if (kind === 'sale_return' || kind === 'purchase_return' || kind === 'quote' || kind === 'order') return false;
+  const isSale = inv.type === 'sale' || kind === 'sale' || kind === 'wholesale';
+  const expectedType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
+  return Boolean(
+    v.referenceNumber &&
+    String(v.referenceNumber).trim() === String(inv.number).trim() &&
+    v.type === expectedType &&
+    (!v.partyId || !inv.partyId || v.partyId === inv.partyId)
+  );
+}
+
+export function partitionInvoicePaymentsForAutoPortion(
+  invoice: Invoice,
+  autoPaidPortion: number
+): { method: PaymentMethod; amount: number }[] {
+  const cleanPortion = roundMoney(Math.max(0, autoPaidPortion));
+  if (cleanPortion <= 0) return [];
+
+  const nonCreditSplits = (invoice.payments || [])
+    .filter(p => p && p.method && p.method !== 'آجل' && roundMoney(Number(p.amount) || 0) > 0)
+    .map(p => ({ method: p.method, amount: roundMoney(Number(p.amount) || 0) }));
+
+  if (nonCreditSplits.length > 0) {
+    const splitsSumCents = nonCreditSplits.reduce((s, p) => s + toCents(p.amount), 0);
+    const targetCents = toCents(cleanPortion);
+    if (Math.abs(splitsSumCents - targetCents) <= 1) {
+      return nonCreditSplits;
+    }
+    let remainingCents = targetCents;
+    const allocated: { method: PaymentMethod; amount: number }[] = [];
+    for (const p of nonCreditSplits) {
+      if (remainingCents <= 0) break;
+      const takeCents = Math.min(toCents(p.amount), remainingCents);
+      if (takeCents > 0) {
+        allocated.push({ method: p.method, amount: fromCents(takeCents) });
+        remainingCents -= takeCents;
+      }
+    }
+    if (allocated.length > 0 && remainingCents === 0) {
+      return allocated;
+    }
+    if (allocated.length > 0 && remainingCents > 0) {
+      allocated[0].amount = fromCents(toCents(allocated[0].amount) + remainingCents);
+      return allocated;
+    }
+  }
+
+  const fallbackMethod: PaymentMethod =
+    invoice.paymentMethod && invoice.paymentMethod !== 'آجل'
+      ? invoice.paymentMethod
+      : 'نقدي';
+  return [{ method: fallbackMethod, amount: cleanPortion }];
+}
+
 export function purgeDeletedRecordsFromDb(db: AccountingDB, externalDeletedSet?: Set<string>): AccountingDB {
   if (!db) return db;
   const del = externalDeletedSet || getAllDeletedRecordIds(db);
@@ -2569,7 +2648,11 @@ export function calculateCustomerBalance(db: AccountingDB, customerId: string, b
   // Subtract receipts (only standalone vouchers, as invoice remaining already deducts invoice.paid)
   db.vouchers.forEach(v => {
     if (v.type === 'receipt' && v.partyId === customerId) {
-      const isInvoiceLinked = Boolean(v.invoiceId || (v.referenceNumber && db.invoices.some(i => i.number === v.referenceNumber)));
+      const isInvoiceLinked = Boolean(
+        v.isAutoFromInvoice ||
+        (v.invoiceId && db.invoices.some(i => i.id === v.invoiceId)) ||
+        (!v.invoiceId && v.referenceNumber && db.invoices.some(i => i.type === 'sale' && i.number === v.referenceNumber && (!v.partyId || !i.partyId || i.partyId === v.partyId)))
+      );
       if (!isInvoiceLinked) {
         if (isBranchMatch(v.branchId, branchId)) {
           balance -= Number(v.amount);
@@ -2616,7 +2699,11 @@ export function calculateSupplierBalance(db: AccountingDB, supplierId: string, b
   // Subtract payments (only standalone vouchers, as invoice remaining already deducts invoice.paid)
   db.vouchers.forEach(v => {
     if (v.type === 'payment' && v.partyId === supplierId) {
-      const isInvoiceLinked = Boolean(v.invoiceId || (v.referenceNumber && db.invoices.some(i => i.number === v.referenceNumber)));
+      const isInvoiceLinked = Boolean(
+        v.isAutoFromInvoice ||
+        (v.invoiceId && db.invoices.some(i => i.id === v.invoiceId)) ||
+        (!v.invoiceId && v.referenceNumber && db.invoices.some(i => i.type === 'purchase' && i.number === v.referenceNumber && (!v.partyId || !i.partyId || i.partyId === v.partyId)))
+      );
       if (!isInvoiceLinked) {
         if (isBranchMatch(v.branchId, branchId)) {
           balance -= Number(v.amount);
@@ -3768,9 +3855,12 @@ export function mergeVouchers(
       )
     );
   const getKey = (v: Voucher) => {
-    const isAuto = !v.isManualInstallment && (v.isAutoFromInvoice || v.id.startsWith('vch_'));
+    const isAuto = isAutoInvoiceVoucher(v);
     if (v.invoiceId && isAuto) {
-      return `vch_auto_inv_${v.invoiceId}_${v.type}`;
+      const splitMatch = v.id.match(/_p(\d+)_/);
+      return splitMatch
+        ? `vch_auto_inv_${v.invoiceId}_p${splitMatch[1]}_${v.type}`
+        : `vch_auto_inv_${v.invoiceId}_${v.type}`;
     }
     return v.id;
   };
@@ -3963,11 +4053,11 @@ export function getBranchFinancialSummary(db: AccountingDB, branchId: string) {
   const totalRevenues = roundMoney(branchRevenues.reduce((sum, r) => sum + (Number(r.amount) || 0), 0));
 
   // 5. Cash balance in this branch:
-  // (Paid cash sales + receipts + revenues) - (Paid cash purchases + payments + expenses)
+  // (Paid cash sales + standalone/manual cash receipts + revenues) - (Paid cash purchases + standalone/manual cash payments + expenses)
   const cashSalesPaid = branchSales.filter(inv => inv.paymentMethod === 'نقدي').reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
   const cashPurchasesPaid = branchPurchases.filter(inv => inv.paymentMethod === 'نقدي').reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
-  const cashReceipts = branchVouchers.filter(v => v.type === 'receipt' && v.paymentMethod === 'نقدي').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
-  const cashPayments = branchVouchers.filter(v => v.type === 'payment' && v.paymentMethod === 'نقدي').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
+  const cashReceipts = branchVouchers.filter(v => !isAutoInvoiceVoucher(v) && !v.invoiceId && v.type === 'receipt' && v.paymentMethod === 'نقدي').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
+  const cashPayments = branchVouchers.filter(v => !isAutoInvoiceVoucher(v) && !v.invoiceId && v.type === 'payment' && v.paymentMethod === 'نقدي').reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
   const cashExpenses = branchExpenses.filter(e => e.method === 'نقدي').reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
   const cashRevenues = branchRevenues.filter(r => r.method === 'نقدي').reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
 
@@ -4064,14 +4154,19 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     return !rm;
   });
 
-  // 2. Hard-delete all treasury entries related to this invoice (including wholesale & split payments)
+  // 2. Hard-delete all treasury entries strictly belonging to this invoice (including wholesale & split payments)
   updated.treasury = updated.treasury.filter(tr => {
+    const trExplicitInvId = tr.invoiceId || (tr.sourceType === expectedTrSourceType || (isSale && tr.sourceType === 'wholesale') ? tr.sourceId : undefined);
+    if (trExplicitInvId) {
+      const rm = trExplicitInvId === invoice.id;
+      if (rm && tr.id) removedIds.push(tr.id);
+      return !rm;
+    }
     const matchesSourceType = tr.sourceType === expectedTrSourceType || (isSale && tr.sourceType === 'wholesale');
     const rm =
       tr.sourceId === invoice.id ||
-      (tr as any).invoiceId === invoice.id ||
       (tr.id && invoice.id && (tr.id.includes(invoice.id) || (cleanInvId && tr.id.includes(cleanInvId)))) ||
-      ((tr as any).refNumber && String((tr as any).refNumber).trim() === String(invoice.number).trim() && matchesSourceType) ||
+      (tr.refNumber && String(tr.refNumber).trim() === String(invoice.number).trim() && matchesSourceType) ||
       Boolean(invoice.number && tr.description && matchesSourceType && (
         tr.description.includes(expectedTrPrefix) ||
         tr.description.includes(`مرتجع رقم ${invoice.number}`)
@@ -4099,16 +4194,18 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     });
   }
 
-  // 5. Hard-delete any linked vouchers and their journals/treasury
+  // 5. Hard-delete any linked vouchers and their journals/treasury strictly by invoiceId (fallback only when invoiceId missing)
   const linkedVoucherIds = new Set<string>();
   const linkedVoucherJournalIds = new Set<string>();
   updated.vouchers = updated.vouchers.filter(v => {
-    const isLinked =
-      (v.id && invoice.id && (v.id.includes(invoice.id) || (cleanInvId && v.id.includes(cleanInvId)))) ||
-      (v as any).sourceId === invoice.id ||
-      (v as any).invoiceId === invoice.id ||
-      ((v as any).referenceNumber === invoice.number && v.type === expectedVoucherType) ||
-      (v.type === expectedVoucherType && v.description && v.description.includes(expectedTrPrefix));
+    const explicitInvId = v.invoiceId || v.sourceId;
+    const isLinked = explicitInvId
+      ? explicitInvId === invoice.id
+      : (
+          (v.id && invoice.id && (v.id.includes(invoice.id) || (cleanInvId && v.id.includes(cleanInvId)))) ||
+          (v.referenceNumber === invoice.number && v.type === expectedVoucherType && (!v.partyId || !invoice.partyId || v.partyId === invoice.partyId)) ||
+          (v.type === expectedVoucherType && v.description && v.description.includes(expectedTrPrefix))
+        );
     if (isLinked) {
       if (v.id) {
         linkedVoucherIds.add(v.id);
@@ -4266,20 +4363,35 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
   const removedIds: string[] = [voucher.id];
   if (voucher.journalEntryId) removedIds.push(voucher.journalEntryId);
 
-  const isLegacyAutoVoucher = Boolean(voucher.isAutoFromInvoice || (voucher.id && voucher.id.startsWith('vch_')));
+  const isLegacyAutoVoucher = isAutoInvoiceVoucher(voucher);
   const cleanInvId = voucher.invoiceId ? voucher.invoiceId.trim().replace(/[^a-zA-Z0-9_-]/g, '_') : '';
+  const splitIdxMatch = voucher.id ? voucher.id.match(/_p(\d+)_/) : null;
+  const splitSuffix = splitIdxMatch ? `_p${splitIdxMatch[1]}_` : null;
 
-  // 1. Hard-delete treasury entries linked to this voucher (and direct invoice treasury if legacy auto-voucher)
+  // 1. Hard-delete treasury entries linked to this voucher (respecting exact split index when auto-voucher has multiple payment legs)
+  const matchingInvTreasury = (isLegacyAutoVoucher && voucher.invoiceId)
+    ? updated.treasury.filter(tr =>
+        tr.sourceId === voucher.invoiceId ||
+        tr.invoiceId === voucher.invoiceId ||
+        (cleanInvId && (
+          tr.id.startsWith(`tr_sale_${cleanInvId}`) ||
+          tr.id.startsWith(`tr_wholesale_${cleanInvId}`) ||
+          tr.id.startsWith(`tr_purchase_${cleanInvId}`)
+        ))
+      )
+    : [];
+  const hasMultipleAutoLegs = matchingInvTreasury.length > 1;
+
   updated.treasury = updated.treasury.filter(tr => {
     const isDirectVoucherTr =
       tr.sourceId === voucher.id ||
       tr.id === voucher.id ||
       (tr.id && (tr.id.includes(voucher.id) || (cleanVoucherId && tr.id.includes(cleanVoucherId))));
-    const isAutoInvoiceTr = Boolean(
+    const isInvTr = Boolean(
       isLegacyAutoVoucher &&
       voucher.invoiceId && (
         tr.sourceId === voucher.invoiceId ||
-        (tr as any).invoiceId === voucher.invoiceId ||
+        tr.invoiceId === voucher.invoiceId ||
         (cleanInvId && (
           tr.id.startsWith(`tr_sale_${cleanInvId}`) ||
           tr.id.startsWith(`tr_wholesale_${cleanInvId}`) ||
@@ -4287,7 +4399,11 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
         ))
       )
     );
-    const rm = isDirectVoucherTr || isAutoInvoiceTr;
+    const isSpecificSplitTr = isInvTr && (
+      !hasMultipleAutoLegs ||
+      (splitSuffix ? tr.id.includes(splitSuffix) : tr.method === voucher.paymentMethod)
+    );
+    const rm = isDirectVoucherTr || isSpecificSplitTr;
     if (rm && tr.id) removedIds.push(tr.id);
     return !rm;
   });
@@ -4305,22 +4421,23 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
   // 3. Hard-delete voucher itself
   updated.vouchers = updated.vouchers.filter(item => item.id !== voucher.id);
 
-  // 4. Revert linked invoice paid / remaining / status / payments / paymentMethod
+  // 4. Revert linked invoice paid / remaining / status / payments / paymentMethod & update its journal
   const affectedPartyIds = new Set<string>();
   if (voucher.partyId) affectedPartyIds.add(voucher.partyId);
 
-  if (voucher.invoiceId || (voucher as any).referenceNumber) {
+  if (voucher.invoiceId || voucher.referenceNumber) {
     const expectedInvType = voucher.type === 'receipt' ? 'sale' : 'purchase';
     const linkedInv =
       (voucher.invoiceId ? updated.invoices.find(i => i.id === voucher.invoiceId) : undefined) ||
-      ((voucher as any).referenceNumber
-        ? updated.invoices.find(i => i.number === (voucher as any).referenceNumber && i.type === expectedInvType)
+      (!voucher.invoiceId && voucher.referenceNumber
+        ? updated.invoices.find(i => i.number === voucher.referenceNumber && i.type === expectedInvType)
         : undefined);
     if (linkedInv) {
       const voucherAmt = Number(voucher.amount) || 0;
       linkedInv.paid = roundMoney(Math.max(0, (Number(linkedInv.paid) || 0) - voucherAmt));
       linkedInv.remaining = roundMoney(Math.max(0, (Number(linkedInv.total) || 0) - linkedInv.paid));
       linkedInv.status = linkedInv.paid <= 0 ? 'آجل' : linkedInv.remaining <= 0 ? 'مدفوع' : 'جزئي';
+      linkedInv.updatedAt = new Date().toISOString();
 
       if (linkedInv.paid <= 0) {
         linkedInv.payments = [];
@@ -4340,6 +4457,32 @@ export function deleteVoucherAndRevert(db: AccountingDB, voucher: Voucher): Acco
           })
           .filter(p => p && (Number(p.amount) || 0) > 0);
         linkedInv.payments = nextPayments;
+        if (nextPayments.length > 0) {
+          linkedInv.paymentMethod = nextPayments[0].method;
+        }
+      }
+
+      // Regenerate invoice journal to reflect updated paid/remaining (excluding remaining manual installments)
+      const manualRemSum = updated.vouchers
+        .filter(v => !isAutoInvoiceVoucher(v) && isVoucherLinkedToInvoice(v, linkedInv))
+        .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+      const autoRemSum = roundMoney(Math.max(0, linkedInv.paid - manualRemSum));
+      const invForJournal: Invoice = manualRemSum > 0
+        ? {
+            ...linkedInv,
+            paid: autoRemSum,
+            remaining: roundMoney(Math.max(0, linkedInv.total - autoRemSum)),
+            payments: autoRemSum > 0 ? partitionInvoicePaymentsForAutoPortion(linkedInv, autoRemSum) : [],
+            paymentMethod: autoRemSum <= 0 ? 'آجل' : linkedInv.paymentMethod
+          }
+        : linkedInv;
+      const existingInvJIdx = updated.journals.findIndex(j => j.sourceId === linkedInv.id || j.id === linkedInv.journalEntryId);
+      const refreshedJournal = createInvoiceJournal(updated, invForJournal);
+      if (existingInvJIdx > -1) {
+        refreshedJournal.id = updated.journals[existingInvJIdx].id;
+        refreshedJournal.sourceId = linkedInv.id;
+        linkedInv.journalEntryId = refreshedJournal.id;
+        updated.journals[existingInvJIdx] = refreshedJournal;
       }
 
       if (linkedInv.partyId) affectedPartyIds.add(linkedInv.partyId);
@@ -4454,38 +4597,89 @@ export function deleteTreasuryEntryAndRevert(db: AccountingDB, entryId: string):
     }
   }
 
-  // 3. If this was linked to an invoice (purchase, sale, wholesale, return), revert invoice paid/remaining/payments and party balance
-  const invoiceNumMatch = tr.description ? tr.description.match(/رقم\s*([A-Za-z0-9_-]+)/) : null;
-  const invNumberExtracted = invoiceNumMatch ? invoiceNumMatch[1] : null;
+  // 3. If this was linked to an invoice (strict invoice sourceType or explicit invoiceId), revert invoice paid/remaining/payments/vouchers/journal and party balance
+  const isInvoiceTreasurySource =
+    tr.sourceType === 'purchase' ||
+    tr.sourceType === 'purchase_return' ||
+    tr.sourceType === 'sale' ||
+    tr.sourceType === 'wholesale' ||
+    tr.sourceType === 'sale_return';
   const expectedInvType = (tr.sourceType === 'purchase' || tr.sourceType === 'purchase_return')
     ? 'purchase'
     : (tr.sourceType === 'sale' || tr.sourceType === 'wholesale' || tr.sourceType === 'sale_return')
       ? 'sale'
       : undefined;
+  const invoiceNumMatch = (!tr.sourceId && !tr.invoiceId && isInvoiceTreasurySource && tr.description)
+    ? tr.description.match(/رقم\s*([A-Za-z0-9_-]+)/)
+    : null;
+  const invNumberExtracted = invoiceNumMatch ? invoiceNumMatch[1] : null;
   const linkedInvoice =
-    (updated.invoices || []).find(i => i.id === targetSourceId || i.id === (tr as any).invoiceId) ||
-    (updated.invoices || []).find(i =>
-      (!expectedInvType || i.type === expectedInvType) && (
-        (invNumberExtracted && String(i.number).trim() === invNumberExtracted.trim()) ||
-        ((tr as any).refNumber && String(i.number).trim() === String((tr as any).refNumber).trim())
-      )
-    );
+    (updated.invoices || []).find(i => (tr.invoiceId && i.id === tr.invoiceId) || (isInvoiceTreasurySource && tr.sourceId && i.id === tr.sourceId)) ||
+    (isInvoiceTreasurySource
+      ? (updated.invoices || []).find(i =>
+          (!expectedInvType || i.type === expectedInvType) && (
+            (invNumberExtracted && String(i.number).trim() === invNumberExtracted.trim()) ||
+            (tr.refNumber && String(i.number).trim() === String(tr.refNumber).trim())
+          )
+        )
+      : undefined);
 
   if (linkedInvoice) {
     linkedInvoice.paid = roundMoney(Math.max(0, (linkedInvoice.paid || 0) - tr.amount));
     linkedInvoice.remaining = roundMoney(Math.max(0, (linkedInvoice.total || 0) - linkedInvoice.paid));
     linkedInvoice.status = linkedInvoice.paid <= 0 ? 'آجل' : linkedInvoice.remaining <= 0 ? 'مدفوع' : 'جزئي';
+    linkedInvoice.updatedAt = new Date().toISOString();
     if (linkedInvoice.paid <= 0) {
       linkedInvoice.payments = [];
       linkedInvoice.paymentMethod = 'آجل';
+    } else if (Array.isArray(linkedInvoice.payments) && linkedInvoice.payments.length > 0) {
+      let cutRem = tr.amount;
+      linkedInvoice.payments = linkedInvoice.payments
+        .map(p => {
+          if (!p || cutRem <= 0 || p.method === 'آجل') return p;
+          if (p.method === tr.method || linkedInvoice.payments!.length === 1) {
+            const cut = Math.min(Number(p.amount) || 0, cutRem);
+            cutRem = roundMoney(cutRem - cut);
+            return { ...p, amount: roundMoney((Number(p.amount) || 0) - cut) };
+          }
+          return p;
+        })
+        .filter(p => p && (Number(p.amount) || 0) > 0);
+      if (linkedInvoice.payments.length > 0) {
+        linkedInvoice.paymentMethod = linkedInvoice.payments[0].method;
+      }
     }
 
-    // Also remove any stale auto voucher for this deleted treasury entry
-    updated.vouchers = (updated.vouchers || []).filter(v => {
-      const isLinkedAuto = (v.isAutoFromInvoice || v.id.startsWith('vch_')) && v.invoiceId === linkedInvoice.id;
-      if (isLinkedAuto && v.id) removedIds.push(v.id);
-      return !isLinkedAuto;
+    // Re-sync auto vouchers for linkedInvoice (removes if paid===0 or reduces to match remaining paid)
+    const beforeVIds = new Set((updated.vouchers || []).filter(v => isAutoInvoiceVoucher(v) && v.invoiceId === linkedInvoice.id).map(v => v.id));
+    syncInvoiceVouchers(updated, linkedInvoice, updated.currentUser?.name || 'المدير العام');
+    const afterVIds = new Set((updated.vouchers || []).filter(v => isAutoInvoiceVoucher(v) && v.invoiceId === linkedInvoice.id).map(v => v.id));
+    beforeVIds.forEach(vid => {
+      if (!afterVIds.has(vid)) removedIds.push(vid);
     });
+
+    // Update invoice journal to reflect reduced paid amount (excluding remaining manual installments)
+    const manualRemSum = updated.vouchers
+      .filter(v => !isAutoInvoiceVoucher(v) && isVoucherLinkedToInvoice(v, linkedInvoice))
+      .reduce((s, v) => s + (Number(v.amount) || 0), 0);
+    const autoRemSum = roundMoney(Math.max(0, linkedInvoice.paid - manualRemSum));
+    const invForJournal: Invoice = manualRemSum > 0
+      ? {
+          ...linkedInvoice,
+          paid: autoRemSum,
+          remaining: roundMoney(Math.max(0, linkedInvoice.total - autoRemSum)),
+          payments: autoRemSum > 0 ? partitionInvoicePaymentsForAutoPortion(linkedInvoice, autoRemSum) : [],
+          paymentMethod: autoRemSum <= 0 ? 'آجل' : linkedInvoice.paymentMethod
+        }
+      : linkedInvoice;
+    const existingInvJIdx = updated.journals.findIndex(j => j.sourceId === linkedInvoice.id || j.id === linkedInvoice.journalEntryId);
+    const refreshedJournal = createInvoiceJournal(updated, invForJournal);
+    if (existingInvJIdx > -1) {
+      refreshedJournal.id = updated.journals[existingInvJIdx].id;
+      refreshedJournal.sourceId = linkedInvoice.id;
+      linkedInvoice.journalEntryId = refreshedJournal.id;
+      updated.journals[existingInvJIdx] = refreshedJournal;
+    }
 
     if (linkedInvoice.partyId) {
       const cust = updated.customers.find(c => c.id === linkedInvoice.partyId);
@@ -4817,11 +5011,13 @@ export function parseNum(val: any): number {
 }
 
 /**
- * Non-generative voucher synchronizer:
- * NEVER auto-creates new automatic Receipt/Payment vouchers when an invoice is posted.
- * Only manual vouchers entered directly by the user are created; invoices retain solely
- * their core double-entry journal (`createInvoiceJournal`).
- * If a legacy auto-voucher already exists for an edited invoice, it updates or cleans it up.
+ * Full deterministic invoice-to-voucher synchronizer:
+ * - Every paid / partially paid Sales invoice ('sale' / 'wholesale') gets deterministic Receipt Voucher(s) ('سند قبض')
+ *   strictly linked via `invoiceId` & `referenceNumber`.
+ * - Every paid / partially paid Purchase invoice ('purchase') gets deterministic Payment Voucher(s) ('سند صرف')
+ *   strictly linked via `invoiceId` & `referenceNumber`.
+ * - Handles split payment channels cleanly (`_p0_`, `_p1_`, ...) and preserves manual installment vouchers.
+ * - Excludes quotes, orders, sale_return, and purchase_return from Receipts/Payments.
  */
 export function syncInvoiceVouchers(
   db: AccountingDB,
@@ -4830,183 +5026,133 @@ export function syncInvoiceVouchers(
 ): AccountingDB {
   const updated = db;
   if (!updated.vouchers) updated.vouchers = [];
+  if (!updated.settings) updated.settings = {} as any;
   if (invoice.invoiceKind === 'quote' || (invoice.invoiceKind as string) === 'order') return updated;
 
   const invoiceId = invoice.id;
   const invoiceNumber = invoice.number;
-  const finalPaid = Number(invoice.paid) || 0;
+  const finalPaid = roundMoney(Number(invoice.paid) || 0);
 
-  const isSaleReturn = invoice.invoiceKind === 'sale_return';
-  const isPurchaseReturn = invoice.invoiceKind === 'purchase_return';
+  const isSaleReturn = invoice.invoiceKind === 'sale_return' || (invoice.type as string) === 'sale_return';
+  const isPurchaseReturn = invoice.invoiceKind === 'purchase_return' || (invoice.type as string) === 'purchase_return';
   const isSale = !isSaleReturn && !isPurchaseReturn && (invoice.type === 'sale' || invoice.invoiceKind === 'sale' || invoice.invoiceKind === 'wholesale');
 
   // Return invoices stay strictly in Returns & Treasury—never inject auto-vouchers into Receipts/Payments
   if (isSaleReturn || isPurchaseReturn) {
     updated.vouchers = updated.vouchers.filter(v => {
       if (v.isManualInstallment) return true;
-      const isLinked = (v as any).invoiceId === invoiceId || (v as any).sourceId === invoiceId;
+      const isLinked = v.invoiceId === invoiceId || v.sourceId === invoiceId;
       return !isLinked;
     });
     return updated;
   }
 
   const voucherType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
-
-  const isAutoVoucherForInvoice = (v: Voucher): boolean => {
-    if (v.isManualInstallment) return false;
-    if (v.isAutoFromInvoice) return true;
-    return v.id.startsWith('vch_');
-  };
+  const defaultBranchId = updated.branches?.[0]?.id || 'br_mawan';
+  const defaultBranchName = updated.branches?.[0]?.name || 'الفرع الرئيسي - شركة الموان';
+  const branchId = invoice.branchId || defaultBranchId;
+  const branchName = invoice.branchName || updated.branches?.find(b => b.id === branchId)?.name || defaultBranchName;
 
   const manualInstallmentSum = updated.vouchers
-    .filter(v => v.invoiceId === invoiceId && !isAutoVoucherForInvoice(v))
+    .filter(v => isVoucherLinkedToInvoice(v, invoice) && !isAutoInvoiceVoucher(v))
     .reduce((s, v) => s + (Number(v.amount) || 0), 0);
-  const autoPaidPortion = Math.max(0, Number((finalPaid - manualInstallmentSum).toFixed(2)));
+  const autoPaidPortion = roundMoney(Math.max(0, finalPaid - manualInstallmentSum));
 
   const numRegex = invoiceNumber
-    ? new RegExp(`رقم\\s*${invoiceNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![0-9A-Za-z])`)
+    ? new RegExp(`(?:رقم|#)\\s*${invoiceNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![0-9A-Za-z])`)
     : null;
 
-  // If no auto-payment portion remains, remove any stale auto-vouchers (never touch manual vouchers)
+  const matchesAutoForThisInvoice = (v: Voucher): boolean => {
+    if (!isAutoInvoiceVoucher(v)) return false;
+    if (v.invoiceId) return v.invoiceId === invoiceId;
+    if (v.sourceId) return v.sourceId === invoiceId;
+    return Boolean(
+      (v.referenceNumber && String(v.referenceNumber).trim() === String(invoiceNumber).trim() && v.type === voucherType && (!v.partyId || !invoice.partyId || v.partyId === invoice.partyId)) ||
+      (v.description && numRegex && numRegex.test(v.description) && v.type === voucherType && (isSale ? !v.description.includes('مشتريات') : !v.description.includes('مبيعات')) && !v.description.includes('مرتجع'))
+    );
+  };
+
+  // If no auto-payment portion remains (credit invoice or 100% covered by manual installment vouchers), remove any stale auto-vouchers
   if (autoPaidPortion <= 0) {
-    updated.vouchers = updated.vouchers.filter(v => {
-      if (!isAutoVoucherForInvoice(v)) return true;
-      const isLinked = (v as any).invoiceId === invoiceId ||
-                       (v as any).sourceId === invoiceId ||
-                       ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
-                       (v.description && numRegex && numRegex.test(v.description) && v.type === voucherType);
-      return !isLinked;
-    });
+    updated.vouchers = updated.vouchers.filter(v => !matchesAutoForThisInvoice(v));
     return updated;
   }
 
-  // Only update an already-existing legacy auto-voucher in place; NEVER auto-create new ones
-  const existingVoucher = updated.vouchers.find(v => {
-    if (!isAutoVoucherForInvoice(v)) return false;
-    return (v as any).invoiceId === invoiceId ||
-           (v as any).sourceId === invoiceId ||
-           ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
-           (v.description && numRegex && numRegex.test(v.description));
+  const existingAutoVouchers = updated.vouchers.filter(matchesAutoForThisInvoice);
+  const paymentSplits = partitionInvoicePaymentsForAutoPortion(invoice, autoPaidPortion);
+  const expectedIds = new Set<string>();
+  const resolvedVouchers: Voucher[] = [];
+  const partyName = invoice.partyName || (isSale ? 'عميل نقدي' : 'مورد عام');
+  const nextSettingKey = voucherType === 'receipt' ? 'nextReceipt' : 'nextPayment';
+
+  paymentSplits.forEach((pLine, idx) => {
+    const detId = getDeterministicVoucherId(invoice.id, idx, voucherType);
+    expectedIds.add(detId);
+
+    const existingForSlot =
+      existingAutoVouchers.find(v => v.id === detId) ||
+      (idx === 0 ? existingAutoVouchers.find(v => !expectedIds.has(v.id)) : undefined);
+
+    let voucherNumber = existingForSlot?.number;
+    if (!voucherNumber) {
+      const nextNumInfo = getNextUniqueVoucherNumber(updated, voucherType);
+      voucherNumber = nextNumInfo.number;
+      updated.settings[nextSettingKey] = Math.max(updated.settings[nextSettingKey] || 1, nextNumInfo.nextSeq + 1);
+    }
+
+    const desc = isSale
+      ? `سند قبض مقابل فاتورة مبيعات رقم ${invoice.number} (${partyName}) عبر ${pLine.method}`
+      : `سند صرف مقابل فاتورة مشتريات رقم ${invoice.number} (${partyName}) عبر ${pLine.method}`;
+
+    const voucherObj: Voucher = {
+      ...(existingForSlot || {}),
+      id: detId,
+      number: voucherNumber,
+      type: voucherType,
+      date: invoice.date,
+      partyId: invoice.partyId,
+      partyName,
+      amount: pLine.amount,
+      paymentMethod: pLine.method,
+      description: desc,
+      currencyCode: invoice.currencyCode,
+      exchangeRate: invoice.exchangeRate,
+      branchId,
+      branchName,
+      invoiceId: invoice.id,
+      referenceNumber: invoice.number,
+      isAutoFromInvoice: true,
+      isManualInstallment: false,
+      status: 'معتمد',
+      createdAt: existingForSlot?.createdAt || invoice.createdAt || new Date().toISOString(),
+      createdBy: existingForSlot?.createdBy || invoice.createdBy || currentUserName,
+      updatedAt: new Date().toISOString(),
+      updatedBy: currentUserName
+    };
+    resolvedVouchers.push(voucherObj);
   });
 
-  if (existingVoucher) {
-    const activePayMethod = (invoice.payments || []).find(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0)?.method;
-    const paymentMethod = (invoice.paymentMethod && invoice.paymentMethod !== 'آجل')
-      ? invoice.paymentMethod
-      : (activePayMethod || 'نقدي');
-    const desc = isSale
-      ? `سند قبض مقابل فاتورة مبيعات رقم ${invoice.number} (${invoice.partyName || 'عميل نقدي'}) عبر ${paymentMethod}`
-      : `سند صرف مقابل فاتورة مشتريات رقم ${invoice.number} (${invoice.partyName || 'مورد عام'}) عبر ${paymentMethod}`;
+  // Unblock active deterministic voucher IDs from deletedRecordIds so an edited/paid invoice isn't wiped by tombstone cleanup
+  unblockActiveRecordIds(updated, Array.from(expectedIds));
 
-    existingVoucher.id = getDeterministicVoucherId(invoice.id, 0, voucherType);
-    existingVoucher.type = voucherType;
-    existingVoucher.amount = autoPaidPortion;
-    existingVoucher.date = invoice.date;
-    existingVoucher.partyId = invoice.partyId;
-    existingVoucher.partyName = invoice.partyName || (voucherType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
-    existingVoucher.paymentMethod = paymentMethod;
-    existingVoucher.description = desc;
-    existingVoucher.branchId = invoice.branchId || 'br_mawan';
-    existingVoucher.branchName = invoice.branchName || 'الفرع الرئيسي - شركة الموان';
-    existingVoucher.invoiceId = invoice.id;
-    existingVoucher.referenceNumber = invoice.number;
-    existingVoucher.isAutoFromInvoice = true;
-    existingVoucher.updatedAt = new Date().toISOString();
-    existingVoucher.updatedBy = currentUserName;
-
-    updated.vouchers = updated.vouchers.filter(v => {
-      if (v === existingVoucher || !isAutoVoucherForInvoice(v)) return true;
-      const isDuplicate = (v as any).invoiceId === invoiceId ||
-                          (v as any).sourceId === invoiceId ||
-                          ((v as any).referenceNumber === invoiceNumber && v.type === voucherType) ||
-                          (v.description && numRegex && numRegex.test(v.description));
-      return !isDuplicate;
-    });
+  // Replace all matched auto-vouchers for this invoice cleanly without duplicates
+  updated.vouchers = updated.vouchers.filter(v => !matchesAutoForThisInvoice(v) && !expectedIds.has(v.id));
+  for (let i = resolvedVouchers.length - 1; i >= 0; i--) {
+    updated.vouchers.unshift(resolvedVouchers[i]);
   }
 
   return updated;
 }
 
 /**
- * Strictly non-generative voucher cleanup:
- * Never creates new automatic vouchers for invoices; only removes stray return vouchers
- * or reconciles/deduplicates existing auto-vouchers.
+ * Reconciles all existing Sales & Purchase invoices so every paid/partially paid invoice
+ * has its linked Receipt/Payment Voucher and Treasury entry strictly bound by `invoiceId`.
  */
 export function syncAllExistingInvoiceVouchers(db: AccountingDB): { db: AccountingDB; createdCount: number } {
-  if (!db.vouchers) db.vouchers = [];
-  if (!db.invoices || db.invoices.length === 0) return { db, createdCount: 0 };
-
-  const sortedInvoices = [...db.invoices].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-  sortedInvoices.forEach(inv => {
-    if (inv.invoiceKind === 'quote' || (inv.invoiceKind as string) === 'order') return;
-    const paid = Number(inv.paid) || 0;
-    const isSaleReturn = inv.invoiceKind === 'sale_return';
-    const isPurchaseReturn = inv.invoiceKind === 'purchase_return';
-    const isSale = !isSaleReturn && !isPurchaseReturn && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale');
-    const expectedType: 'receipt' | 'payment' = isSale ? 'receipt' : 'payment';
-    const numRegex = inv.number
-      ? new RegExp(`رقم\\s*${inv.number.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![0-9A-Za-z])`)
-      : null;
-
-    if (isSaleReturn || isPurchaseReturn) {
-      db.vouchers = db.vouchers.filter(v => {
-        if (!v) return false;
-        const isLinked = (v as any).invoiceId === inv.id || (v as any).sourceId === inv.id || isReturnRelatedVoucher(v);
-        if (isLinked && v.id) markRecordsDeleted(db, [v.id]);
-        return !isLinked;
-      });
-      return;
-    }
-
-    const autoVouchers = db.vouchers.filter(v => {
-      if (v.isManualInstallment || (!v.isAutoFromInvoice && !v.id.startsWith('vch_'))) return false;
-      return (v as any).invoiceId === inv.id ||
-             (v as any).sourceId === inv.id ||
-             ((v as any).referenceNumber === inv.number && v.type === expectedType) ||
-             (v.description && numRegex && numRegex.test(v.description));
-    });
-
-    if (autoVouchers.length === 0) {
-      return;
-    }
-
-    const manualInstallments = db.vouchers.filter(v =>
-      (v.invoiceId === inv.id) && (v.isManualInstallment || (!v.isAutoFromInvoice && !v.id.startsWith('vch_')))
-    );
-    const manualPaid = manualInstallments.reduce((s, v) => s + (Number(v.amount) || 0), 0);
-    const autoExpected = Math.max(0, Number((paid - manualPaid).toFixed(2)));
-
-    if (autoExpected <= 0) {
-      const rmIds = new Set(autoVouchers.map(v => v.id));
-      db.vouchers = db.vouchers.filter(v => !rmIds.has(v.id));
-      return;
-    }
-
-    const activePayMethod = (inv.payments || []).find(p => p.method && p.method !== 'آجل' && Number(p.amount) > 0)?.method;
-    const safeMethod = (inv.paymentMethod && inv.paymentMethod !== 'آجل') ? inv.paymentMethod : (activePayMethod || 'نقدي');
-    const primaryVoucher = autoVouchers[0];
-    primaryVoucher.id = getDeterministicVoucherId(inv.id, 0, expectedType);
-    primaryVoucher.type = expectedType;
-    primaryVoucher.amount = autoExpected;
-    primaryVoucher.invoiceId = inv.id;
-    primaryVoucher.referenceNumber = inv.number;
-    primaryVoucher.isAutoFromInvoice = true;
-    primaryVoucher.date = inv.date;
-    primaryVoucher.partyName = inv.partyName || (expectedType === 'receipt' ? 'عميل نقدي' : 'مورد عام');
-    primaryVoucher.paymentMethod = safeMethod;
-    primaryVoucher.description = isSale
-      ? `سند قبض مقابل فاتورة مبيعات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`
-      : `سند صرف مقابل فاتورة مشتريات رقم ${inv.number} (${primaryVoucher.partyName}) عبر ${safeMethod}`;
-
-    if (autoVouchers.length > 1) {
-      const extraIds = new Set(autoVouchers.slice(1).map(v => v.id));
-      db.vouchers = db.vouchers.filter(v => !extraIds.has(v.id));
-    }
-  });
-
-  return { db, createdCount: 0 };
+  const res = reconcileAndDeduplicateAllFinancialRecords(db);
+  return { db: res.db, createdCount: res.vouchersReconciledCount };
 }
+
 
 
 

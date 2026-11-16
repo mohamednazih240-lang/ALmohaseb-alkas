@@ -20,7 +20,9 @@ import {
   DollarSign,
   Eye,
   ShieldCheck,
-  Lock
+  Lock,
+  Loader2,
+  Check
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -50,7 +52,7 @@ import {
   markRecordsDeleted
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
-import { downloadElementAsPdf } from '../services/printAndPdfService';
+import { downloadElementAsPdf, exportFinancialReportToPdf } from '../services/printAndPdfService';
 import { UniversalPrintModal, MovementPrintBlock, formatCleanNumber } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -119,6 +121,8 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   const [printModalAutoPrint, setPrintModalAutoPrint] = useState(false);
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('تقرير مالي');
+  const [isExportingLedgerPdf, setIsExportingLedgerPdf] = useState(false);
+  const [ledgerPdfSuccess, setLedgerPdfSuccess] = useState(false);
 
   // Account form
   const [accCode, setAccCode] = useState('');
@@ -1498,11 +1502,103 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => downloadElementAsPdf('ledger-printable-container', { format: 'a4', filename: `ledger_trial_balance_${new Date().toISOString().slice(0, 10)}.pdf` })}
-                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
-                title="تحميل ميزان المراجعة بصيغة PDF"
+                type="button"
+                disabled={isExportingLedgerPdf}
+                onClick={async () => {
+                  setIsExportingLedgerPdf(true);
+                  try {
+                    const ledger = getLedgerMap();
+                    const today = new Date().toISOString().slice(0, 10);
+                    const curr = db.settings.currency || 'ج.م';
+                    const accTypeLabel = (t: Account['type']) =>
+                      t === 'asset' ? 'أصول' : t === 'liability' ? 'التزامات' : t === 'equity' ? 'حقوق ملكية' : t === 'revenue' ? 'إيرادات' : 'مصروفات';
+                    let totalDebit = 0;
+                    let totalCredit = 0;
+                    let totalDebitBal = 0;
+                    let totalCreditBal = 0;
+                    const rows = db.accounts.map(acc => {
+                      const d = ledger[acc.id] || { debit: 0, credit: 0, balance: 0 };
+                      const debBal = d.debit > d.credit ? d.debit - d.credit : 0;
+                      const credBal = d.credit > d.debit ? d.credit - d.debit : 0;
+                      totalDebit += d.debit;
+                      totalCredit += d.credit;
+                      totalDebitBal += debBal;
+                      totalCreditBal += credBal;
+                      return {
+                        cells: [
+                          acc.code,
+                          acc.name,
+                          accTypeLabel(acc.type),
+                          formatMoney(d.debit, curr),
+                          formatMoney(d.credit, curr),
+                          debBal > 0 ? formatMoney(debBal, curr) : '—',
+                          credBal > 0 ? formatMoney(credBal, curr) : '—'
+                        ],
+                        isBold: d.debit > 0 || d.credit > 0
+                      };
+                    });
+                    const diff = Math.abs(totalDebit - totalCredit);
+                    const ok = await exportFinancialReportToPdf({
+                      title: 'ميزان المراجعة بالمجاميع والأرصدة',
+                      subtitle: 'دفتر الأستاذ العام ومطابقة أرصدة الحسابات',
+                      serialNo: `TB-${today}`,
+                      date: today,
+                      branchName: currentBranch.name,
+                      badge: diff < 0.01 ? 'متزن محاسبياً ✓' : 'فارق اتزان',
+                      settings: db.settings,
+                      kpis: [
+                        { label: 'مجموع المدين', value: formatMoney(totalDebit, curr), tone: 'info' },
+                        { label: 'مجموع الدائن', value: formatMoney(totalCredit, curr), tone: 'info' },
+                        { label: 'الأرصدة المدينة', value: formatMoney(totalDebitBal, curr), tone: 'positive' },
+                        { label: 'الأرصدة الدائنة', value: formatMoney(totalCreditBal, curr), tone: 'neutral' }
+                      ],
+                      columns: [
+                        { header: 'الكود', width: '10%', align: 'center' },
+                        { header: 'اسم الحساب', width: '28%', align: 'right' },
+                        { header: 'التصنيف', width: '10%', align: 'center' },
+                        { header: 'مجموع مدين', width: '13%', align: 'center', isNumeric: true },
+                        { header: 'مجموع دائن', width: '13%', align: 'center', isNumeric: true },
+                        { header: 'رصيد مدين', width: '13%', align: 'center', isNumeric: true },
+                        { header: 'رصيد دائن', width: '13%', align: 'center', isNumeric: true }
+                      ],
+                      rows,
+                      totalsRow: {
+                        cells: [
+                          '—',
+                          'الإجمالي العام',
+                          `${rows.length} حساب`,
+                          formatMoney(totalDebit, curr),
+                          formatMoney(totalCredit, curr),
+                          formatMoney(totalDebitBal, curr),
+                          formatMoney(totalCreditBal, curr)
+                        ]
+                      },
+                      summaryLines: [
+                        { label: 'إجمالي المجاميع المدينة', value: formatMoney(totalDebit, curr) },
+                        { label: 'إجمالي المجاميع الدائنة', value: formatMoney(totalCredit, curr) },
+                        {
+                          label: 'حالة الاتزان المحاسبي',
+                          value: diff < 0.01 ? 'متزن 100% ✓' : `فارق بمقدار ${formatMoney(diff, curr)}`,
+                          isTotal: true,
+                          highlight: true
+                        }
+                      ],
+                      footerNotes: 'دفتر الأستاذ وميزان المراجعة بالمجاميع والأرصدة المعتمد.',
+                      filename: `ميزان_المراجعة_${today}.pdf`
+                    });
+                    if (ok) {
+                      setLedgerPdfSuccess(true);
+                      setTimeout(() => setLedgerPdfSuccess(false), 2500);
+                    }
+                  } finally {
+                    setIsExportingLedgerPdf(false);
+                  }
+                }}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                title="تحميل ميزان المراجعة بصيغة PDF احترافية (jsPDF)"
               >
-                <span>تحميل PDF</span>
+                {isExportingLedgerPdf ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : ledgerPdfSuccess ? <Check className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+                <span>{isExportingLedgerPdf ? 'جارٍ التصدير...' : ledgerPdfSuccess ? 'تم التحميل!' : 'تحميل PDF'}</span>
               </button>
               <button
                 onClick={() => window.print()}
@@ -1512,6 +1608,32 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Trial Balance Totals Summary Strip */}
+          {(() => {
+            const ledger = getLedgerMap();
+            const totalD = Object.values(ledger).reduce((s, v) => s + v.debit, 0);
+            const totalC = Object.values(ledger).reduce((s, v) => s + v.credit, 0);
+            const balanced = Math.abs(totalD - totalC) < 0.01;
+            return (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-600">إجمالي المجاميع المدينة:</span>
+                  <span className="font-mono font-black text-sm text-slate-950">{formatMoney(totalD, db.settings.currency)}</span>
+                </div>
+                <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-600">إجمالي المجاميع الدائنة:</span>
+                  <span className="font-mono font-black text-sm text-slate-950">{formatMoney(totalC, db.settings.currency)}</span>
+                </div>
+                <div className={`p-3 rounded-xl border shadow-2xs flex items-center justify-between ${balanced ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'}`}>
+                  <span className="text-xs font-bold text-slate-700">حالة توازن الميزان:</span>
+                  <span className={`font-black text-xs ${balanced ? 'text-emerald-700' : 'text-rose-700'}`}>
+                    {balanced ? '✓ متزن محاسبياً' : `فارق: ${formatMoney(Math.abs(totalD - totalC), db.settings.currency)}`}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Responsive Ledger Cards System (No Horizontal Scroll) */}
           <div id="ledger-printable-container" className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">

@@ -6,14 +6,15 @@ import {
   Printer,
   Eye,
   Download,
-  Calendar,
   FileSpreadsheet,
   Package,
   Users,
   Building,
   Building2,
-  CheckCircle2,
-  Loader2
+  Check,
+  Loader2,
+  Scale,
+  FileText
 } from 'lucide-react';
 import {
   AccountingDB
@@ -23,16 +24,20 @@ import {
   calculateFinancialSummary,
   calculateCustomerBalance,
   calculateSupplierBalance,
-  calculateTreasuryBalance,
   getProductForBranch,
-  buildProductFifoLedger
+  buildProductFifoLedger,
+  isVoucherLinkedToInvoice,
+  isBranchMatch
 } from '../services/accountingStorage';
 import {
   UniversalPrintModal,
-  MovementPrintBlock,
-  formatCleanNumber
+  MovementPrintBlock
 } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
+import {
+  exportFinancialReportToPdf,
+  FinancialPdfReportConfig
+} from '../services/printAndPdfService';
 
 interface ReportsViewProps {
   db: AccountingDB;
@@ -51,8 +56,16 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
   }, [activeBranchId]);
 
   const [activeReportTab, setActiveReportTab] = useState<
-    'income' | 'sales' | 'purchases' | 'inventory' | 'receivables' | 'payables'
+    'income' | 'trial_balance' | 'statement' | 'sales' | 'purchases' | 'inventory' | 'receivables' | 'payables'
   >('income');
+
+  // Account Statement selector state
+  const [statementPartyType, setStatementPartyType] = useState<'customer' | 'supplier'>('customer');
+  const [statementPartyId, setStatementPartyId] = useState<string>(() => db.customers[0]?.id || '');
+
+  // PDF Export state
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [pdfExportSuccess, setPdfExportSuccess] = useState(false);
 
   // Universal print modal state
   const [printModalOpen, setPrintModalOpen] = useState(false);
@@ -65,7 +78,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
   const isTargetBranch = (bId?: string) => {
     if (selectedBranchId === 'all') return true;
-    return bId === selectedBranchId || (!bId && selectedBranchId === 'br_main');
+    return isBranchMatch(bId, selectedBranchId);
   };
 
   const branchParam = selectedBranchId === 'all' ? undefined : selectedBranchId;
@@ -88,10 +101,280 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
     [db.products, selectedBranchId]
   );
 
+  // Keep selected statement party synchronized when switching type or db updates
+  const availableStatementParties = statementPartyType === 'customer' ? db.customers : db.suppliers;
+  useEffect(() => {
+    if (!availableStatementParties.some(p => p.id === statementPartyId)) {
+      setStatementPartyId(availableStatementParties[0]?.id || '');
+    }
+  }, [statementPartyType, availableStatementParties, statementPartyId]);
+
+  const selectedStatementParty = useMemo(
+    () => availableStatementParties.find(p => p.id === statementPartyId) || null,
+    [availableStatementParties, statementPartyId]
+  );
+
+  // Trial Balance calculation (Accounts + Journals)
+  const trialBalanceData = useMemo(() => {
+    const map: Record<string, { debit: number; credit: number; balance: number }> = {};
+    db.accounts.forEach(acc => {
+      map[acc.id] = { debit: 0, credit: 0, balance: 0 };
+    });
+
+    db.journals.forEach(j => {
+      j.lines.forEach(l => {
+        if (!map[l.accountId]) {
+          map[l.accountId] = { debit: 0, credit: 0, balance: 0 };
+        }
+        map[l.accountId].debit += Number(l.debit) || 0;
+        map[l.accountId].credit += Number(l.credit) || 0;
+      });
+    });
+
+    const rows = db.accounts.map(acc => {
+      const entry = map[acc.id] || { debit: 0, credit: 0, balance: 0 };
+      const isDebitNormal = acc.type === 'asset' || acc.type === 'expense';
+      const net = isDebitNormal ? entry.debit - entry.credit : entry.credit - entry.debit;
+      const debitBalance = entry.debit > entry.credit ? entry.debit - entry.credit : 0;
+      const creditBalance = entry.credit > entry.debit ? entry.credit - entry.debit : 0;
+      return {
+        account: acc,
+        debit: entry.debit,
+        credit: entry.credit,
+        debitBalance,
+        creditBalance,
+        net,
+        isDebitNormal
+      };
+    });
+
+    const totalDebit = rows.reduce((s, r) => s + r.debit, 0);
+    const totalCredit = rows.reduce((s, r) => s + r.credit, 0);
+    const totalDebitBalance = rows.reduce((s, r) => s + r.debitBalance, 0);
+    const totalCreditBalance = rows.reduce((s, r) => s + r.creditBalance, 0);
+    const diff = Math.abs(totalDebit - totalCredit);
+    return {
+      rows,
+      totalDebit,
+      totalCredit,
+      totalDebitBalance,
+      totalCreditBalance,
+      diff,
+      isBalanced: diff < 0.01
+    };
+  }, [db.accounts, db.journals]);
+
+  // Statement of Account rows for selected customer/supplier
+  const statementReportData = useMemo(() => {
+    if (!selectedStatementParty) {
+      return { rows: [] as { date: string; desc: string; debit: number; credit: number; balance: number }[], totalDebit: 0, totalCredit: 0, netBalance: 0 };
+    }
+    const isCustomer = statementPartyType === 'customer';
+    const rawEvents: { date: string; desc: string; debit: number; credit: number; delta: number }[] = [];
+
+    const opening = selectedStatementParty.openingBalance || 0;
+    if (opening !== 0) {
+      rawEvents.push({
+        date: '0000-00-00',
+        desc: 'رصيد افتتاحي سابق',
+        debit: opening > 0 ? opening : 0,
+        credit: opening < 0 ? Math.abs(opening) : 0,
+        delta: opening
+      });
+    }
+
+    db.invoices
+      .filter(i =>
+        i.partyId === selectedStatementParty.id &&
+        isTargetBranch(i.branchId) &&
+        i.invoiceKind !== 'quote' &&
+        (i.invoiceKind as string) !== 'order' &&
+        i.invoiceKind !== 'sale_return' &&
+        i.invoiceKind !== 'purchase_return'
+      )
+      .forEach(inv => {
+        if (isCustomer && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale')) {
+          const hasLinkedVoucher = db.vouchers.some(v => v.type === 'receipt' && isVoucherLinkedToInvoice(v, inv));
+          if (hasLinkedVoucher) {
+            rawEvents.push({
+              date: inv.date,
+              desc: `فاتورة بيع رقم ${inv.number}`,
+              debit: inv.total,
+              credit: 0,
+              delta: inv.total
+            });
+          } else {
+            rawEvents.push({
+              date: inv.date,
+              desc: `فاتورة بيع رقم ${inv.number}`,
+              debit: inv.total,
+              credit: inv.paid,
+              delta: inv.total - inv.paid
+            });
+          }
+        } else if (!isCustomer && (inv.type === 'purchase' || inv.invoiceKind === 'purchase')) {
+          const hasLinkedVoucher = db.vouchers.some(v => v.type === 'payment' && isVoucherLinkedToInvoice(v, inv));
+          if (hasLinkedVoucher) {
+            rawEvents.push({
+              date: inv.date,
+              desc: `فاتورة شراء رقم ${inv.number}`,
+              debit: 0,
+              credit: inv.total,
+              delta: inv.total
+            });
+          } else {
+            rawEvents.push({
+              date: inv.date,
+              desc: `فاتورة شراء رقم ${inv.number}`,
+              debit: inv.paid,
+              credit: inv.total,
+              delta: inv.total - inv.paid
+            });
+          }
+        }
+      });
+
+    db.vouchers
+      .filter(v => v.partyId === selectedStatementParty.id && isTargetBranch(v.branchId))
+      .forEach(v => {
+        if (isCustomer && v.type === 'receipt') {
+          rawEvents.push({
+            date: v.date,
+            desc: v.referenceNumber ? `سند قبض رقم ${v.number} (فاتورة ${v.referenceNumber})` : `سند قبض رقم ${v.number}${v.description ? ` - ${v.description}` : ''}`,
+            debit: 0,
+            credit: v.amount,
+            delta: -v.amount
+          });
+        } else if (!isCustomer && v.type === 'payment') {
+          rawEvents.push({
+            date: v.date,
+            desc: v.referenceNumber ? `سند صرف رقم ${v.number} (فاتورة ${v.referenceNumber})` : `سند صرف رقم ${v.number}${v.description ? ` - ${v.description}` : ''}`,
+            debit: v.amount,
+            credit: 0,
+            delta: -v.amount
+          });
+        }
+      });
+
+    (db.returns || [])
+      .filter(r => r.partyId === selectedStatementParty.id && isTargetBranch(r.branchId) && r.type === (isCustomer ? 'sale' : 'purchase'))
+      .forEach(r => {
+        if (r.paymentMethod === 'آجل') {
+          rawEvents.push({
+            date: r.date,
+            desc: `مرتجع ${isCustomer ? 'مبيعات' : 'مشتريات'} رقم ${r.number}`,
+            debit: isCustomer ? 0 : r.total,
+            credit: isCustomer ? r.total : 0,
+            delta: -r.total
+          });
+        }
+      });
+
+    rawEvents.sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0));
+    let running = 0;
+    const rows = rawEvents.map(ev => {
+      running += ev.delta;
+      return {
+        date: ev.date === '0000-00-00' ? '—' : ev.date,
+        desc: ev.desc,
+        debit: ev.debit,
+        credit: ev.credit,
+        balance: running
+      };
+    });
+
+    const totalDebit = rows.reduce((s, r) => s + r.debit, 0);
+    const totalCredit = rows.reduce((s, r) => s + r.credit, 0);
+    const netBalance = isCustomer
+      ? calculateCustomerBalance(db, selectedStatementParty.id, branchParam)
+      : calculateSupplierBalance(db, selectedStatementParty.id, branchParam);
+
+    return { rows, totalDebit, totalCredit, netBalance };
+  }, [db, selectedStatementParty, statementPartyType, selectedBranchId, branchParam]);
+
   // Generate structured report blocks for UniversalPrintModal
   const generateReportBlocks = (): { title: string; docs: MovementPrintBlock[] } => {
     const today = new Date().toISOString().slice(0, 10);
     const curr = db.settings.currency;
+
+    if (activeReportTab === 'trial_balance') {
+      const accountTypeLabel = (t: string) =>
+        t === 'asset' ? 'أصول' : t === 'liability' ? 'التزامات' : t === 'equity' ? 'حقوق ملكية' : t === 'revenue' ? 'إيرادات' : 'مصروفات';
+      const doc: MovementPrintBlock = {
+        title: 'ميزان المراجعة بالمجاميع والأرصدة',
+        serialNo: `#TB-${today}`,
+        date: today,
+        partyLabel: 'المنشأة',
+        partyName: db.settings.company,
+        badge: trialBalanceData.isBalanced ? 'متزن محاسبياً' : 'فارق اتزان',
+        tableHeaders: [
+          { label: 'الكود', width: '12%', align: 'center' },
+          { label: 'اسم الحساب', width: '32%', align: 'right' },
+          { label: 'التصنيف', width: '12%', align: 'center' },
+          { label: 'مجموع مدين', width: '14%', align: 'center' },
+          { label: 'مجموع دائن', width: '14%', align: 'center' },
+          { label: 'الرصيد الصافي', width: '16%', align: 'center' }
+        ],
+        tableRows: trialBalanceData.rows.map(r => ({
+          cols: [
+            r.account.code,
+            r.account.name,
+            accountTypeLabel(r.account.type),
+            formatMoney(r.debit, curr),
+            formatMoney(r.credit, curr),
+            formatMoney(r.net, curr)
+          ],
+          isBold: r.net !== 0,
+          highlight: r.net < 0
+        })),
+        summaryLines: [
+          { label: 'إجمالي المجاميع المدينة', value: formatMoney(trialBalanceData.totalDebit, curr) },
+          { label: 'إجمالي المجاميع الدائنة', value: formatMoney(trialBalanceData.totalCredit, curr) },
+          { label: 'حالة الاتزان المحاسبي', value: trialBalanceData.isBalanced ? 'متزن 100%' : `فارق: ${formatMoney(trialBalanceData.diff, curr)}`, isTotal: true, highlight: true }
+        ],
+        footerNotes: 'ميزان المراجعة الشامل المستخرج من واقع قيود اليومية ودفتر الأستاذ العام.'
+      };
+      return { title: 'ميزان المراجعة بالمجاميع والأرصدة', docs: [doc] };
+    }
+
+    if (activeReportTab === 'statement') {
+      const party = selectedStatementParty;
+      const doc: MovementPrintBlock = {
+        title: party ? `كشف حساب: ${party.name}` : 'كشف حساب تفصيلي',
+        serialNo: `#STMT-${party?.code || today}`,
+        date: today,
+        partyLabel: statementPartyType === 'customer' ? 'العميل' : 'المورد',
+        partyName: party ? party.name : 'لم يتم اختيار طرف',
+        partyCode: party?.code || '—',
+        partySubId: party?.phone || party?.address || '—',
+        badge: statementPartyType === 'customer' ? 'كشف حساب عميل' : 'كشف حساب مورد',
+        tableHeaders: [
+          { label: 'التاريخ', width: '15%', align: 'center' },
+          { label: 'البيان والحركة المالية', width: '40%', align: 'right' },
+          { label: 'مدين (+)', width: '15%', align: 'center' },
+          { label: 'دائن (-)', width: '15%', align: 'center' },
+          { label: 'الرصيد التراكمي', width: '15%', align: 'center' }
+        ],
+        tableRows: statementReportData.rows.map(r => ({
+          cols: [
+            r.date,
+            r.desc,
+            r.debit > 0 ? formatMoney(r.debit, curr) : '—',
+            r.credit > 0 ? formatMoney(r.credit, curr) : '—',
+            formatMoney(r.balance, curr)
+          ],
+          highlight: r.balance > 0,
+          isBold: r.balance !== 0
+        })),
+        summaryLines: [
+          { label: 'إجمالي الحركات المدينة', value: formatMoney(statementReportData.totalDebit, curr) },
+          { label: 'إجمالي الحركات الدائنة', value: formatMoney(statementReportData.totalCredit, curr) },
+          { label: 'الرصيد الصافي المستحق', value: formatMoney(statementReportData.netBalance, curr), isTotal: true, highlight: true }
+        ],
+        footerNotes: `كشف حساب تحليلي - ${branchLabel}`
+      };
+      return { title: party ? `كشف حساب - ${party.name}` : 'كشف حساب', docs: [doc] };
+    }
 
     if (activeReportTab === 'income') {
       const doc: MovementPrintBlock = {
@@ -334,6 +617,182 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
     exportTableToCsv(`تقرير_${activeReportTab}_${branchLabel}_${new Date().toISOString().slice(0, 10)}.csv`, headers, rows);
   };
 
+  // Export clean, structured, paginated A4 Arabic Financial PDF using jsPDF
+  const handleExportPdf = async () => {
+    setIsExportingPdf(true);
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const curr = db.settings.currency || 'ج.م';
+      let config: FinancialPdfReportConfig | null = null;
+
+      if (activeReportTab === 'trial_balance') {
+        const accountTypeLabel = (t: string) =>
+          t === 'asset' ? 'أصول' : t === 'liability' ? 'التزامات' : t === 'equity' ? 'حقوق ملكية' : t === 'revenue' ? 'إيرادات' : 'مصروفات';
+        config = {
+          title: 'ميزان المراجعة بالمجاميع والأرصدة',
+          subtitle: 'كشف أرصدة الحسابات ودفتر الأستاذ العام على مستوى المنشأة',
+          serialNo: `TB-${today}`,
+          date: today,
+          branchName: branchLabel,
+          badge: trialBalanceData.isBalanced ? 'متزن محاسبياً ✓' : 'يوجد فارق اتزان',
+          settings: db.settings,
+          kpis: [
+            { label: 'إجمالي المجاميع المدينة', value: formatMoney(trialBalanceData.totalDebit, curr), tone: 'info' },
+            { label: 'إجمالي المجاميع الدائنة', value: formatMoney(trialBalanceData.totalCredit, curr), tone: 'info' },
+            { label: 'الأرصدة المدينة', value: formatMoney(trialBalanceData.totalDebitBalance, curr), tone: 'positive' },
+            { label: 'الأرصدة الدائنة', value: formatMoney(trialBalanceData.totalCreditBalance, curr), tone: 'neutral' }
+          ],
+          columns: [
+            { header: 'الكود', width: '10%', align: 'center' },
+            { header: 'اسم الحساب', width: '28%', align: 'right' },
+            { header: 'التصنيف', width: '10%', align: 'center' },
+            { header: 'مجموع مدين', width: '13%', align: 'center', isNumeric: true },
+            { header: 'مجموع دائن', width: '13%', align: 'center', isNumeric: true },
+            { header: 'رصيد مدين', width: '13%', align: 'center', isNumeric: true },
+            { header: 'رصيد دائن', width: '13%', align: 'center', isNumeric: true }
+          ],
+          rows: trialBalanceData.rows.map(r => ({
+            cells: [
+              r.account.code,
+              r.account.name,
+              accountTypeLabel(r.account.type),
+              formatMoney(r.debit, curr),
+              formatMoney(r.credit, curr),
+              r.debitBalance > 0 ? formatMoney(r.debitBalance, curr) : '—',
+              r.creditBalance > 0 ? formatMoney(r.creditBalance, curr) : '—'
+            ],
+            isBold: r.debit > 0 || r.credit > 0
+          })),
+          totalsRow: {
+            cells: [
+              '—',
+              'الإجمالي العام لميزان المراجعة',
+              `${trialBalanceData.rows.length} حساب`,
+              formatMoney(trialBalanceData.totalDebit, curr),
+              formatMoney(trialBalanceData.totalCredit, curr),
+              formatMoney(trialBalanceData.totalDebitBalance, curr),
+              formatMoney(trialBalanceData.totalCreditBalance, curr)
+            ]
+          },
+          summaryLines: [
+            { label: 'إجمالي الحركات المدينة (مجاميع)', value: formatMoney(trialBalanceData.totalDebit, curr) },
+            { label: 'إجمالي الحركات الدائنة (مجاميع)', value: formatMoney(trialBalanceData.totalCredit, curr) },
+            {
+              label: 'نتيجة مطابقة وتوازن الميزان',
+              value: trialBalanceData.isBalanced ? 'متزن محاسبياً بالكامل ✓' : `فارق بمقدار ${formatMoney(trialBalanceData.diff, curr)}`,
+              isTotal: true,
+              highlight: true
+            }
+          ],
+          footerNotes: 'تم استخراج ميزان المراجعة بالمجاميع والأرصدة آلياً من واقع القيود المحاسبية المعتمدة.',
+          filename: `ميزان_المراجعة_${today}.pdf`
+        };
+      } else if (activeReportTab === 'statement') {
+        const party = selectedStatementParty;
+        if (!party) {
+          alert('يرجى اختيار عميل أو مورد أولاً لتصدير كشف الحساب.');
+          return;
+        }
+        config = {
+          title: `كشف حساب ${statementPartyType === 'customer' ? 'عميل' : 'مورد'}: ${party.name}`,
+          subtitle: `بيان تحليلي شامل للفواتير والسندات والمرتجعات — ${branchLabel}`,
+          serialNo: `STMT-${party.code || party.id.slice(0, 6)}`,
+          date: today,
+          branchName: branchLabel,
+          partyLabel: statementPartyType === 'customer' ? 'اسم العميل' : 'اسم المورد',
+          partyName: party.name,
+          partyCode: party.code || '—',
+          partyPhone: party.phone || undefined,
+          badge: statementPartyType === 'customer' ? 'كشف حساب عميل' : 'كشف حساب مورد',
+          settings: db.settings,
+          kpis: [
+            { label: 'عدد الحركات', value: String(statementReportData.rows.length), tone: 'info' },
+            { label: 'إجمالي المدين (+)', value: formatMoney(statementReportData.totalDebit, curr), tone: 'neutral' },
+            { label: 'إجمالي الدائن (-)', value: formatMoney(statementReportData.totalCredit, curr), tone: 'positive' },
+            { label: 'الرصيد الصافي الحالي', value: formatMoney(statementReportData.netBalance, curr), tone: statementReportData.netBalance > 0 ? 'negative' : 'positive' }
+          ],
+          columns: [
+            { header: 'التاريخ', width: '15%', align: 'center' },
+            { header: 'البيان والحركة المالية', width: '40%', align: 'right' },
+            { header: 'مدين (+)', width: '15%', align: 'center', isNumeric: true },
+            { header: 'دائن (-)', width: '15%', align: 'center', isNumeric: true },
+            { header: 'الرصيد التراكمي', width: '15%', align: 'center', isNumeric: true }
+          ],
+          rows: statementReportData.rows.map(r => ({
+            cells: [
+              r.date,
+              r.desc,
+              r.debit > 0 ? formatMoney(r.debit, curr) : '—',
+              r.credit > 0 ? formatMoney(r.credit, curr) : '—',
+              formatMoney(r.balance, curr)
+            ],
+            highlight: r.balance > 0,
+            isBold: r.balance !== 0
+          })),
+          totalsRow: {
+            cells: [
+              '—',
+              'إجمالي حركات كشف الحساب',
+              formatMoney(statementReportData.totalDebit, curr),
+              formatMoney(statementReportData.totalCredit, curr),
+              formatMoney(statementReportData.netBalance, curr)
+            ]
+          },
+          summaryLines: [
+            { label: 'إجمالي الحركات المدينة', value: formatMoney(statementReportData.totalDebit, curr) },
+            { label: 'إجمالي الحركات الدائنة', value: formatMoney(statementReportData.totalCredit, curr) },
+            { label: 'الرصيد الصافي المستحق حتى تاريخه', value: formatMoney(statementReportData.netBalance, curr), isTotal: true, highlight: true }
+          ],
+          footerNotes: 'هذا الكشف صادر إلكترونياً ويعتبر مطابقاً لحسابات المنشأة وفقاً للمستندات المعتمدة.',
+          filename: `كشف_حساب_${party.name.replace(/\s+/g, '_')}_${today}.pdf`
+        };
+      } else {
+        const { title, docs } = generateReportBlocks();
+        if (!docs.length) return;
+        const doc = docs[0];
+        config = {
+          title: doc.title,
+          subtitle: `تقرير مالي معتمد — ${branchLabel}`,
+          serialNo: doc.serialNo?.replace('#', ''),
+          date: doc.date || today,
+          branchName: branchLabel,
+          partyLabel: doc.partyLabel,
+          partyName: doc.partyName,
+          badge: doc.badge,
+          settings: db.settings,
+          columns: doc.tableHeaders.map((h, idx) => ({
+            header: h.label,
+            width: h.width,
+            align: h.align || 'center',
+            isNumeric: activeReportTab === 'income'
+              ? idx === 1
+              : (activeReportTab === 'sales' || activeReportTab === 'purchases' || activeReportTab === 'inventory')
+                ? idx >= 2
+                : idx >= 3
+          })),
+          rows: doc.tableRows.map(r => ({
+            cells: r.cols,
+            isBold: r.isBold,
+            highlight: r.highlight
+          })),
+          summaryLines: doc.summaryLines,
+          footerNotes: doc.footerNotes,
+          filename: `${title.replace(/\s+/g, '_')}_${today}.pdf`
+        };
+      }
+
+      if (config) {
+        const ok = await exportFinancialReportToPdf(config);
+        if (ok) {
+          setPdfExportSuccess(true);
+          setTimeout(() => setPdfExportSuccess(false), 2500);
+        }
+      }
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
+
   return (
     <div className="space-y-4 pb-12">
       {/* Top Header */}
@@ -349,6 +808,23 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handleExportPdf}
+            disabled={isExportingPdf}
+            className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+            title="تصدير التقرير المالي كملف PDF منظم احترافياً (jsPDF)"
+          >
+            {isExportingPdf ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : pdfExportSuccess ? (
+              <Check className="w-4 h-4" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            <span>{isExportingPdf ? 'جارٍ التصدير...' : pdfExportSuccess ? 'تم تحميل PDF!' : 'تصدير PDF'}</span>
+          </button>
+
           <button
             type="button"
             onClick={handleExportExcel}
@@ -415,6 +891,8 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
       <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 pb-2">
         {[
           { id: 'income', label: 'قائمة الدخل والأرباح', icon: DollarSign },
+          { id: 'trial_balance', label: 'ميزان المراجعة', icon: Scale },
+          { id: 'statement', label: 'كشف حساب عميل / مورد', icon: FileText },
           { id: 'sales', label: 'تقرير المبيعات والتحصيلات', icon: TrendingUp },
           { id: 'purchases', label: 'تقرير المشتريات والتوريدات', icon: BarChart3 },
           { id: 'inventory', label: 'تقرير تقييم المخزون', icon: Package },
@@ -427,7 +905,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
             <button
               key={tab.id}
               onClick={() => setActiveReportTab(tab.id as any)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all flex items-center gap-1.5 cursor-pointer ${
                 isActive
                   ? 'bg-black text-white'
                   : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
@@ -442,6 +920,167 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
       {/* Report Content Wrapper for PDF export */}
       <div id="current-report-content" className="bg-white rounded-2xl">
+      {/* 0A. TRIAL BALANCE (ميزان المراجعة بالمجاميع والأرصدة) */}
+      {activeReportTab === 'trial_balance' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block">إجمالي المجاميع المدينة</span>
+              <span className="text-base font-black font-mono text-slate-950">{formatMoney(trialBalanceData.totalDebit, db.settings.currency)}</span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block">إجمالي المجاميع الدائنة</span>
+              <span className="text-base font-black font-mono text-slate-950">{formatMoney(trialBalanceData.totalCredit, db.settings.currency)}</span>
+            </div>
+            <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-[11px] font-bold text-slate-500 block">مجموع الأرصدة المدينة</span>
+              <span className="text-base font-black font-mono text-blue-700">{formatMoney(trialBalanceData.totalDebitBalance, db.settings.currency)}</span>
+            </div>
+            <div className={`p-3.5 rounded-xl border shadow-2xs ${trialBalanceData.isBalanced ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200'}`}>
+              <span className="text-[11px] font-bold text-slate-600 block">حالة اتزان الميزان</span>
+              <span className={`text-sm font-black ${trialBalanceData.isBalanced ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {trialBalanceData.isBalanced ? '✓ متزن محاسبياً بالكامل' : `فارق: ${formatMoney(trialBalanceData.diff, db.settings.currency)}`}
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs">
+                <thead>
+                  <tr className="bg-slate-900 text-white font-bold">
+                    <th className="py-2.5 px-3 text-center">الكود</th>
+                    <th className="py-2.5 px-3">اسم الحساب</th>
+                    <th className="py-2.5 px-3 text-center">التصنيف</th>
+                    <th className="py-2.5 px-3 text-center">مجموع مدين</th>
+                    <th className="py-2.5 px-3 text-center">مجموع دائن</th>
+                    <th className="py-2.5 px-3 text-center">رصيد مدين</th>
+                    <th className="py-2.5 px-3 text-center">رصيد دائن</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {trialBalanceData.rows.map(r => (
+                    <tr key={r.account.id} className="hover:bg-slate-50">
+                      <td className="py-2 px-3 text-center font-mono text-slate-600">{r.account.code}</td>
+                      <td className="py-2 px-3 font-bold text-slate-900">{r.account.name}</td>
+                      <td className="py-2 px-3 text-center">
+                        <span className="px-2 py-0.5 rounded bg-slate-100 text-[10px] font-bold text-slate-700">
+                          {r.account.type === 'asset' ? 'أصول' : r.account.type === 'liability' ? 'التزامات' : r.account.type === 'equity' ? 'حقوق ملكية' : r.account.type === 'revenue' ? 'إيرادات' : 'مصروفات'}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 text-center font-mono font-bold text-slate-900">{formatMoney(r.debit, db.settings.currency)}</td>
+                      <td className="py-2 px-3 text-center font-mono font-bold text-slate-900">{formatMoney(r.credit, db.settings.currency)}</td>
+                      <td className="py-2 px-3 text-center font-mono font-bold text-blue-700">{r.debitBalance > 0 ? formatMoney(r.debitBalance, db.settings.currency) : '—'}</td>
+                      <td className="py-2 px-3 text-center font-mono font-bold text-emerald-700">{r.creditBalance > 0 ? formatMoney(r.creditBalance, db.settings.currency) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-slate-100 border-t-2 border-slate-300 font-black text-slate-950">
+                    <td colSpan={3} className="py-2.5 px-3">الإجمالي العام لميزان المراجعة</td>
+                    <td className="py-2.5 px-3 text-center font-mono">{formatMoney(trialBalanceData.totalDebit, db.settings.currency)}</td>
+                    <td className="py-2.5 px-3 text-center font-mono">{formatMoney(trialBalanceData.totalCredit, db.settings.currency)}</td>
+                    <td className="py-2.5 px-3 text-center font-mono text-blue-800">{formatMoney(trialBalanceData.totalDebitBalance, db.settings.currency)}</td>
+                    <td className="py-2.5 px-3 text-center font-mono text-emerald-800">{formatMoney(trialBalanceData.totalCreditBalance, db.settings.currency)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 0B. ACCOUNT STATEMENT (كشف حساب عميل / مورد) */}
+      {activeReportTab === 'statement' && (
+        <div className="space-y-4">
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-wrap items-center gap-3">
+            <div className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5">
+              <button
+                type="button"
+                onClick={() => setStatementPartyType('customer')}
+                className={`px-3 py-1 rounded-md text-xs font-bold cursor-pointer transition-all ${statementPartyType === 'customer' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:text-slate-900'}`}
+              >
+                كشف حساب عميل
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatementPartyType('supplier')}
+                className={`px-3 py-1 rounded-md text-xs font-bold cursor-pointer transition-all ${statementPartyType === 'supplier' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:text-slate-900'}`}
+              >
+                كشف حساب مورد
+              </button>
+            </div>
+
+            <select
+              value={statementPartyId}
+              onChange={e => setStatementPartyId(e.target.value)}
+              className="flex-1 min-w-[200px] bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-900"
+            >
+              {availableStatementParties.length === 0 ? (
+                <option value="">لا يوجد أطراف مسجلة</option>
+              ) : (
+                availableStatementParties.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} {p.code ? `[${p.code}]` : ''} {p.phone ? `— ${p.phone}` : ''}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+
+          {selectedStatementParty && (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+                  <span className="text-[11px] font-bold text-slate-500 block">إجمالي الحركات المدينة (+)</span>
+                  <span className="text-base font-black font-mono text-slate-950">{formatMoney(statementReportData.totalDebit, db.settings.currency)}</span>
+                </div>
+                <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs">
+                  <span className="text-[11px] font-bold text-slate-500 block">إجمالي الحركات الدائنة (-)</span>
+                  <span className="text-base font-black font-mono text-emerald-700">{formatMoney(statementReportData.totalCredit, db.settings.currency)}</span>
+                </div>
+                <div className="bg-slate-900 text-white p-3.5 rounded-xl shadow-2xs">
+                  <span className="text-[11px] font-bold text-slate-300 block">الرصيد الصافي الحالي ({selectedStatementParty.name})</span>
+                  <span className="text-base font-black font-mono text-amber-300">{formatMoney(statementReportData.netBalance, db.settings.currency)}</span>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-right text-xs">
+                    <thead>
+                      <tr className="bg-slate-900 text-white font-bold">
+                        <th className="py-2.5 px-3 text-center">التاريخ</th>
+                        <th className="py-2.5 px-3">البيان والحركة المالية</th>
+                        <th className="py-2.5 px-3 text-center">مدين (+)</th>
+                        <th className="py-2.5 px-3 text-center">دائن (-)</th>
+                        <th className="py-2.5 px-3 text-center">الرصيد التراكمي</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {statementReportData.rows.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-8 text-center text-slate-400 font-bold">لا توجد حركات مالية مسجلة لهذا الحساب</td>
+                        </tr>
+                      ) : (
+                        statementReportData.rows.map((r, i) => (
+                          <tr key={i} className="hover:bg-slate-50">
+                            <td className="py-2 px-3 text-center font-mono text-slate-600">{r.date}</td>
+                            <td className="py-2 px-3 font-bold text-slate-900">{r.desc}</td>
+                            <td className="py-2 px-3 text-center font-mono font-bold text-slate-900">{r.debit > 0 ? formatMoney(r.debit, db.settings.currency) : '—'}</td>
+                            <td className="py-2 px-3 text-center font-mono font-bold text-emerald-700">{r.credit > 0 ? formatMoney(r.credit, db.settings.currency) : '—'}</td>
+                            <td className="py-2 px-3 text-center font-mono font-black text-slate-950">{formatMoney(r.balance, db.settings.currency)}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
       {/* 1. INCOME STATEMENT (قائمة الدخل والأرباح) */}
       {activeReportTab === 'income' && (
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs max-w-3xl space-y-4">

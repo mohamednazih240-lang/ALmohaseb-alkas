@@ -26,7 +26,9 @@ import {
   getTodayDate,
   getNextUniqueVoucherNumber,
   roundMoney,
-  isFinitePositive
+  isFinitePositive,
+  isBranchMatch,
+  isVoucherLinkedToInvoice
 } from '../services/accountingStorage';
 import {
   postManualVoucherTransaction,
@@ -85,7 +87,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
   const isTargetBranch = (bId?: string) => {
     if (branchFilter === 'all') return true;
-    return bId === targetBranchId || (!bId && targetBranchId === 'br_main');
+    return isBranchMatch(bId, targetBranchId);
   };
 
   // Eligible unpaid / partially paid invoices for linking installments (aligned with voucher cash direction; exclude returns)
@@ -105,7 +107,15 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
   const vouchersList = db.vouchers
     .filter(v => v.type === type && isTargetBranch(v.branchId) && !isReturnRelatedVoucher(v))
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    .sort((a, b) => {
+      const dateCmp = (b.date || '').localeCompare(a.date || '');
+      if (dateCmp !== 0) return dateCmp;
+      const createdCmp = (b.createdAt || '').localeCompare(a.createdAt || '');
+      if (createdCmp !== 0) return createdCmp;
+      const numA = parseInt(String(a.number || '').replace(/\D/g, ''), 10) || 0;
+      const numB = parseInt(String(b.number || '').replace(/\D/g, ''), 10) || 0;
+      return numB - numA;
+    });
 
   const totalAmount = vouchersList.reduce((sum, v) => sum + v.amount, 0);
 
@@ -617,7 +627,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                 {selectedLinkedInvoice && (
                   <div className="mt-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">
                     إجمالي الفاتورة #{selectedLinkedInvoice.number}: {formatMoney(selectedLinkedInvoice.total, db.settings.currency)} • المتبقي قبل هذا السند: {formatMoney(
-                      Math.max(0, selectedLinkedInvoice.total - db.vouchers.filter(v => v.id !== editingVoucher?.id && (v.invoiceId === selectedLinkedInvoice.id || v.referenceNumber === selectedLinkedInvoice.number)).reduce((s, v) => s + (Number(v.amount) || 0), 0)),
+                      Math.max(0, selectedLinkedInvoice.total - db.vouchers.filter(v => v.id !== editingVoucher?.id && isVoucherLinkedToInvoice(v, selectedLinkedInvoice)).reduce((s, v) => s + (Number(v.amount) || 0), 0)),
                       db.settings.currency
                     )}
                   </div>

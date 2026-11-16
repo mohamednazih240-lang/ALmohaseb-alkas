@@ -327,6 +327,7 @@ export interface Voucher {
   branchName?: string;
   referenceNumber?: string;
   invoiceId?: string;
+  sourceId?: string;
   isManualInstallment?: boolean;
   isAutoFromInvoice?: boolean;
   createdAt?: string;
@@ -346,6 +347,8 @@ export interface TreasuryEntry {
   description: string;
   sourceType?: string;
   sourceId?: string;
+  invoiceId?: string;
+  refNumber?: string;
   costCenterId?: string;
   costCenterName?: string;
   branchId?: string;
@@ -442,7 +445,9 @@ export interface DailyClosing {
   frozenCash?: number;
   frozenOpeningCash?: number;
   frozenTodayNet?: number;
+  carriedOverProfit?: number;
   withdrawnProfit?: number;
+  remainingProfitToCarry?: number;
   status: 'مفتوح' | 'مغلق';
   notes?: string;
   createdAt: string;

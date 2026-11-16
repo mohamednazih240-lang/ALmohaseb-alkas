@@ -161,9 +161,9 @@ export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb
       }
     });
 
-    // Vouchers
+    // Vouchers (exclude auto-from-invoice vouchers to avoid double counting invoices)
     db.vouchers.forEach(v => {
-      if (v.costCenterId === centerId) {
+      if (v.costCenterId === centerId && !v.isAutoFromInvoice) {
         if (v.type === 'receipt') revenues += Number(v.amount || 0);
         else if (v.type === 'payment') expenses += Number(v.amount || 0);
       }

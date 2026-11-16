@@ -10,7 +10,7 @@ import {
   Maximize2
 } from 'lucide-react';
 import { AppSettings } from '../types/accounting';
-import { downloadElementAsPdf } from '../services/printAndPdfService';
+import { downloadElementAsPdf, exportFinancialReportToPdf } from '../services/printAndPdfService';
 import { exportMultipleTablesToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 
@@ -169,10 +169,42 @@ export const UniversalPrintModal: React.FC<UniversalPrintModalProps> = ({
     try {
       const format = paperSize === 'thermal' ? 'thermal' : paperSize === 'A5' ? 'a5' : 'a4';
       const filename = `${documentTitle.replace(/\s+/g, '_')}_${Date.now()}.pdf`;
-      const success = await downloadElementAsPdf('universal-printable-content', {
-        format,
-        filename
-      });
+      let success = false;
+
+      if (format === 'a4' && documents.length === 1) {
+        const doc = documents[0];
+        success = await exportFinancialReportToPdf({
+          title: doc.title,
+          subtitle: doc.statement || doc.typeTitle,
+          serialNo: doc.serialNo?.replace('#', ''),
+          date: doc.date,
+          partyLabel: doc.partyLabel,
+          partyName: doc.partyName,
+          partyCode: doc.partyCode,
+          partyPhone: doc.partySubId,
+          badge: doc.badge,
+          settings,
+          columns: doc.tableHeaders.map(th => ({
+            header: th.label,
+            width: th.width,
+            align: th.align || 'center'
+          })),
+          rows: doc.tableRows.map(tr => ({
+            cells: tr.cols,
+            isBold: tr.isBold,
+            highlight: tr.highlight
+          })),
+          summaryLines: doc.summaryLines,
+          footerNotes: doc.footerNotes,
+          filename
+        });
+      } else {
+        success = await downloadElementAsPdf('universal-printable-content', {
+          format,
+          filename
+        });
+      }
+
       if (success) {
         setExportedSuccess(true);
         setTimeout(() => setExportedSuccess(false), 2500);

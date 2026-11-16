@@ -123,6 +123,44 @@ export default function App() {
 
   // Realtime Live Movement Sync Notification
   const [liveSyncNotification, setLiveSyncNotification] = useState<{ message: string; author: string } | null>(null);
+  const syncToastTimerRef = useRef<number | null>(null);
+
+  const showLiveSyncToast = useCallback((message: string, author: string, durationMs = 2800) => {
+    setLiveSyncNotification({ message, author });
+    if (syncToastTimerRef.current) {
+      window.clearTimeout(syncToastTimerRef.current);
+    }
+    syncToastTimerRef.current = window.setTimeout(() => {
+      setLiveSyncNotification(null);
+      syncToastTimerRef.current = null;
+    }, durationMs);
+  }, []);
+
+  // Ensure focused inputs/textareas scroll cleanly into view above the mobile virtual keyboard
+  useEffect(() => {
+    const handleFocusIn = (e: FocusEvent) => {
+      if (window.innerWidth > 768) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const tag = target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+        window.setTimeout(() => {
+          try {
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          } catch {
+            // ignore unsupported smooth option
+          }
+        }, 260);
+      }
+    };
+    document.addEventListener('focusin', handleFocusIn, { passive: true });
+    return () => {
+      document.removeEventListener('focusin', handleFocusIn);
+      if (syncToastTimerRef.current) {
+        window.clearTimeout(syncToastTimerRef.current);
+      }
+    };
+  }, []);
 
   // Modals
   const [showQuickSearch, setShowQuickSearch] = useState(false);
@@ -381,13 +419,13 @@ export default function App() {
     const unsubCloud = subscribeToCloudDatabase((remoteDb, updatedBy, actionDesc) => {
       // Visual feedback when an invoice, voucher, or report is synced from another device
       if (updatedBy) {
-        setLiveSyncNotification({
-          message: actionDesc
+        showLiveSyncToast(
+          actionDesc
             ? `مزامنة فورية: ${actionDesc} من جهاز «${updatedBy}»`
             : `تم تسجيل حركة وتحديثها فورياً من جهاز «${updatedBy}»`,
-          author: updatedBy
-        });
-        setTimeout(() => setLiveSyncNotification(null), 4500);
+          updatedBy,
+          2800
+        );
       }
 
       setDb(prevDb => {
@@ -539,18 +577,18 @@ export default function App() {
         setDb(unified);
         saveDatabase(unified);
         await pushDatabaseToCloud(unified, true);
-        setLiveSyncNotification({
-          message: `تمت المزامنة اللحظية بنجاح: تم تحديث ${unified.invoices.length} فاتورة متزامنة مع كافة الأجهزة`,
-          author: 'النظام السحابي'
-        });
-        setTimeout(() => setLiveSyncNotification(null), 5000);
+        showLiveSyncToast(
+          `تمت المزامنة اللحظية بنجاح: تم تحديث ${unified.invoices.length} فاتورة متزامنة مع كافة الأجهزة`,
+          'النظام السحابي',
+          3000
+        );
       } else {
         await pushDatabaseToCloud(db, true);
-        setLiveSyncNotification({
-          message: 'تم إرسال ومزامنة كافة بيانات جهازك إلى السحابة بنجاح',
-          author: 'النظام السحابي'
-        });
-        setTimeout(() => setLiveSyncNotification(null), 4000);
+        showLiveSyncToast(
+          'تم إرسال ومزامنة كافة بيانات جهازك إلى السحابة بنجاح',
+          'النظام السحابي',
+          2800
+        );
       }
     } catch (e) {
       console.error('Manual sync error:', e);
@@ -772,7 +810,7 @@ export default function App() {
         />
 
         {/* Main Workspace Content Area */}
-        <main className="flex-1 min-w-0 lg:mr-64 p-2.5 sm:p-6 max-w-7xl mx-auto w-full max-w-full overflow-x-clip transition-all">
+        <main className="flex-1 min-w-0 lg:mr-64 p-2.5 sm:p-6 pb-32 sm:pb-12 max-w-7xl mx-auto w-full max-w-full overflow-x-clip transition-all">
           {currentPage === 'quick_menu' && (
             <QuickMenuPage
               db={db}
@@ -1136,17 +1174,31 @@ export default function App() {
         onClose={() => setBranchPinTarget(null)}
       />
 
-      {/* Realtime Instant Live Movement Sync Toast Notification */}
+      {/* Realtime Instant Live Movement Sync Toast Notification (relocated to compact non-blocking top slot) */}
       {liveSyncNotification && (
-        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2.5 bg-slate-900/95 backdrop-blur-xs text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700/80 text-xs font-bold animate-in fade-in slide-in-from-bottom-4 duration-300 pointer-events-none">
-          <span className="relative flex h-2.5 w-2.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-          </span>
-          <div className="flex flex-col">
-            <span className="text-[10px] font-black text-emerald-400">مزامنة فورية حية</span>
-            <span className="text-[11px] text-slate-200">{liveSyncNotification.message}</span>
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed top-[calc(env(safe-area-inset-top,0px)+3.5rem)] sm:top-4 left-1/2 -translate-x-1/2 z-[45] w-[calc(100vw-1.5rem)] max-w-sm flex items-center justify-between gap-2 bg-slate-900/92 backdrop-blur-sm text-white px-3 py-2 rounded-xl shadow-lg border border-emerald-500/40 text-[11px] font-bold animate-in fade-in slide-in-from-top-2 duration-200 pointer-events-none"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="relative flex h-2 w-2 shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            <div className="flex flex-col min-w-0">
+              <span className="text-[9.5px] font-black text-emerald-400 leading-tight">مزامنة فورية حية</span>
+              <span className="text-[10.5px] text-slate-200 truncate">{liveSyncNotification.message}</span>
+            </div>
           </div>
+          <button
+            type="button"
+            onClick={() => setLiveSyncNotification(null)}
+            className="pointer-events-auto text-slate-400 hover:text-white p-0.5 rounded shrink-0 cursor-pointer"
+            aria-label="إغلاق التنبيه"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
     </div>

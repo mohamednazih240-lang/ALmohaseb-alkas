@@ -17,7 +17,9 @@ import {
   AlertTriangle,
   Filter,
   ArrowUpDown,
-  CheckCircle2
+  CheckCircle2,
+  Loader2,
+  Check
 } from 'lucide-react';
 import {
   AccountingDB,
@@ -33,9 +35,10 @@ import {
   getNextUniquePartyCode,
   roundMoney,
   isFiniteNonNegative,
-  markRecordsDeleted
+  markRecordsDeleted,
+  isVoucherLinkedToInvoice
 } from '../services/accountingStorage';
-import { downloadElementAsPdf } from '../services/printAndPdfService';
+import { downloadElementAsPdf, exportFinancialReportToPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
 import {
@@ -291,7 +294,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
       .filter(i => i.partyId === party.id && i.invoiceKind !== 'quote' && (i.invoiceKind as string) !== 'order' && i.invoiceKind !== 'sale_return' && i.invoiceKind !== 'purchase_return')
       .forEach(inv => {
         if (isCustomer && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale')) {
-          const hasLinkedVoucher = db.vouchers.some(v => v.partyId === party.id && v.type === 'receipt' && (v.invoiceId === inv.id || v.referenceNumber === inv.number));
+          const hasLinkedVoucher = db.vouchers.some(v => v.type === 'receipt' && isVoucherLinkedToInvoice(v, inv));
           if (hasLinkedVoucher) {
             running += inv.total;
             rows.push({
@@ -315,7 +318,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
             });
           }
         } else if (!isCustomer && (inv.type === 'purchase' || inv.invoiceKind === 'purchase')) {
-          const hasLinkedVoucher = db.vouchers.some(v => v.partyId === party.id && v.type === 'payment' && (v.invoiceId === inv.id || v.referenceNumber === inv.number));
+          const hasLinkedVoucher = db.vouchers.some(v => v.type === 'payment' && isVoucherLinkedToInvoice(v, inv));
           if (hasLinkedVoucher) {
             running += inv.total;
             rows.push({
@@ -439,6 +442,82 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
     setPrintDocuments([doc]);
     setPrintModalAutoPrint(autoPrint);
     setPrintModalOpen(true);
+  };
+
+  const [isExportingStatementPdf, setIsExportingStatementPdf] = useState(false);
+  const [statementPdfSuccess, setStatementPdfSuccess] = useState(false);
+
+  const handleDownloadStatementPdf = async (party: Party) => {
+    setIsExportingStatementPdf(true);
+    try {
+      const rows = getStatementRows(party);
+      const curr = db.settings.currency || 'ج.م';
+      const currentBalance = isCustomer
+        ? calculateCustomerBalance(db, party.id)
+        : calculateSupplierBalance(db, party.id);
+      const totalDebit = rows.reduce((s, r) => s + r.debit, 0);
+      const totalCredit = rows.reduce((s, r) => s + r.credit, 0);
+      const today = new Date().toISOString().slice(0, 10);
+
+      const ok = await exportFinancialReportToPdf({
+        title: `كشف حساب ${isCustomer ? 'عميل' : 'مورد'}: ${party.name}`,
+        subtitle: 'بيان تفصيلي لجميع الفواتير والسندات والمرتجعات الجارية',
+        serialNo: `STMT-${party.code || party.id.slice(0, 6)}`,
+        date: today,
+        partyLabel: isCustomer ? 'العميل' : 'المورد',
+        partyName: party.name,
+        partyCode: party.code || '—',
+        partyPhone: party.phone || undefined,
+        badge: isCustomer ? 'كشف حساب عميل' : 'كشف حساب مورد',
+        settings: db.settings,
+        kpis: [
+          { label: 'عدد الحركات', value: String(rows.length), tone: 'info' },
+          { label: 'إجمالي المدين (+)', value: formatMoney(totalDebit, curr), tone: 'neutral' },
+          { label: 'إجمالي الدائن (-)', value: formatMoney(totalCredit, curr), tone: 'positive' },
+          { label: 'الرصيد الصافي المستحق', value: formatMoney(currentBalance, curr), tone: currentBalance > 0 ? 'negative' : 'positive' }
+        ],
+        columns: [
+          { header: 'التاريخ', width: '15%', align: 'center' },
+          { header: 'البيان والحركة المالية', width: '40%', align: 'right' },
+          { header: 'مدين (+)', width: '15%', align: 'center', isNumeric: true },
+          { header: 'دائن (-)', width: '15%', align: 'center', isNumeric: true },
+          { header: 'الرصيد التراكمي', width: '15%', align: 'center', isNumeric: true }
+        ],
+        rows: rows.map(r => ({
+          cells: [
+            r.date,
+            r.desc,
+            r.debit > 0 ? formatMoney(r.debit, curr) : '—',
+            r.credit > 0 ? formatMoney(r.credit, curr) : '—',
+            formatMoney(r.balance, curr)
+          ],
+          highlight: r.balance > 0,
+          isBold: r.balance !== 0
+        })),
+        totalsRow: {
+          cells: [
+            '—',
+            'إجمالي حركات الحساب',
+            formatMoney(totalDebit, curr),
+            formatMoney(totalCredit, curr),
+            formatMoney(currentBalance, curr)
+          ]
+        },
+        summaryLines: [
+          { label: 'إجمالي الحركات المدينة', value: formatMoney(totalDebit, curr) },
+          { label: 'إجمالي الحركات الدائنة', value: formatMoney(totalCredit, curr) },
+          { label: 'الرصيد الصافي المستحق حتى تاريخه', value: formatMoney(currentBalance, curr), isTotal: true, highlight: true }
+        ],
+        footerNotes: 'هذا الكشف صادر إلكترونياً ويعتبر مطابقاً لحسابات المنشأة حتى تاريخه.',
+        filename: `كشف_حساب_${party.name.replace(/\s+/g, '_')}_${today}.pdf`
+      });
+      if (ok) {
+        setStatementPdfSuccess(true);
+        setTimeout(() => setStatementPdfSuccess(false), 2500);
+      }
+    } finally {
+      setIsExportingStatementPdf(false);
+    }
   };
 
   // Print all parties directory
@@ -952,11 +1031,14 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
               </div>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => downloadElementAsPdf('statement-printable-sheet', { format: 'a4', filename: `statement_${statementParty.name}.pdf` })}
-                  className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-bold flex items-center gap-1 shadow-xs"
+                  type="button"
+                  disabled={isExportingStatementPdf}
+                  onClick={() => handleDownloadStatementPdf(statementParty)}
+                  className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white rounded text-xs font-bold flex items-center gap-1 shadow-xs cursor-pointer"
+                  title="تحميل كشف الحساب كملف PDF منظم احترافياً (jsPDF)"
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>تحميل PDF</span>
+                  {isExportingStatementPdf ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : statementPdfSuccess ? <Check className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+                  <span>{isExportingStatementPdf ? 'جارٍ التصدير...' : statementPdfSuccess ? 'تم التحميل!' : 'تحميل PDF'}</span>
                 </button>
                 <button
                   onClick={() => window.print()}

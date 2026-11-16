@@ -340,6 +340,60 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     const grossProfit = roundMoney(rawVerifiedRev - rawCogs - returnsTotal);
     const profitMargin = rawVerifiedRev > 0 ? (grossProfit / rawVerifiedRev) * 100 : 0;
 
+    // Un-withdrawn profit carried over from latest prior closing (strictly before selectedDate)
+    let carriedOverProfit = 0;
+    if (latestPriorClosing) {
+      const priorDate = latestPriorClosing.date;
+      const isAfterPriorClosing = (t: { date: string; createdAt?: string }) =>
+        (t.date > priorDate && t.date < selectedDate) ||
+        Boolean(
+          t.date === priorDate &&
+            latestPriorClosing.createdAt &&
+            t.createdAt &&
+            t.createdAt > latestPriorClosing.createdAt
+        );
+
+      const priorBaseRemaining =
+        latestPriorClosing.remainingProfitToCarry !== undefined
+          ? roundMoney(latestPriorClosing.remainingProfitToCarry)
+          : Math.max(
+              0,
+              roundMoney(
+                (latestPriorClosing.carriedOverProfit || 0) +
+                  (latestPriorClosing.grossProfit || 0) -
+                  (latestPriorClosing.withdrawnProfit !== undefined
+                    ? latestPriorClosing.withdrawnProfit
+                    : (db.treasury || [])
+                        .filter(
+                          t =>
+                            t.date === priorDate &&
+                            t.sourceType === 'profit_withdrawal' &&
+                            t.method === 'نقدي' &&
+                            t.direction === 'out' &&
+                            isTargetBranch(t.branchId) &&
+                            !isAfterPriorClosing(t)
+                        )
+                        .reduce((s, t) => s + (Number(t.amount) || 0), 0))
+              )
+            );
+
+      const afterPriorWithdrawn = (db.treasury || [])
+        .filter(
+          t =>
+            t.sourceType === 'profit_withdrawal' &&
+            t.method === 'نقدي' &&
+            t.direction === 'out' &&
+            isTargetBranch(t.branchId) &&
+            isAfterPriorClosing(t)
+        )
+        .reduce((s, t) => s + (Number(t.amount) || 0), 0);
+
+      carriedOverProfit = Math.max(0, roundMoney(priorBaseRemaining - afterPriorWithdrawn));
+    }
+
+    const availableProfitToday = Math.max(0, roundMoney(carriedOverProfit + grossProfit));
+    const remainingProfitToCarry = Math.max(0, roundMoney(availableProfitToday - profitWithdrawnToday));
+
     // Expected loose cash in drawer ('نقدي' = yesterday + inflows - outflows - net frozen today - permanent profit withdrawal today)
     const drawerBeforeFreeze = roundMoney(startingCash + drawerIn - drawerOut);
     const rawExpectedCash = roundMoney(drawerBeforeFreeze - frozenTodayNet - profitWithdrawnToday);
@@ -451,7 +505,10 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       frozenTodayNet,
       rawExpectedFrozenCash,
       effectiveFrozenCash,
+      carriedOverProfit,
+      availableProfitToday,
       profitWithdrawnToday,
+      remainingProfitToCarry,
       salesCashIn,
       vouchersCashIn,
       dayRevenues,
@@ -468,7 +525,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       totalWorkingNextDayOpening,
       totalNextDayOpening
     };
-  }, [db, fifoLedger, selectedDate, startingCash, actualCash, actualCashEdited, isBaselineMode, baselineChannelInputs, reconcileInputs, targetBranchId, allClosingChannels, priorChannelBookBalances]);
+  }, [db, fifoLedger, selectedDate, startingCash, actualCash, actualCashEdited, isBaselineMode, baselineChannelInputs, reconcileInputs, targetBranchId, allClosingChannels, priorChannelBookBalances, latestPriorClosing]);
 
   // Keep actualCash synced to expectedCash in audit mode until cashier enters a manual drawer count
   React.useEffect(() => {
@@ -479,8 +536,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   }, [liveStats.rawExpectedCash, actualCashEdited, isBaselineMode]);
 
   const suggestedProfitToWithdraw = useMemo(
-    () => Math.max(0, roundMoney(liveStats.grossProfit - liveStats.profitWithdrawnToday)),
-    [liveStats.grossProfit, liveStats.profitWithdrawnToday]
+    () => liveStats.remainingProfitToCarry,
+    [liveStats.remainingProfitToCarry]
   );
 
   // Pre-fill daily profit withdrawal input with remaining gross profit until manually edited
@@ -527,8 +584,14 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         { cols: ['صافي المبيعات', `${formatCleanNumber(c.netSales)} ${db.settings.currency}`, 'المبيعات - المرتجعات'] },
         { cols: ['تكلفة البضاعة المباعة (FIFO)', `${formatCleanNumber(c.cogs)} ${db.settings.currency}`, 'تكلفة الدفعات الفعلية'], },
         { cols: ['مجمل أرباح الوردية', `${formatCleanNumber(c.grossProfit)} ${db.settings.currency}`, 'وفق دفعات FIFO الموثقة'], isBold: true, highlight: true },
+        ...(c.carriedOverProfit && c.carriedOverProfit > 0
+          ? [{ cols: ['أرباح مرحلة من اليومية السابقة', `${formatCleanNumber(c.carriedOverProfit)} ${db.settings.currency}`, 'باقي أرباح غير مسحوب من أمس'], isBold: true }]
+          : []),
         ...(c.withdrawnProfit && c.withdrawnProfit > 0
           ? [{ cols: ['أرباح مسحوبة نهائياً من الدرج', `${formatCleanNumber(c.withdrawnProfit)} ${db.settings.currency}`, 'تم طرحها من رصيد النقدي بالدرج'], isBold: true }]
+          : []),
+        ...(c.remainingProfitToCarry && c.remainingProfitToCarry > 0
+          ? [{ cols: ['باقي أرباح مرحّل لليوم التالي', `${formatCleanNumber(c.remainingProfitToCarry)} ${db.settings.currency}`, 'يُضاف لأرباح الغد القابلة للسحب'], isBold: true }]
           : []),
         { cols: ['نسبة الأرباح للوردية %', `${c.profitMargin.toFixed(1)}%`, 'هامش الربح المحقق'], isBold: true, highlight: true },
         { cols: ['النقد الفعلي بالدرج (نقدي)', `${formatCleanNumber(c.actualCash)} ${db.settings.currency}`, 'الجرد الفعلي للدرج'] },
@@ -544,8 +607,14 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         { label: 'إجمالي دخل الخزائن', value: `${formatCleanNumber(c.cashIn)} ${db.settings.currency}` },
         { label: 'إجمالي خرج الخزائن', value: `${formatCleanNumber(c.cashOut)} ${db.settings.currency}` },
         { label: 'مجمل الربح المحقق', value: `${formatCleanNumber(c.grossProfit)} ${db.settings.currency}`, isTotal: true },
+        ...(c.carriedOverProfit && c.carriedOverProfit > 0
+          ? [{ label: 'أرباح مرحلة من أمس', value: `+${formatCleanNumber(c.carriedOverProfit)} ${db.settings.currency}` }]
+          : []),
         ...(c.withdrawnProfit && c.withdrawnProfit > 0
           ? [{ label: 'أرباح مسحوبة من الدرج', value: `${formatCleanNumber(c.withdrawnProfit)} ${db.settings.currency}` }]
+          : []),
+        ...(c.remainingProfitToCarry && c.remainingProfitToCarry > 0
+          ? [{ label: 'باقي أرباح مرحّل للغد', value: `${formatCleanNumber(c.remainingProfitToCarry)} ${db.settings.currency}` }]
           : []),
         ...(c.channelSummaries || []).map(cs => ({
           label: `افتتاحي ${c.nextDayDate || 'اليوم التالي'} (${cs.method})`,
@@ -680,7 +749,9 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         frozenCash: roundMoney(liveStats.effectiveFrozenCash),
         frozenOpeningCash: roundMoney(liveStats.frozenOpeningCash),
         frozenTodayNet: roundMoney(liveStats.frozenTodayNet),
+        carriedOverProfit: roundMoney(liveStats.carriedOverProfit),
         withdrawnProfit: roundMoney(liveStats.profitWithdrawnToday),
+        remainingProfitToCarry: roundMoney(liveStats.remainingProfitToCarry),
         status: 'مغلق',
         notes: isBaselineMode
           ? (shiftNotes ? `${shiftNotes} — [أول تقفيل يومية: تأسيس الرصيد الفعلي باليد]` : 'أول تقفيل يومية: إدخال الرصيد النقدي الفعلي يدوياً كبداية للمراجعة الحقيقية من الغد')
@@ -1457,20 +1528,39 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                     </div>
                     <div>
                       <h4 className="text-xs font-black text-emerald-950">
-                        إخراج مجمل أرباح اليوم من النقدي بالدرج (سحب نهائي)
+                        إخراج أرباح اليوم من النقدي بالدرج (سحب نهائي)
                       </h4>
-                      <p className="text-[10.5px] text-emerald-800">
-                        مجمل ربح اليوم (المبيعات - التكلفة):{' '}
-                        <strong className="font-mono text-emerald-950">{formatMoney(liveStats.grossProfit, db.settings.currency)}</strong>
-                        {liveStats.profitWithdrawnToday > 0 && (
+                      <p className="text-[10.5px] text-emerald-800 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span>
+                          مجمل ربح اليوم:{' '}
+                          <strong className="font-mono text-emerald-950">{formatMoney(liveStats.grossProfit, db.settings.currency)}</strong>
+                        </span>
+                        {liveStats.carriedOverProfit > 0 && (
                           <>
-                            {' • '}
-                            تم سحبه اليوم:{' '}
+                            <span>
+                              • مرحّل من أمس:{' '}
+                              <strong className="font-mono text-blue-800">+{formatMoney(liveStats.carriedOverProfit, db.settings.currency)}</strong>
+                            </span>
+                            <span>
+                              • الإجمالي المتاح:{' '}
+                              <strong className="font-mono text-emerald-950">{formatMoney(liveStats.availableProfitToday, db.settings.currency)}</strong>
+                            </span>
+                          </>
+                        )}
+                        {liveStats.profitWithdrawnToday > 0 && (
+                          <span>
+                            • تم سحبه اليوم:{' '}
                             <strong className="font-mono text-rose-700">
                               {formatMoney(liveStats.profitWithdrawnToday, db.settings.currency)}
                             </strong>
-                          </>
+                          </span>
                         )}
+                        <span>
+                          • المتبقي المرحّل للغد:{' '}
+                          <strong className="font-mono text-emerald-950">
+                            {formatMoney(liveStats.remainingProfitToCarry, db.settings.currency)}
+                          </strong>
+                        </span>
                       </p>
                     </div>
                   </div>
@@ -1774,7 +1864,9 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                       frozenCash: liveStats.effectiveFrozenCash,
                       frozenOpeningCash: liveStats.frozenOpeningCash,
                       frozenTodayNet: liveStats.frozenTodayNet,
+                      carriedOverProfit: liveStats.carriedOverProfit,
                       withdrawnProfit: liveStats.profitWithdrawnToday,
+                      remainingProfitToCarry: liveStats.remainingProfitToCarry,
                       status: 'مفتوح',
                       notes: shiftNotes,
                       createdAt: new Date().toISOString(),
@@ -2014,10 +2106,26 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                       </div>
                     </div>
 
-                    {c.withdrawnProfit && c.withdrawnProfit > 0 ? (
-                      <div className="flex justify-between text-[11px] bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg">
-                        <span className="text-emerald-900 font-bold">أرباح مسحوبة من الدرج:</span>
-                        <strong className="font-mono font-black text-emerald-800">-{formatMoney(c.withdrawnProfit, db.settings.currency)}</strong>
+                    {((c.carriedOverProfit || 0) > 0 || (c.withdrawnProfit || 0) > 0 || (c.remainingProfitToCarry || 0) > 0) ? (
+                      <div className="space-y-1 text-[11px] bg-emerald-50 border border-emerald-200 px-2 py-1.5 rounded-lg">
+                        {(c.carriedOverProfit || 0) > 0 && (
+                          <div className="flex justify-between">
+                            <span className="text-blue-900 font-bold">أرباح مرحلة من أمس:</span>
+                            <strong className="font-mono font-black text-blue-800">+{formatMoney(c.carriedOverProfit || 0, db.settings.currency)}</strong>
+                          </div>
+                        )}
+                        {(c.withdrawnProfit || 0) > 0 && (
+                          <div className="flex justify-between">
+                            <span className="text-emerald-900 font-bold">أرباح مسحوبة من الدرج:</span>
+                            <strong className="font-mono font-black text-emerald-800">-{formatMoney(c.withdrawnProfit || 0, db.settings.currency)}</strong>
+                          </div>
+                        )}
+                        {(c.remainingProfitToCarry || 0) > 0 && (
+                          <div className="flex justify-between">
+                            <span className="text-emerald-950 font-bold">باقي أرباح مرحّل للغد:</span>
+                            <strong className="font-mono font-black text-emerald-950">{formatMoney(c.remainingProfitToCarry || 0, db.settings.currency)}</strong>
+                          </div>
+                        )}
                       </div>
                     ) : null}
 
@@ -2304,10 +2412,22 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                         <span>النقد الفعلي المسجل:</span>
                         <strong className="font-mono">{formatMoney(reviewingClosing.actualCash, db.settings.currency)}</strong>
                       </div>
+                      {(reviewingClosing.carriedOverProfit || 0) > 0 ? (
+                        <div className="flex justify-between font-bold text-blue-800 bg-blue-50 px-2 py-1 rounded border border-blue-200">
+                          <span>أرباح مرحّلة من أمس:</span>
+                          <strong className="font-mono">+{formatMoney(reviewingClosing.carriedOverProfit || 0, db.settings.currency)}</strong>
+                        </div>
+                      ) : null}
                       {reviewingClosing.withdrawnProfit && reviewingClosing.withdrawnProfit > 0 ? (
                         <div className="flex justify-between font-bold text-emerald-800 bg-emerald-50 px-2 py-1 rounded border border-emerald-200">
                           <span>أرباح مسحوبة نهائياً من الدرج:</span>
                           <strong className="font-mono">-{formatMoney(reviewingClosing.withdrawnProfit, db.settings.currency)}</strong>
+                        </div>
+                      ) : null}
+                      {(reviewingClosing.remainingProfitToCarry || 0) > 0 ? (
+                        <div className="flex justify-between font-bold text-emerald-950 bg-emerald-100/70 px-2 py-1 rounded border border-emerald-300">
+                          <span>باقي أرباح مرحّل لليوم التالي:</span>
+                          <strong className="font-mono">{formatMoney(reviewingClosing.remainingProfitToCarry || 0, db.settings.currency)}</strong>
                         </div>
                       ) : null}
                       {!reviewingClosing.isInitialBaseline && (

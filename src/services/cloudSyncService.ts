@@ -170,8 +170,25 @@ const rawCloudMetaByCompany = new Map<
     rawVouchersCount: number;
     rawTreasuryCount: number;
     rawJournalsCount: number;
+    rawFinSig: string;
   }
 >();
+
+function computeFinancialSyncSignature(db: AccountingDB): string {
+  const vSig = [...(db.vouchers || [])]
+    .map(v => `${v.id}:${v.type}:${Math.round((Number(v.amount) || 0) * 100)}:${v.paymentMethod || ''}:${v.invoiceId || ''}:${v.isAutoFromInvoice ? 1 : 0}`)
+    .sort()
+    .join('|');
+  const tSig = [...(db.treasury || [])]
+    .map(t => `${t.id}:${t.direction}:${Math.round((Number(t.amount) || 0) * 100)}:${t.method || ''}:${t.sourceId || ''}:${t.invoiceId || ''}`)
+    .sort()
+    .join('|');
+  const jSig = [...(db.journals || [])]
+    .map(j => `${j.id}:${j.sourceId || ''}:${(j.lines || []).length}`)
+    .sort()
+    .join('|');
+  return quickHash(`${vSig}#${tSig}#${jSig}`);
+}
 
 export function doesCloudNeedCleanupSync(companyCode: string | undefined, currentDb: AccountingDB): boolean {
   const clean = normalizeCompanyCode(companyCode);
@@ -180,6 +197,7 @@ export function doesCloudNeedCleanupSync(companyCode: string | undefined, curren
   if ((currentDb.vouchers?.length || 0) !== meta.rawVouchersCount) return true;
   if ((currentDb.treasury?.length || 0) !== meta.rawTreasuryCount) return true;
   if ((currentDb.journals?.length || 0) !== meta.rawJournalsCount) return true;
+  if (computeFinancialSyncSignature(currentDb) !== meta.rawFinSig) return true;
   for (const id of currentDb.deletedRecordIds || []) {
     if (id && !meta.rawDeletedIds.has(id)) return true;
   }
@@ -781,7 +799,8 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
       ]),
       rawVouchersCount: (unified.vouchers || []).length,
       rawTreasuryCount: (unified.treasury || []).length,
-      rawJournalsCount: (unified.journals || []).length
+      rawJournalsCount: (unified.journals || []).length,
+      rawFinSig: computeFinancialSyncSignature(unified)
     });
 
     const purgedUnified = purgeDeletedRecordsFromDb(unified, combinedDeletedSet);
