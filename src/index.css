@@ -45,7 +45,7 @@
 }
 
 .mobile-modal-card {
-  max-height: 90dvh;
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -57,22 +57,27 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-y: contain;
-  scroll-padding-bottom: 120px;
+  scroll-padding-bottom: 90px;
 }
 
 @media screen and (max-width: 768px) {
   html, body {
-    scroll-padding-bottom: 140px;
+    scroll-padding-bottom: 120px;
   }
 
   .mobile-kb-scroll,
   .mobile-modal-body {
-    padding-bottom: max(120px, calc(env(safe-area-inset-bottom, 0px) + 96px)) !important;
-    scroll-padding-bottom: 130px;
+    padding-bottom: max(24px, calc(env(safe-area-inset-bottom, 0px) + 16px)) !important;
+    scroll-padding-bottom: 90px;
   }
 
-  /* Ensure every modal card fits comfortably above keyboard & remains scrollable */
-  .fixed.inset-0 > div:not(.invoice-modal-card) {
+  .mobile-modal-body-pinned {
+    padding-bottom: max(12px, calc(env(safe-area-inset-bottom, 0px) + 8px)) !important;
+    scroll-padding-bottom: 70px;
+  }
+
+  /* Ensure generic modal cards fit comfortably above keyboard without breaking internal-scroll mobile-modal-card headers */
+  .fixed.inset-0 > div:not(.invoice-modal-card):not(.mobile-modal-card) {
     max-height: 90dvh;
     overflow-y: auto;
     overscroll-behavior-y: contain;

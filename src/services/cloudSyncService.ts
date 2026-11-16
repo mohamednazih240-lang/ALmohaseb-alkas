@@ -29,7 +29,8 @@ import {
   getAllDeletedRecordIds,
   purgeDeletedRecordsFromDb,
   mergeArrayById,
-  saveLocalDeletedRecordIds
+  saveLocalDeletedRecordIds,
+  mergeDatabasesSafely
 } from './accountingStorage';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -193,7 +194,19 @@ const SHARD_COLLECTIONS = [
   'audit'
 ] as const;
 type ShardCollectionKey = typeof SHARD_COLLECTIONS[number];
-const SHARD_PAGE_SIZE = 250; // Keeps each Firestore doc well under ~200 KB (<20% of 1 MiB limit), scaling cleanly to >10M invoices
+
+function getShardPageSize(col: ShardCollectionKey): number {
+  switch (col) {
+    case 'invoices':
+      return 80; // Invoices carry nested items & payments (~3.5KB each); 80/shard stays <300KB well under 1MiB cap
+    case 'journals':
+      return 120;
+    case 'products':
+      return 200;
+    default:
+      return 150;
+  }
+}
 
 let unsubscribeListener: (() => void) | null = null;
 let unsubscribeCompListener: (() => void) | null = null;
@@ -202,10 +215,21 @@ let lastLocalSavedTimestamp = 0;
 // Incremental shard hash cache: only modified shards are uploaded on incremental saves (O(1) network writes at 10M+ scale)
 const uploadedShardHashCache = new Map<string, string>();
 const lastKnownShardCountsByCompany = new Map<string, Record<string, number>>();
+const lastSyncedManifestUpdatedAtByCompany = new Map<string, number>();
+const mergedBeforePushListeners = new Set<(mergedDb: AccountingDB, companyCode: string) => void>();
 let uploadedLogoHashCache = new Map<string, string>();
 let activePushChain: Promise<boolean> = Promise.resolve(true);
 let pendingPushEntry: { db: AccountingDB; resolvers: Array<(ok: boolean) => void> } | null = null;
 let isPushWorkerRunning = false;
+
+export function subscribeToCloudMergedPush(
+  listener: (mergedDb: AccountingDB, companyCode: string) => void
+): () => void {
+  mergedBeforePushListeners.add(listener);
+  return () => {
+    mergedBeforePushListeners.delete(listener);
+  };
+}
 
 const rawCloudMetaByCompany = new Map<
   string,
@@ -363,7 +387,7 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
   const isLogoExplicitlyRemoved = Boolean(baseDb.settings?.logoRemovedAt);
   const shouldCheckSeparateLogo = !isLogoExplicitlyRemoved && (docVal.hasSeparateLogo !== false || !baseDb.settings?.logo);
   const logoPromise = shouldCheckSeparateLogo
-    ? withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, `asset_${prefix}_logo`)), 9000)
+    ? withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, `asset_${prefix}_logo`)), 14000)
         .then(snap => {
           if (!snap || !snap.exists()) return { exists: false, logo: '', updatedAt: 0 };
           const d = snap.data();
@@ -376,7 +400,7 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
         .catch(() => null)
     : Promise.resolve({ exists: false, logo: '', updatedAt: 0 });
 
-  // Build shard descriptors to fetch in parallel chunks
+  // Build shard descriptors to fetch in controlled batches
   const shardTasks: Array<{ col: ShardCollectionKey; idx: number; docId: string }> = [];
   for (const col of SHARD_COLLECTIONS) {
     const count = Number(shardCounts[col]) || 0;
@@ -399,42 +423,56 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
     audit: []
   };
 
-  // Run shard reads in parallel groups of 24 so even large datasets stream fast without browser connection exhaustion
-  const BATCH = 24;
+  // Run shard reads in gentle batches of 6 with retry on transient timeout so mobile LTE never drops large shards
+  const BATCH = 6;
+  const fetchShardOnce = async (task: { col: ShardCollectionKey; idx: number; docId: string }): Promise<{ ok: boolean; items: any[]; rawJson?: string }> => {
+    try {
+      const snap = await withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, task.docId)), 15000);
+      if (snap === null) {
+        return { ok: false, items: [] };
+      }
+      if (!snap.exists()) {
+        return { ok: true, items: [], rawJson: '[]' };
+      }
+      const d = snap.data();
+      if (typeof d?.itemsJson === 'string') {
+        return { ok: true, items: JSON.parse(d.itemsJson) as any[], rawJson: d.itemsJson };
+      }
+      if (Array.isArray(d?.items)) {
+        return { ok: true, items: d.items };
+      }
+      return { ok: true, items: [], rawJson: '[]' };
+    } catch {
+      return { ok: false, items: [] };
+    }
+  };
+
   let shardReadFailed = false;
   for (let i = 0; i < shardTasks.length; i += BATCH) {
     const slice = shardTasks.slice(i, i + BATCH);
     const results = await Promise.all(
-      slice.map(task =>
-        withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, task.docId)), 6000)
-          .then(snap => {
-            if (snap === null) {
-              // Network timeout — abort reassembly rather than returning truncated data
-              shardReadFailed = true;
-              return null;
-            }
-            if (!snap.exists()) return [];
-            const d = snap.data();
-            if (d?.itemsJson) {
-              return JSON.parse(d.itemsJson) as any[];
-            }
-            if (Array.isArray(d?.items)) {
-              return d.items;
-            }
-            return [];
-          })
-          .catch(() => {
-            shardReadFailed = true;
-            return null;
-          })
-      )
+      slice.map(async task => {
+        let res = await fetchShardOnce(task);
+        if (!res.ok) {
+          res = await fetchShardOnce(task);
+        }
+        if (!res.ok) {
+          shardReadFailed = true;
+        }
+        return res;
+      })
     );
     if (shardReadFailed) {
       console.warn('Aborted cloud manifest reassembly due to incomplete/timed-out shard fetch');
       return null;
     }
     slice.forEach((task, j) => {
-      reassembled[task.col][task.idx] = results[j] || [];
+      const items = results[j]?.items || [];
+      reassembled[task.col][task.idx] = items;
+      // Seed incremental upload hash cache so subsequent pushes only upload actually modified shards
+      if (typeof results[j]?.rawJson === 'string') {
+        uploadedShardHashCache.set(`${prefix}::${task.col}::${task.idx}`, quickHash(results[j].rawJson as string));
+      }
     });
   }
 
@@ -446,10 +484,12 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
         baseDb.settings.logoUpdatedAt = logoResult.updatedAt || baseDb.settings.logoUpdatedAt;
         delete baseDb.settings.logoRemovedAt;
         cacheCompanyLogoLocally(prefix, logoResult.logo);
+        uploadedLogoHashCache.set(prefix, quickHash(logoResult.logo));
       } else if (logoResult.updatedAt > (baseDb.settings.logoUpdatedAt || 0)) {
         // Explicit cloud deletion newer than any local upload
         baseDb.settings.logo = '';
         baseDb.settings.logoRemovedAt = logoResult.updatedAt;
+        uploadedLogoHashCache.set(prefix, 'REMOVED');
       }
     } else if (!baseDb.settings.logo && !baseDb.settings.logoRemovedAt) {
       // Network timeout or doc fetch missed — restore cached logo if present on device
@@ -474,6 +514,11 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
     }
   }
 
+  const docUpdatedAt = Number(docVal.updatedAt) || 0;
+  if (docUpdatedAt > (lastSyncedManifestUpdatedAtByCompany.get(prefix) || 0)) {
+    lastSyncedManifestUpdatedAtByCompany.set(prefix, docUpdatedAt);
+  }
+
   return baseDb;
 }
 
@@ -483,7 +528,7 @@ async function reassembleFromManifestDoc(docVal: any, fallbackCode: string): Pro
 export async function getCloudLatestTimestamp(companyCode?: string): Promise<number> {
   const clean = normalizeCompanyCode(companyCode);
   try {
-    const snap = await withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, `company_${clean}`)), 2500);
+    const snap = await withTimeout(getDoc(doc(firestore, SYNC_DOC_PATH, `company_${clean}`)), 5000);
     if (snap && snap.exists()) {
       return Number(snap.data()?.updatedAt) || 0;
     }
@@ -546,7 +591,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 
     const tDeletedSet = getAllDeletedRecordIds(targetDb);
     saveLocalDeletedRecordIds(tCleanCode, tDeletedSet);
-    const tCleanDb: AccountingDB = purgeDeletedRecordsFromDb(
+    let tCleanDb: AccountingDB = purgeDeletedRecordsFromDb(
       {
         ...targetDb,
         deletedInvoiceIds: Array.from(new Set([...PURGED_COMP101_INVOICE_IDS, ...(targetDb.deletedInvoiceIds || [])])),
@@ -568,7 +613,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
       let prevCloudShardCounts: Record<string, number> = lastKnownShardCountsByCompany.get(tCleanCode) || {};
       try {
         const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${tCleanCode}`);
-        const checkSnap = await withTimeout(getDoc(compDocRef), 2000);
+        const checkSnap = await withTimeout(getDoc(compDocRef), 6000);
         if (checkSnap && checkSnap.exists()) {
           const val = checkSnap.data();
           if (val?.shardCounts && typeof val.shardCounts === 'object') {
@@ -590,9 +635,31 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
               return false;
             }
           }
+
+          // Multi-device conflict prevention: if another device pushed newer records before our write,
+          // reassemble & merge both devices' data cleanly BEFORE computing and writing shards!
+          const remoteTs = Number(val?.updatedAt) || 0;
+          const knownTs = lastSyncedManifestUpdatedAtByCompany.get(tCleanCode) || 0;
+          const isOtherDeviceWrite = !val?.deviceId || val.deviceId !== currentDevId;
+          if (remoteTs > knownTs && isOtherDeviceWrite) {
+            const remoteCloud = await reassembleFromManifestDoc(val, tCleanCode);
+            if (remoteCloud && Array.isArray(remoteCloud.products) && remoteCloud.settings) {
+              const mergedBeforePush = mergeDatabasesSafely(tCleanDb, remoteCloud, tCleanDb.currentUser);
+              const postMergeDeleted = getAllDeletedRecordIds(mergedBeforePush);
+              saveLocalDeletedRecordIds(tCleanCode, postMergeDeleted);
+              tCleanDb = purgeDeletedRecordsFromDb(mergedBeforePush, postMergeDeleted);
+              mergedBeforePushListeners.forEach(fn => {
+                try {
+                  fn(tCleanDb, tCleanCode);
+                } catch {
+                  // ignore listener errors
+                }
+              });
+            }
+          }
         }
       } catch (checkErr) {
-        console.warn('Safeguard check note:', checkErr);
+        console.warn('Safeguard & merge-before-push check note:', checkErr);
       }
 
       const now = Date.now();
@@ -600,7 +667,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
       const isExplicitlyRemoved = Boolean(!logoString && tCleanDb.settings?.logoRemovedAt);
       const hasSeparateLogo = Boolean(logoString && logoString.length > 0);
 
-      // 1. Upload or explicitly clear company logo asset with bounded timeout
+      // 1. Upload or explicitly clear company logo asset with generous LTE write timeout
       if (hasSeparateLogo && logoString.length <= 940000) {
         const logoHash = quickHash(logoString);
         if (uploadedLogoHashCache.get(tCleanCode) !== logoHash) {
@@ -610,7 +677,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
               logo: logoString,
               updatedAt: now
             }),
-            15000,
+            35000,
             'logo_upload'
           );
           uploadedLogoHashCache.set(tCleanCode, logoHash);
@@ -623,20 +690,21 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
               logo: '',
               updatedAt: tCleanDb.settings?.logoRemovedAt || now
             }),
-            12000,
+            25000,
             'logo_clear'
           );
           uploadedLogoHashCache.set(tCleanCode, 'REMOVED');
         }
       }
 
-      // 2. Shard large collections & write ONLY changed shards (with bounded write timeout)
+      // 2. Shard large collections & write ONLY changed shards cleanly in gentle batches of 2
       const shardCounts: Record<string, number> = {};
       const shardWriteTasks: Array<() => Promise<void>> = [];
 
       for (const col of SHARD_COLLECTIONS) {
         const arr: any[] = Array.isArray((tCleanDb as any)[col]) ? (tCleanDb as any)[col] : [];
-        const numShards = Math.ceil(arr.length / SHARD_PAGE_SIZE);
+        const pageSize = getShardPageSize(col);
+        const numShards = Math.ceil(arr.length / pageSize);
         shardCounts[col] = numShards;
         const prevCount = Number(prevCloudShardCounts[col]) || 0;
 
@@ -651,7 +719,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
         }
 
         for (let idx = 0; idx < numShards; idx++) {
-          const slice = arr.slice(idx * SHARD_PAGE_SIZE, (idx + 1) * SHARD_PAGE_SIZE);
+          const slice = arr.slice(idx * pageSize, (idx + 1) * pageSize);
           const itemsJson = JSON.stringify(slice);
           const cacheKey = `${tCleanCode}::${col}::${idx}`;
           const h = quickHash(itemsJson);
@@ -668,7 +736,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
                   updatedAt: now,
                   itemsJson
                 }),
-                15000,
+                45000,
                 `shard_${col}_${idx}`
               );
               uploadedShardHashCache.set(cacheKey, h);
@@ -688,7 +756,7 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
                 updatedAt: now,
                 itemsJson: '[]'
               }),
-              12000,
+              30000,
               `shard_wipe_${col}_${staleIdx}`
             );
             uploadedShardHashCache.delete(`${tCleanCode}::${col}::${staleIdx}`);
@@ -696,8 +764,9 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
         }
       }
 
-      for (let i = 0; i < shardWriteTasks.length; i += 10) {
-        await Promise.all(shardWriteTasks.slice(i, i + 10).map(fn => fn()));
+      // Batch size 2 prevents queueing contention on Firestore's single forced-long-polling HTTP channel
+      for (let i = 0; i < shardWriteTasks.length; i += 2) {
+        await Promise.all(shardWriteTasks.slice(i, i + 2).map(fn => fn()));
       }
       lastKnownShardCountsByCompany.set(tCleanCode, { ...shardCounts });
 
@@ -738,35 +807,34 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
 
       // 4. Commit lightweight manifests with bounded timeouts
       const compDocRef = doc(firestore, SYNC_DOC_PATH, `company_${tCleanCode}`);
-      await withWriteTimeout(setDoc(compDocRef, manifestPayload), 12000, `company_${tCleanCode}`);
+      await withWriteTimeout(setDoc(compDocRef, manifestPayload), 30000, `company_${tCleanCode}`);
 
       if (tCleanCode === 'COMP-102') {
-        await withWriteTimeout(setDoc(doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID), manifestPayload), 12000, SYNC_DOC_ID);
+        await withWriteTimeout(setDoc(doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID), manifestPayload), 30000, SYNC_DOC_ID);
       }
 
-      try {
-        await withWriteTimeout(setDoc(doc(firestore, SYNC_DOC_PATH, `backup_${tCleanCode}_latest`), manifestPayload), 10000, `backup_${tCleanCode}`);
-      } catch {
-        // non-blocking
-      }
+      lastSyncedManifestUpdatedAtByCompany.set(tCleanCode, now);
 
-      try {
-        await withWriteTimeout(
-          setDoc(doc(firestore, SYNC_DOC_PATH, 'directory_registry'), {
-            [tCleanCode]: {
-              code: truncateUtf8Bytes(tCleanCode, 40),
-              name: truncateUtf8Bytes(tCleanDb.settings.company || '', 190),
-              updatedAt: now,
-              usersCount: (tCleanDb.users || []).length,
-              invoicesCount: (tCleanDb.invoices || []).length
-            }
-          }, { merge: true }),
-          8000,
-          'directory_registry'
-        );
-      } catch (e) {
-        console.warn('Company code index notice:', e);
-      }
+      // Backup & registry run asynchronously so primary real-time sync succeeds immediately
+      void withWriteTimeout(
+        setDoc(doc(firestore, SYNC_DOC_PATH, `backup_${tCleanCode}_latest`), manifestPayload),
+        20000,
+        `backup_${tCleanCode}`
+      ).catch(() => {});
+
+      void withWriteTimeout(
+        setDoc(doc(firestore, SYNC_DOC_PATH, 'directory_registry'), {
+          [tCleanCode]: {
+            code: truncateUtf8Bytes(tCleanCode, 40),
+            name: truncateUtf8Bytes(tCleanDb.settings.company || '', 190),
+            updatedAt: now,
+            usersCount: (tCleanDb.users || []).length,
+            invoicesCount: (tCleanDb.invoices || []).length
+          }
+        }, { merge: true }),
+        15000,
+        'directory_registry'
+      ).catch(() => {});
 
       updateSyncState({
         status: 'connected',
@@ -841,7 +909,7 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
 
     try {
       const specificRef = doc(firestore, SYNC_DOC_PATH, `company_${clean}`);
-      const specificSnap = await withTimeout(getDoc(specificRef), 4000);
+      const specificSnap = await withTimeout(getDoc(specificRef), 8000);
       if (specificSnap && specificSnap.exists()) {
         specificDb = await reassembleFromManifestDoc(specificSnap.data(), clean);
       }
@@ -852,7 +920,7 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
     if (clean === 'COMP-102' && !specificDb) {
       try {
         const docRef = doc(firestore, SYNC_DOC_PATH, SYNC_DOC_ID);
-        const snap = await withTimeout(getDoc(docRef), 3500);
+        const snap = await withTimeout(getDoc(docRef), 8000);
         if (snap && snap.exists()) {
           mainDb = await reassembleFromManifestDoc(snap.data(), clean);
         }
@@ -1073,10 +1141,18 @@ export function subscribeToCloudDatabase(
       }
 
       try {
-        lastHandledRemoteTimestamp = data.updatedAt || Date.now();
+        const remoteUpdatedAt = Number(data.updatedAt) || 0;
         let remoteDb = await reassembleFromManifestDoc(data, cleanCode);
         if (remoteDb && Array.isArray(remoteDb.products) && remoteDb.settings) {
+          if (remoteUpdatedAt > lastHandledRemoteTimestamp) {
+            lastHandledRemoteTimestamp = remoteUpdatedAt;
+          }
           remoteDb = ensurePrimaryBranches(remoteDb);
+          updateSyncState({
+            status: 'connected',
+            lastSyncedAt: remoteUpdatedAt || Date.now(),
+            lastUpdatedBy: data.updatedBy || 'مستخدم آخر'
+          });
           onRemoteUpdate(remoteDb, data.updatedBy || 'مستخدم آخر', data.actionDesc);
         }
       } catch (e) {

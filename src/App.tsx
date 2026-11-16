@@ -66,6 +66,7 @@ import { getStoredAuthSession, logoutUser, AuthSession } from './services/fireba
 import { mergeCatalogIntoDb } from './data/defaultCatalog1001';
 import {
   subscribeToCloudDatabase,
+  subscribeToCloudMergedPush,
   pushDatabaseToCloud,
   fetchDatabaseFromCloud,
   getCloudLatestTimestamp,
@@ -105,6 +106,11 @@ export default function App() {
     lastSyncedAt: Date.now(),
     lastUpdatedBy: 'النظام'
   });
+  const dbRef = useRef<AccountingDB>(db);
+  dbRef.current = db;
+  const hasPendingCloudPushRef = useRef<boolean>(false);
+  const syncStatusRef = useRef<CloudSyncState['status']>('connected');
+  syncStatusRef.current = syncState.status;
 
   // Authentication & Google Drive states:
   // When opening the link for the first time or logged out, login is strictly required
@@ -343,7 +349,10 @@ export default function App() {
             const needsCloudLogoRepair = Boolean(merged.settings.logo && !ensuredCloud.settings?.logo);
             const needsCloudPhantomCleanup = doesCloudNeedCleanupSync(initialCompanyCode, merged);
             if (hasRicherLocal || hasLocalClosingsMissingFromCloud || hasUnsyncedDeletions || needsCloudLogoRepair || needsCloudPhantomCleanup) {
-              pushDatabaseToCloud(merged, true);
+              hasPendingCloudPushRef.current = true;
+              void pushDatabaseToCloud(merged, true).then(ok => {
+                if (ok) hasPendingCloudPushRef.current = false;
+              });
             }
 
             return merged;
@@ -356,14 +365,32 @@ export default function App() {
 
     void bootstrapDatabase();
 
-    // 3. Subscribe to sync status
+    // 3. Subscribe to sync status & pre-push cloud merge updates
     const unsubStatus = subscribeToSyncStatus(state => {
+      syncStatusRef.current = state.status;
       setSyncState(state);
+    });
+    const unsubMergedPush = subscribeToCloudMergedPush((mergedFromCloud, companyCode) => {
+      if (normalizeCompanyCode(dbRef.current.settings?.companyCode) !== companyCode) return;
+      setDb(prevDb => {
+        const storedSession = getStoredAuthSession();
+        const currentLocalUser = storedSession?.user || prevDb.currentUser;
+        const matchedUser = currentLocalUser
+          ? mergedFromCloud.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username)
+          : null;
+        const effectiveUser = matchedUser
+          ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin }
+          : currentLocalUser;
+        const nextDb = mergeLocalAndCloudDb(prevDb, mergedFromCloud, effectiveUser);
+        saveDatabase(nextDb);
+        return nextDb;
+      });
     });
 
     return () => {
       isMounted = false;
       unsubStatus();
+      unsubMergedPush();
     };
   }, []);
 
@@ -434,7 +461,7 @@ export default function App() {
     };
   }, [db.settings.companyCode, authSession?.user?.id, mergeLocalAndCloudDb]);
 
-  // Lightweight periodic & on-focus sync fallback (strictly scoped to Mawan COMP-102)
+  // Lightweight periodic & on-focus sync fallback + automatic retry of pending local changes (strictly scoped to Mawan COMP-102)
   useEffect(() => {
     const currentCompanyCode = normalizeCompanyCode(db.settings.companyCode);
     if (!isCompanyMawan(currentCompanyCode)) {
@@ -444,8 +471,13 @@ export default function App() {
 
     const pullLatest = async (forceCheck: boolean = false) => {
       try {
-        let remoteTimestampChanged = forceCheck;
-        if (!forceCheck) {
+        const needsRetryPush =
+          hasPendingCloudPushRef.current ||
+          syncStatusRef.current === 'offline' ||
+          syncStatusRef.current === 'error';
+
+        let remoteTimestampChanged = forceCheck || needsRetryPush;
+        if (!forceCheck && !needsRetryPush) {
           const remoteTs = await getCloudLatestTimestamp(currentCompanyCode);
           if (remoteTs > 0 && remoteTs <= lastCheckedCloudTs) {
             return;
@@ -457,6 +489,7 @@ export default function App() {
         }
         const cloudDb = await fetchDatabaseFromCloud(currentCompanyCode);
         if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
+          let mergedToPush: AccountingDB | null = null;
           setDb(prevDb => {
             const cloudAuditTime = cloudDb.audit?.[0]?.at ? new Date(cloudDb.audit[0].at).getTime() : 0;
             const prevAuditTime = prevDb.audit?.[0]?.at ? new Date(prevDb.audit[0].at).getTime() : 0;
@@ -475,22 +508,35 @@ export default function App() {
               (cloudDb.products?.length || 0) !== (prevDb.products?.length || 0) ||
               (cloudDb.deletedRecordIds?.length || 0) !== (prevDb.deletedRecordIds?.length || 0) ||
               (cloudDb.deletedInvoiceIds?.length || 0) !== (prevDb.deletedInvoiceIds?.length || 0);
-            const hasMissingInvoice = (cloudDb.invoices || []).some(
+            const hasMissingCloudInvoice = (cloudDb.invoices || []).some(
               ci => !deletedIdsSet.has(ci.id) && !(prevDb.invoices || []).some(pi => pi.id === ci.id)
+            );
+            const hasUnsyncedLocalInvoice = (prevDb.invoices || []).some(
+              pi => !deletedIdsSet.has(pi.id) && !(cloudDb.invoices || []).some(ci => ci.id === pi.id)
             );
             const hasNewerAudit = cloudAuditTime > prevAuditTime || (cloudDb.audit?.length || 0) !== (prevDb.audit?.length || 0);
 
-            if (remoteTimestampChanged || hasCountDiff || hasMissingInvoice || hasNewerAudit) {
+            if (remoteTimestampChanged || hasCountDiff || hasMissingCloudInvoice || hasUnsyncedLocalInvoice || hasNewerAudit) {
               const storedSession = getStoredAuthSession();
               const currentLocalUser = storedSession?.user || prevDb.currentUser;
               const matchedUser = currentLocalUser ? cloudDb.users?.find(u => u.id === currentLocalUser.id || u.username === currentLocalUser.username) : null;
               const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
               const merged = mergeLocalAndCloudDb(prevDb, cloudDb, effectiveUser);
               saveDatabase(merged);
+              if (needsRetryPush || hasUnsyncedLocalInvoice) {
+                mergedToPush = merged;
+              }
               return merged;
             }
             return prevDb;
           });
+          if (mergedToPush) {
+            const ok = await pushDatabaseToCloud(mergedToPush, true);
+            if (ok) hasPendingCloudPushRef.current = false;
+          }
+        } else if (needsRetryPush) {
+          const ok = await pushDatabaseToCloud(dbRef.current, true);
+          if (ok) hasPendingCloudPushRef.current = false;
         }
       } catch (e) {
         // silent
@@ -503,7 +549,7 @@ export default function App() {
     window.addEventListener('online', handleFocus);
     window.addEventListener('resume', handleFocus);
 
-    const intervalId = setInterval(() => pullLatest(false), 15000);
+    const intervalId = setInterval(() => pullLatest(false), 8000);
 
     return () => {
       window.removeEventListener('focus', handleFocus);
@@ -516,34 +562,46 @@ export default function App() {
 
   // Save changes to IndexedDB, localStorage, and Firestore Cloud Realtime (COMP-102 Mawan)
   const handleUpdateDb = useCallback((updated: AccountingDB, skipCloudPush?: boolean) => {
+    dbRef.current = updated;
     setDb(updated);
     saveDatabase(updated);
     if (!skipCloudPush && isCompanyMawan(updated.settings?.companyCode)) {
-      void pushDatabaseToCloud(updated, true); // Sync immediately to Firestore for all Mawan devices!
+      hasPendingCloudPushRef.current = true;
+      void pushDatabaseToCloud(updated, true).then(ok => {
+        if (ok) hasPendingCloudPushRef.current = false;
+      });
     }
   }, []);
 
   const handleManualSync = useCallback(async () => {
-    const companyCode = normalizeCompanyCode(db.settings.companyCode);
+    const currentDb = dbRef.current;
+    const companyCode = normalizeCompanyCode(currentDb.settings.companyCode);
     if (!isCompanyMawan(companyCode)) {
       return;
     }
     try {
       const cloudDb = await fetchDatabaseFromCloud(companyCode);
       if (cloudDb) {
-        const unified = mergeLocalAndCloudDb(db, cloudDb);
+        const unified = mergeLocalAndCloudDb(currentDb, cloudDb);
+        dbRef.current = unified;
         setDb(unified);
         saveDatabase(unified);
-        await pushDatabaseToCloud(unified, true);
+        const ok = await pushDatabaseToCloud(unified, true);
+        if (ok) hasPendingCloudPushRef.current = false;
         showLiveSyncToast(
-          `تمت المزامنة اللحظية بنجاح: تم تحديث ${unified.invoices.length} فاتورة متزامنة مع كافة الأجهزة`,
+          ok
+            ? `تمت المزامنة اللحظية بنجاح: تم توحيد ${unified.invoices.length} فاتورة بين كافة الأجهزة`
+            : `تم تحديث البيانات من السحابة (${unified.invoices.length} فاتورة) — سيعاد الرفع فور استقرار الشبكة`,
           'النظام السحابي',
           3000
         );
       } else {
-        await pushDatabaseToCloud(db, true);
+        const ok = await pushDatabaseToCloud(currentDb, true);
+        if (ok) hasPendingCloudPushRef.current = false;
         showLiveSyncToast(
-          'تم إرسال ومزامنة كافة بيانات جهازك إلى السحابة بنجاح',
+          ok
+            ? 'تم إرسال ومزامنة كافة بيانات جهازك إلى السحابة بنجاح'
+            : 'تعذر الوصول للسحابة الآن — البيانات محفوظة بأمان وستتزامن تلقائياً',
           'النظام السحابي',
           2800
         );
@@ -551,7 +609,7 @@ export default function App() {
     } catch (e) {
       console.error('Manual sync error:', e);
     }
-  }, [db, mergeLocalAndCloudDb]);
+  }, [mergeLocalAndCloudDb, showLiveSyncToast]);
 
   const validPages: PageId[] = [
     'dashboard', 'sales', 'purchases', 'procurement', 'quotes', 'orders', 'returns',
@@ -757,7 +815,7 @@ export default function App() {
       {/* PWA Mobile App Installation & Instant Auto-Update Banner */}
       <PWAInstallBanner />
 
-      <div className="flex flex-1 relative z-10 w-full max-w-full overflow-x-clip min-w-0">
+      <div className="flex flex-1 relative w-full max-w-full overflow-x-clip min-w-0">
         {/* Responsive Sidebar with User Role & Permissions */}
         <Sidebar
           currentPage={currentPage}
@@ -769,7 +827,17 @@ export default function App() {
         />
 
         {/* Main Workspace Content Area */}
-        <main className="flex-1 min-w-0 lg:mr-64 p-2.5 sm:p-6 pb-32 sm:pb-12 max-w-7xl mx-auto w-full max-w-full overflow-x-clip transition-all">
+        <main
+          className={`flex-1 min-w-0 lg:mr-64 max-w-7xl mx-auto w-full max-w-full overflow-x-clip transition-all ${
+            currentPage === 'sales' ||
+            currentPage === 'purchases' ||
+            currentPage === 'returns' ||
+            currentPage === 'quotes' ||
+            currentPage === 'orders'
+              ? 'p-1 sm:p-3 pb-2 sm:pb-3'
+              : 'p-2.5 sm:p-6 pb-20 sm:pb-10'
+          }`}
+        >
           {currentPage === 'quick_menu' && (
             <QuickMenuPage
               db={db}
