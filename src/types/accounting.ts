@@ -472,6 +472,7 @@ export interface DailyClosing {
   channelSummaries?: DailyClosingChannelSummary[];
   nextDayOpeningBalances?: Record<string, number>;
   isInitialBaseline?: boolean;
+  isOpeningBalanceAnchor?: boolean;
 }
 
 export interface CostCenter {

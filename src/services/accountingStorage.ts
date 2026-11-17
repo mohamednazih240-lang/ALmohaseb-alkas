@@ -2794,11 +2794,13 @@ function calculateBranchChannelTreasuryBalance(
         c.nextDayOpeningBalances &&
         c.nextDayOpeningBalances[channel] !== undefined
     )
-    .sort((a, b) =>
-      a.date === b.date
-        ? (b.createdAt || '').localeCompare(a.createdAt || '')
-        : b.date.localeCompare(a.date)
-    );
+    .sort((a, b) => {
+      if (a.date !== b.date) return b.date.localeCompare(a.date);
+      if (Boolean(a.isOpeningBalanceAnchor) !== Boolean(b.isOpeningBalanceAnchor)) {
+        return a.isOpeningBalanceAnchor ? -1 : 1;
+      }
+      return (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '');
+    });
 
   const latestClosing = closings[0];
 
@@ -2809,6 +2811,7 @@ function calculateBranchChannelTreasuryBalance(
         if (!entry || entry.method !== channel || !isBranchMatch(entry.branchId, branchId)) return false;
         if (entry.date > latestClosing.date) return true;
         if (entry.date === latestClosing.date) {
+          if (latestClosing.isOpeningBalanceAnchor) return false;
           return Boolean(
             entry.createdAt &&
             latestClosing.createdAt &&

@@ -100,8 +100,14 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const [printDocuments, setPrintDocuments] = useState<MovementPrintBlock[]>([]);
   const [printDocTitle, setPrintDocTitle] = useState('تقرير تقفيل اليومية');
 
+  const [showOpeningAnchorModal, setShowOpeningAnchorModal] = useState(false);
+  const [openingAnchorDate, setOpeningAnchorDate] = useState<string>(getTodayDate());
+  const [openingAnchorInputs, setOpeningAnchorInputs] = useState<Record<string, string>>({});
+  const [openingAnchorNotes, setOpeningAnchorNotes] = useState<string>('');
+
   useModalBackHandler(!!reviewingClosing, () => setReviewingClosing(null), 'daily_closing_review_modal');
   useModalBackHandler(!!editingClosing, () => setEditingClosing(null), 'daily_closing_edit_modal');
+  useModalBackHandler(showOpeningAnchorModal, () => setShowOpeningAnchorModal(false), 'daily_closing_opening_anchor_modal');
 
   const isTargetBranch = (bId?: string) => {
     return isBranchMatch(bId, targetBranchId);
@@ -111,6 +117,13 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     const dt = new Date(`${dateStr}T12:00:00`);
     if (isNaN(dt.getTime())) return getTodayDate();
     dt.setDate(dt.getDate() + 1);
+    return dt.toISOString().slice(0, 10);
+  };
+
+  const subtractOneDay = (dateStr: string): string => {
+    const dt = new Date(`${dateStr}T12:00:00`);
+    if (isNaN(dt.getTime())) return getTodayDate();
+    dt.setDate(dt.getDate() - 1);
     return dt.toISOString().slice(0, 10);
   };
 
@@ -138,8 +151,21 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const latestPriorClosing = useMemo(() => {
     return (db.dailyClosings || [])
       .filter(c => isTargetBranch(c.branchId) && c.date < selectedDate)
-      .sort((a, b) => (a.date === b.date ? (b.createdAt || '').localeCompare(a.createdAt || '') : b.date.localeCompare(a.date)))[0];
+      .sort((a, b) => {
+        if (a.date !== b.date) return b.date.localeCompare(a.date);
+        if (Boolean(a.isOpeningBalanceAnchor) !== Boolean(b.isOpeningBalanceAnchor)) {
+          return a.isOpeningBalanceAnchor ? -1 : 1;
+        }
+        return (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '');
+      })[0];
   }, [db.dailyClosings, selectedDate, targetBranchId]);
+
+  const activeOpeningAnchorForSelectedDate = useMemo(() => {
+    if (latestPriorClosing?.isOpeningBalanceAnchor && latestPriorClosing.nextDayDate === selectedDate) {
+      return latestPriorClosing;
+    }
+    return null;
+  }, [latestPriorClosing, selectedDate]);
 
   const hasPriorClosing = Boolean(latestPriorClosing);
   // Day-1 manual baseline mode defaults to TRUE when there is no prior closing for this branch
@@ -300,7 +326,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
     // Un-withdrawn profit carried over from latest prior closing (strictly before selectedDate)
     let carriedOverProfit = 0;
-    if (latestPriorClosing) {
+    if (latestPriorClosing && !latestPriorClosing.isOpeningBalanceAnchor) {
       const priorDate = latestPriorClosing.date;
       const isAfterPriorClosing = (t: { date: string; createdAt?: string }) =>
         (t.date > priorDate && t.date < selectedDate) ||
@@ -401,7 +427,11 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
           actualBal = effectiveActualCash;
         } else {
           const raw = baselineChannelInputs[m];
-          actualBal = raw !== undefined && raw.trim() !== '' ? roundMoney(Math.max(0, parseFloat(raw) || 0)) : closing;
+          if (raw !== undefined && raw.trim() !== '') {
+            actualBal = roundMoney(Math.max(0, parseFloat(raw) || 0));
+          } else {
+            actualBal = isFrozen ? roundMoney(Math.max(0, closing)) : 0;
+          }
         }
       } else {
         if (m === 'نقدي') {
@@ -747,6 +777,158 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     });
   };
 
+  // Open modal to set/edit opening balances for all channels starting from a chosen date (e.g. today)
+  const openOpeningAnchorModal = (targetDate: string = selectedDate) => {
+    const cleanDate = targetDate || getTodayDate();
+    setOpeningAnchorDate(cleanDate);
+
+    const existingAnchor = (db.dailyClosings || []).find(
+      c => isTargetBranch(c.branchId) && c.isOpeningBalanceAnchor && c.nextDayDate === cleanDate
+    );
+
+    const nextInputs: Record<string, string> = {};
+    allClosingChannels.forEach(ch => {
+      if (existingAnchor?.nextDayOpeningBalances && existingAnchor.nextDayOpeningBalances[ch] !== undefined) {
+        const val = existingAnchor.nextDayOpeningBalances[ch];
+        nextInputs[ch] = val > 0 ? String(val) : '0';
+      } else if (baselineChannelInputs[ch] !== undefined && baselineChannelInputs[ch].trim() !== '') {
+        nextInputs[ch] = baselineChannelInputs[ch];
+      } else {
+        nextInputs[ch] = '';
+      }
+    });
+
+    setOpeningAnchorInputs(nextInputs);
+    setOpeningAnchorNotes(existingAnchor?.notes || '');
+    setShowOpeningAnchorModal(true);
+  };
+
+  const handleSaveOpeningAnchor = (e: React.FormEvent) => {
+    e.preventDefault();
+    runWithLock(async () => {
+      const targetStartDate = openingAnchorDate || selectedDate || getTodayDate();
+      const anchorDate = subtractOneDay(targetStartDate);
+
+      const balancesMap: Record<string, number> = {};
+      for (const ch of allClosingChannels) {
+        const raw = (openingAnchorInputs[ch] ?? '').trim();
+        const parsed = raw === '' ? 0 : parseFloat(raw);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          await appAlert(`يرجى إدخال قيمة صحيحة غير سالبة لحساب (${ch}).`);
+          return;
+        }
+        balancesMap[ch] = roundMoney(parsed);
+      }
+
+      const totalWorking = roundMoney(
+        treasuryMethods.reduce((s, m) => s + (balancesMap[m] || 0), 0)
+      );
+      const frozenVal = roundMoney(balancesMap[FROZEN_CASH_METHOD] || 0);
+      const totalAll = roundMoney(totalWorking + frozenVal);
+
+      const summaryLinesText = allClosingChannels
+        .map(ch => `• ${ch}: ${formatMoney(balancesMap[ch] || 0, db.settings.currency)}`)
+        .join('\n');
+
+      const ok = await appConfirm(
+        `تأكيد اعتماد الأرصدة الافتتاحية لبداية يومية ${targetStartDate}:\n\n${summaryLinesText}\n\nالإجمالي الكلي: ${formatMoney(totalAll, db.settings.currency)}\n\nسيبدأ يوم ${targetStartDate} بهذه الأرصدة بالضبط في جميع الوسائل، وسيُضاف عليها وارد اليوم ويُخصم منها صادر اليوم تلقائياً (دون حذف أي فاتورة أو حركة سابقة).`,
+        { title: `تأسيس الأرصدة الافتتاحية ليوم ${targetStartDate}` }
+      );
+      if (!ok) return;
+
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (!updated.dailyClosings) updated.dailyClosings = [];
+
+      const staleAnchors = updated.dailyClosings.filter(
+        c =>
+          isTargetBranch(c.branchId) &&
+          c.isOpeningBalanceAnchor &&
+          (c.nextDayDate === targetStartDate || c.date === anchorDate)
+      );
+      if (staleAnchors.length > 0) {
+        const staleSet = new Set(staleAnchors.map(s => s.id));
+        updated.dailyClosings = updated.dailyClosings.filter(c => !staleSet.has(c.id));
+        markRecordsDeleted(updated, staleAnchors.map(s => s.id));
+      }
+
+      const nowIso = new Date().toISOString();
+      const cashOpening = balancesMap['نقدي'] || 0;
+      const anchorChannelSummaries: DailyClosingChannelSummary[] = allClosingChannels.map(ch => {
+        const val = balancesMap[ch] || 0;
+        return {
+          method: ch,
+          openingBalance: val,
+          cashIn: 0,
+          cashOut: 0,
+          closingBalance: val,
+          actualBalance: val,
+          variance: 0,
+          nextDayOpeningBalance: val
+        };
+      });
+
+      const anchorClosing: DailyClosing = {
+        id: generateId('cls_open'),
+        shiftNumber: `أرصدة افتتاحية — بداية يومية ${targetStartDate}`,
+        date: anchorDate,
+        time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
+        openedBy: db.currentUser?.name || 'مدير النظام',
+        closedBy: db.currentUser?.name || 'مدير النظام',
+        startingCash: cashOpening,
+        cashIn: 0,
+        cashOut: 0,
+        salesTotal: 0,
+        returnsTotal: 0,
+        netSales: 0,
+        cogs: 0,
+        grossProfit: 0,
+        profitMargin: 0,
+        actualCash: cashOpening,
+        expectedCash: cashOpening,
+        difference: 0,
+        frozenCash: frozenVal,
+        frozenOpeningCash: frozenVal,
+        frozenTodayNet: 0,
+        carriedOverProfit: 0,
+        withdrawnProfit: 0,
+        remainingProfitToCarry: 0,
+        status: 'مغلق',
+        notes: openingAnchorNotes.trim() || `أرصدة افتتاحية معتمدة لبداية يومية ${targetStartDate} لجميع وسائل الخزينة`,
+        branchId: targetBranchId,
+        branchName: currentBranch.name,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        nextDayDate: targetStartDate,
+        channelSummaries: anchorChannelSummaries,
+        nextDayOpeningBalances: balancesMap,
+        isInitialBaseline: true,
+        isOpeningBalanceAnchor: true
+      };
+
+      updated.dailyClosings.unshift(anchorClosing);
+      logAudit(
+        updated,
+        'تأسيس أرصدة افتتاحية لبداية اليومية',
+        `تم اعتماد أرصدة افتتاحية لبداية يومية ${targetStartDate} لفرع ${currentBranch.name} بإجمالي ${formatMoney(totalAll, db.settings.currency)}`
+      );
+
+      onUpdateDb(updated);
+      setShowOpeningAnchorModal(false);
+      setSelectedDate(targetStartDate);
+      setIsBaselineMode(false);
+      setStartingCashEdited(false);
+      setActualCashEdited(false);
+      setBaselineChannelInputs({});
+      setReconcileInputs({});
+      setJustClosedRecord(null);
+
+      await appAlert(
+        `تم حفظ واعتماد الأرصدة الافتتاحية لبداية يومية ${targetStartDate} بنجاح!\nيمكنك الآن متابعة فواتير وحركات اليوم، وعند نهاية اليوم اضغط «اعتماد وإغلاق الوردية واليومية».`,
+        { variant: 'success', title: 'تم تأسيس الأرصدة الافتتاحية' }
+      );
+    });
+  };
+
   // Update existing closing
   const handleUpdateClosing = (e: React.FormEvent) => {
     e.preventDefault();
@@ -936,10 +1118,13 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     return isBranchMatch(bId, targetBranchId);
   };
 
-  const sortClosingsDesc = (a: DailyClosing, b: DailyClosing) =>
-    a.date === b.date
-      ? (b.createdAt || '').localeCompare(a.createdAt || '')
-      : b.date.localeCompare(a.date);
+  const sortClosingsDesc = (a: DailyClosing, b: DailyClosing) => {
+    if (a.date !== b.date) return b.date.localeCompare(a.date);
+    if (Boolean(a.isOpeningBalanceAnchor) !== Boolean(b.isOpeningBalanceAnchor)) {
+      return a.isOpeningBalanceAnchor ? -1 : 1;
+    }
+    return (b.updatedAt || b.createdAt || '').localeCompare(a.updatedAt || a.createdAt || '');
+  };
 
   const branchScopedHistory = useMemo(
     () => (db.dailyClosings || []).filter(c => isHistoryTargetBranch(c.branchId)).sort(sortClosingsDesc),
@@ -965,12 +1150,15 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     [db.dailyClosings, selectedDate, targetBranchId]
   );
 
-  // Detect any prior day (before today) that has invoices/treasury movements after the earliest closing but is currently open/unclosed
+  // Detect any prior day (before today) that has invoices/treasury movements after the earliest closing (or latest start anchor) but is currently open/unclosed
   const unclosedPriorDates = useMemo(() => {
     const today = getTodayDate();
     const branchClosings = (db.dailyClosings || []).filter(c => isTargetBranch(c.branchId));
     const closedDates = new Set(branchClosings.map(c => c.date));
-    const minRefDate = branchClosings.map(c => c.date).sort()[0] || today;
+    const latestStartAnchor = branchClosings
+      .filter(c => c.isOpeningBalanceAnchor && c.nextDayDate)
+      .sort((a, b) => (b.nextDayDate || '').localeCompare(a.nextDayDate || ''))[0];
+    const minRefDate = latestStartAnchor?.nextDayDate || branchClosings.map(c => c.date).sort()[0] || today;
     const activeDates = new Set<string>();
     (db.invoices || []).forEach(inv => {
       if (inv && inv.date && inv.date < today && inv.date >= minRefDate && inv.invoiceKind !== 'quote' && isTargetBranch(inv.branchId)) {
@@ -1192,6 +1380,52 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
               </div>
             </div>
           )}
+
+          {/* Opening Balances Setup / Start Fresh Banner */}
+          <div className={`rounded-xl p-3 border-2 flex flex-wrap items-center justify-between gap-3 shadow-2xs ${
+            activeOpeningAnchorForSelectedDate
+              ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+              : 'bg-indigo-50 border-indigo-300 text-indigo-950'
+          }`}>
+            <div className="flex items-start sm:items-center gap-2.5 text-xs">
+              <div className={`p-2 rounded-lg shrink-0 ${
+                activeOpeningAnchorForSelectedDate ? 'bg-emerald-600 text-white' : 'bg-indigo-600 text-white'
+              }`}>
+                <Wallet className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="font-black text-xs sm:text-sm">
+                  {activeOpeningAnchorForSelectedDate
+                    ? `✓ تم اعتماد الأرصدة الافتتاحية لبداية يومية ${selectedDate} في جميع الوسائل`
+                    : `بدء تقفيل اليومية من يوم ${selectedDate} — إدخال الأرصدة الافتتاحية لجميع الوسائل`}
+                </div>
+                <div className={`text-[11px] mt-0.5 ${activeOpeningAnchorForSelectedDate ? 'text-emerald-800' : 'text-indigo-800'}`}>
+                  {activeOpeningAnchorForSelectedDate
+                    ? `يبدأ اليوم بإجمالي افتتاحي (${formatMoney(
+                        allClosingChannels.reduce((s, ch) => s + (activeOpeningAnchorForSelectedDate.nextDayOpeningBalances?.[ch] || 0), 0),
+                        db.settings.currency
+                      )}) ويُضاف عليه وارد اليوم ويُخصم صادر اليوم تلقائياً.`
+                    : 'أدخل المبالغ الموجودة معك الآن في (نقدي، فودافون كاش، إنستاباي، فيزا، تحويل بنكي، المجمد) كأرصدة بداية اليوم قبل أو أثناء عمل اليوم.'}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => openOpeningAnchorModal(selectedDate)}
+              className={`px-3.5 py-2 rounded-lg text-xs font-black flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer shrink-0 ${
+                activeOpeningAnchorForSelectedDate
+                  ? 'bg-emerald-700 hover:bg-emerald-800 text-white'
+                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+              }`}
+            >
+              <Plus className="w-4 h-4" />
+              <span>
+                {activeOpeningAnchorForSelectedDate
+                  ? `تعديل الأرصدة الافتتاحية ليوم ${selectedDate}`
+                  : `إدخال الأرصدة الافتتاحية ليوم ${selectedDate}`}
+              </span>
+            </button>
+          </div>
 
           {/* Shift Configuration Bar */}
           <div className={`bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs grid grid-cols-1 ${isBaselineMode ? 'sm:grid-cols-3' : 'sm:grid-cols-4'} gap-3`}>
@@ -2151,9 +2385,13 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                       </span>
                     </div>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      c.isInitialBaseline ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-800'
+                      c.isOpeningBalanceAnchor
+                        ? 'bg-indigo-100 text-indigo-900'
+                        : c.isInitialBaseline
+                        ? 'bg-amber-100 text-amber-900'
+                        : 'bg-emerald-100 text-emerald-800'
                     }`}>
-                      {c.isInitialBaseline ? 'تأسيس البداية' : c.status}
+                      {c.isOpeningBalanceAnchor ? `أرصدة افتتاحية (${c.nextDayDate || ''})` : c.isInitialBaseline ? 'تأسيس البداية' : c.status}
                     </span>
                   </div>
 
@@ -2341,11 +2579,13 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                       مراجعة يومية: {reviewingClosing.shiftNumber}
                     </h3>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      reviewingClosing.isInitialBaseline
+                      reviewingClosing.isOpeningBalanceAnchor
+                        ? 'bg-indigo-400/20 text-indigo-200 border border-indigo-400/40'
+                        : reviewingClosing.isInitialBaseline
                         ? 'bg-amber-400/20 text-amber-200 border border-amber-400/40'
                         : 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/40'
                     }`}>
-                      {reviewingClosing.isInitialBaseline ? 'تأسيس البداية' : reviewingClosing.status}
+                      {reviewingClosing.isOpeningBalanceAnchor ? 'أرصدة افتتاحية' : reviewingClosing.isInitialBaseline ? 'تأسيس البداية' : reviewingClosing.status}
                     </span>
                   </div>
                   <div className="text-[11px] text-slate-300 font-mono mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
@@ -2909,6 +3149,167 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                   className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg font-bold shadow-2xs"
                 >
                   {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ التعديلات'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Opening Balances Anchor Modal (Start Daily Closing Fresh from Today) */}
+      {showOpeningAnchorModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/65 backdrop-blur-2xs flex items-center justify-center p-2 sm:p-4"
+          onClick={() => setShowOpeningAnchorModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl w-full max-w-xl max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden text-right"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="p-4 bg-indigo-950 text-white flex items-center justify-between border-b border-indigo-800 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-600 rounded-xl">
+                  <Wallet className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-black text-white">
+                    إدخال الأرصدة الافتتاحية لبداية اليومية
+                  </h3>
+                  <p className="text-[11px] text-indigo-200">
+                    فرع: {currentBranch.name} — أدخل المبالغ المتوفرة لديك الآن في كل وسيلة
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowOpeningAnchorModal(false)}
+                className="p-1.5 text-indigo-300 hover:text-white hover:bg-indigo-900 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveOpeningAnchor} className="flex flex-col flex-1 overflow-hidden">
+              <div className="p-4 overflow-y-auto space-y-4 flex-1 text-xs">
+                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-indigo-950 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="font-black text-xs">تاريخ بداية اليومية بهذه الأرصدة:</label>
+                    <input
+                      type="date"
+                      value={openingAnchorDate}
+                      onChange={e => setOpeningAnchorDate(e.target.value)}
+                      className="px-2.5 py-1.5 bg-white border border-indigo-300 rounded-lg font-mono font-black text-xs text-slate-900 outline-none focus:border-indigo-600"
+                      required
+                    />
+                  </div>
+                  <p className="text-[11px] text-indigo-800 leading-relaxed">
+                    ستُعتمد هذه المبالغ كرصيد افتتاحي لبداية يوم <strong className="font-mono">{openingAnchorDate}</strong>، وأي مبيعات أو مقبوضات أو مصروفات خلال اليوم ستُضاف أو تُخصم فوقها تلقائياً عند تقفيل نهاية اليوم.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {allClosingChannels.map(ch => {
+                    const isFrozen = ch === FROZEN_CASH_METHOD;
+                    return (
+                      <div
+                        key={ch}
+                        className={`p-3 rounded-xl border-2 space-y-1.5 ${
+                          isFrozen
+                            ? 'bg-amber-50 border-amber-300'
+                            : ch === 'نقدي'
+                            ? 'bg-emerald-50 border-emerald-300'
+                            : 'bg-slate-50 border-slate-200'
+                        }`}
+                      >
+                        <label className="font-black text-xs flex items-center justify-between text-slate-900">
+                          <span className="flex items-center gap-1">
+                            {isFrozen && <Lock className="w-3.5 h-3.5 text-amber-700" />}
+                            <span>
+                              {ch === 'نقدي'
+                                ? 'نقدي (الدرج / الفكة)'
+                                : isFrozen
+                                ? 'المبلغ المجمد (محفوظ جانباً)'
+                                : ch}
+                            </span>
+                          </span>
+                          <span className="text-[10px] font-bold text-slate-500">{db.settings.currency}</span>
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={openingAnchorInputs[ch] ?? ''}
+                          onFocus={e => e.target.select()}
+                          onChange={e =>
+                            setOpeningAnchorInputs(prev => ({
+                              ...prev,
+                              [ch]: e.target.value
+                            }))
+                          }
+                          placeholder="0"
+                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono font-black text-sm text-slate-950 outline-none focus:border-indigo-600"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div>
+                  <label className="font-bold text-slate-700 block mb-1">ملاحظات (اختياري)</label>
+                  <input
+                    type="text"
+                    value={openingAnchorNotes}
+                    onChange={e => setOpeningAnchorNotes(e.target.value)}
+                    placeholder="مثال: بداية نظام التقفيل اليومي من اليوم بأرصدة الجرد الفعلية"
+                    className="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs outline-none focus:border-indigo-600"
+                  />
+                </div>
+
+                <div className="bg-slate-900 text-white rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="text-[11px] text-slate-300 block">
+                      إجمالي الأرصدة الافتتاحية (شامل المجمد) لبداية {openingAnchorDate}:
+                    </span>
+                    <span className="text-base font-black font-mono text-emerald-300">
+                      {formatMoney(
+                        allClosingChannels.reduce(
+                          (s, ch) => s + Math.max(0, parseFloat(openingAnchorInputs[ch] || '0') || 0),
+                          0
+                        ),
+                        db.settings.currency
+                      )}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-300 font-mono">
+                    التشغيلي:{' '}
+                    <strong className="text-white">
+                      {formatMoney(
+                        treasuryMethods.reduce(
+                          (s, m) => s + Math.max(0, parseFloat(openingAnchorInputs[m] || '0') || 0),
+                          0
+                        ),
+                        db.settings.currency
+                      )}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowOpeningAnchorModal(false)}
+                  className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-xs font-bold cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-black flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>{isSubmitting ? 'جارٍ الحفظ...' : `اعتماد الأرصدة الافتتاحية ليوم ${openingAnchorDate}`}</span>
                 </button>
               </div>
             </form>

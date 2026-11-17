@@ -2399,7 +2399,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
     const ledgerByBranch = new Map<string, ReturnType<typeof buildProductFifoLedger>>();
     const sortedClosings = [...updated.dailyClosings].sort((a, b) => a.date.localeCompare(b.date));
     for (const dc of sortedClosings) {
-      if (!dc || !dc.date) continue;
+      if (!dc || !dc.date || dc.isOpeningBalanceAnchor) continue;
       const bKey = dc.branchId || 'br_mawan';
       if (!ledgerByBranch.has(bKey)) {
         ledgerByBranch.set(bKey, buildProductFifoLedger(updated, bKey));
