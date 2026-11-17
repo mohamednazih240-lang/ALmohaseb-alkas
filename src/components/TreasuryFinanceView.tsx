@@ -58,6 +58,7 @@ import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
 import { tafqeetCurrency } from '../services/tafqeetService';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface TreasuryFinanceViewProps {
   subPage: 'treasury' | 'expenses' | 'revenues' | 'accounts' | 'journals' | 'ledger';
@@ -191,10 +192,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Save manual treasury in/out with balanced double-entry journal
   const handleSaveMove = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanAmt = roundMoney(moveAmount);
-      if (!isFinitePositive(cleanAmt)) return alert('المبلغ غير صالح. يجب أن يكون أكبر من صفر.');
-      if (moveMethod === 'آجل') return alert('يرجى اختيار خزينة أو قناة دفع نقدية صالحة.');
+      if (!isFinitePositive(cleanAmt)) {
+        await appAlert('المبلغ غير صالح. يجب أن يكون أكبر من صفر.');
+        return;
+      }
+      if (moveMethod === 'آجل') {
+        await appAlert('يرجى اختيار خزينة أو قناة دفع نقدية صالحة.');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const entryId = generateId('tr');
@@ -225,7 +232,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
       const balCheck = assertJournalBalanced(jEntry);
       if (!balCheck.balanced) {
-        alert(balCheck.reason || 'القيد المحاسبي لحركة الخزينة غير متوازن.');
+        await appAlert(balCheck.reason || 'القيد المحاسبي لحركة الخزينة غير متوازن.');
         return;
       }
 
@@ -255,16 +262,25 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Transfer between payment methods (e.g. from Cash to InstaPay)
   const handleSaveTransfer = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (fromMethod === toMethod) return alert('اختر وسيلتين مختلفتين للتحويل');
-      if (fromMethod === 'آجل' || toMethod === 'آجل') return alert('لا يمكن التحويل من أو إلى حساب آجل.');
+    runWithLock(async () => {
+      if (fromMethod === toMethod) {
+        await appAlert('اختر وسيلتين مختلفتين للتحويل');
+        return;
+      }
+      if (fromMethod === 'آجل' || toMethod === 'آجل') {
+        await appAlert('لا يمكن التحويل من أو إلى حساب آجل.');
+        return;
+      }
       const cleanAmt = roundMoney(transferAmount);
-      if (!isFinitePositive(cleanAmt)) return alert('المبلغ غير صالح');
+      if (!isFinitePositive(cleanAmt)) {
+        await appAlert('المبلغ غير صالح');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const fromBal = calculateTreasuryBalance(updated, fromMethod, targetBranchId);
       if (fromBal < cleanAmt) {
-        alert(`رصيد ${fromMethod} الحالي بفرع (${currentBranch.name}) هو (${formatMoney(fromBal, updated.settings.currency)}) ولا يكفي لإتمام التحويل.`);
+        await appAlert(`رصيد ${fromMethod} الحالي بفرع (${currentBranch.name}) هو (${formatMoney(fromBal, updated.settings.currency)}) ولا يكفي لإتمام التحويل.`);
         return;
       }
 
@@ -322,7 +338,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
       const balCheck = assertJournalBalanced(transferJournal);
       if (!balCheck.balanced) {
-        alert(balCheck.reason || 'القيد المحاسبي للتحويل غير متوازن.');
+        await appAlert(balCheck.reason || 'القيد المحاسبي للتحويل غير متوازن.');
         return;
       }
 
@@ -338,7 +354,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Freeze / Unfreeze cash reserve
   const handleSaveFreeze = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const res = executeCashFreezeTransfer(db, {
         direction: freezeDirection,
         amount: freezeAmount,
@@ -348,7 +364,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         branchName: currentBranch.name
       });
       if (!res.ok) {
-        alert(res.error);
+        await appAlert(res.error, { variant: 'error' });
         return;
       }
       onUpdateDb(res.db);
@@ -361,15 +377,25 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Save Expense or Revenue
   const handleSaveSimple = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanAmt = roundMoney(simpleAmount);
-      if (!isFinitePositive(cleanAmt)) return alert('المبلغ غير صالح');
-      if (simpleMethod === 'آجل') return alert('يرجى اختيار وسيلة سداد/تحصيل نقدية.');
-      if (!simpleCategory.trim()) return alert('يرجى تحديد التصنيف والبند');
+      if (!isFinitePositive(cleanAmt)) {
+        await appAlert('المبلغ غير صالح');
+        return;
+      }
+      if (simpleMethod === 'آجل') {
+        await appAlert('يرجى اختيار وسيلة سداد/تحصيل نقدية.');
+        return;
+      }
+      if (!simpleCategory.trim()) {
+        await appAlert('يرجى تحديد التصنيف والبند');
+        return;
+      }
       const isExpense = subPage === 'expenses';
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const recId = generateId(isExpense ? 'exp' : 'rev');
+      const nowIso = new Date().toISOString();
       const cashAccId = getMethodAccountId(simpleMethod);
       const cashAcc = updated.accounts.find(a => a.id === cashAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
 
@@ -381,7 +407,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         method: simpleMethod,
         description: simpleDesc.trim(),
         branchId: targetBranchId,
-        branchName: currentBranch.name
+        branchName: currentBranch.name,
+        createdAt: nowIso,
+        updatedAt: nowIso
       };
 
       if (editingSimple) {
@@ -394,7 +422,8 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               category: record.category,
               amount: cleanAmt,
               method: simpleMethod,
-              description: record.description
+              description: record.description,
+              updatedAt: nowIso
             };
           }
         } else {
@@ -406,7 +435,8 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
               category: record.category,
               amount: cleanAmt,
               method: simpleMethod,
-              description: record.description
+              description: record.description,
+              updatedAt: nowIso
             };
           }
         }
@@ -418,6 +448,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           updated.treasury[trIdx].date = simpleDate;
           updated.treasury[trIdx].method = simpleMethod;
           updated.treasury[trIdx].description = `${isExpense ? 'مصروف' : 'إيراد'} (${currentBranch.name}): ${record.category} (${record.description})`;
+          updated.treasury[trIdx].updatedAt = nowIso;
         }
 
         // Update journal entry & cash/bank account in place
@@ -446,9 +477,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
             }
           }
           updated.journals[jIdx].date = simpleDate;
+          updated.journals[jIdx].updatedAt = nowIso;
           const editBalCheck = assertJournalBalanced(updated.journals[jIdx]);
           if (!editBalCheck.balanced) {
-            alert(editBalCheck.reason || 'القيد المحاسبي المعدل غير متوازن.');
+            await appAlert(editBalCheck.reason || 'القيد المحاسبي المعدل غير متوازن.', { variant: 'error' });
             return;
           }
         }
@@ -500,7 +532,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         };
         const balCheck = assertJournalBalanced(jEntry);
         if (!balCheck.balanced) {
-          alert(balCheck.reason || 'قيد المصروف غير متوازن.');
+          await appAlert(balCheck.reason || 'قيد المصروف غير متوازن.', { variant: 'error' });
           return;
         }
         updated.journals.unshift(jEntry);
@@ -537,7 +569,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         };
         const balCheck = assertJournalBalanced(jEntry);
         if (!balCheck.balanced) {
-          alert(balCheck.reason || 'قيد الإيراد غير متوازن.');
+          await appAlert(balCheck.reason || 'قيد الإيراد غير متوازن.', { variant: 'error' });
           return;
         }
         updated.journals.unshift(jEntry);
@@ -552,29 +584,37 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   };
 
   const handleDeleteTreasuryEntry = (tr: TreasuryEntry) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const isManager = db.currentUser?.role === 'مدير';
       if (!isManager) {
-        alert('عذراً، لا يمكن حذف أي حركة خزينة إلا من قِبل المدير العام فقط.');
+        await appAlert('عذراً، لا يمكن حذف أي حركة خزينة إلا من قِبل المدير العام فقط.', { variant: 'warning' });
         return;
       }
 
-      if (!confirm(`هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)} وعكس الأرصدة؟`)) return;
+      const ok = await appConfirm(
+        `هل أنت متأكد من حذف حركة الخزينة بقيمة ${formatMoney(tr.amount, db.settings.currency)} وعكس الأرصدة؟`,
+        { variant: 'danger', title: 'تأكيد حذف حركة الخزينة' }
+      );
+      if (!ok) return;
       const updated = deleteTreasuryEntryAndRevert(db, tr.id);
       onUpdateDb(updated);
     });
   };
 
   const handleDeleteSimpleRecord = (item: SimpleRecord) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const isManager = db.currentUser?.role === 'مدير';
       if (!isManager) {
-        alert('عذراً، لا يمكن حذف أي مصروف أو إيراد إلا من قِبل المدير العام فقط.');
+        await appAlert('عذراً، لا يمكن حذف أي مصروف أو إيراد إلا من قِبل المدير العام فقط.', { variant: 'warning' });
         return;
       }
 
       const isExp = subPage === 'expenses';
-      if (!confirm(`هل أنت متأكد من حذف ${isExp ? 'المصروف' : 'الإيراد'} "${item.category}"؟`)) return;
+      const ok = await appConfirm(
+        `هل أنت متأكد من حذف ${isExp ? 'المصروف' : 'الإيراد'} "${item.category}"؟`,
+        { variant: 'danger', title: `تأكيد حذف ${isExp ? 'المصروف' : 'الإيراد'}` }
+      );
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const removedIds: string[] = [item.id];
       if (isExp) {
@@ -609,7 +649,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   };
 
   const handleExportTreasuryCsv = () => {
-    if (db.treasury.length === 0) return alert('لا توجد حركات للتصدير');
+    if (db.treasury.length === 0) {
+      void appAlert('لا توجد حركات للتصدير');
+      return;
+    }
     const headers = ['التاريخ', 'الاتجاه', 'طريقة الدفع', 'البيان', 'المبلغ'];
     const rows = db.treasury.map(t => [
       t.date,
@@ -623,7 +666,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
   const handleExportSimpleCsv = () => {
     const list = subPage === 'expenses' ? db.expenses : db.revenues;
-    if (list.length === 0) return alert('لا توجد بيانات للتصدير');
+    if (list.length === 0) {
+      void appAlert('لا توجد بيانات للتصدير');
+      return;
+    }
     const headers = ['التاريخ', 'التصنيف', 'الخزينة / الطريقة', 'البيان', 'المبلغ'];
     const rows = list.map(item => [
       item.date,
@@ -678,7 +724,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   };
 
   const handlePrintTreasuryBatch = () => {
-    if (db.treasury.length === 0) return alert('لا توجد حركات للطباعة');
+    if (db.treasury.length === 0) {
+      void appAlert('لا توجد حركات للطباعة');
+      return;
+    }
     const blocks: MovementPrintBlock[] = db.treasury.map(tr => ({
       title: tr.direction === 'in' ? 'حركة إيداع خزينة' : 'حركة صرف خزينة',
       serialNo: `#TR-${tr.id.slice(-6).toUpperCase()}`,
@@ -760,7 +809,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
   const handlePrintSimpleBatch = () => {
     const list = subPage === 'expenses' ? db.expenses : db.revenues;
-    if (list.length === 0) return alert('لا توجد سجلات للطباعة');
+    if (list.length === 0) {
+      void appAlert('لا توجد سجلات للطباعة');
+      return;
+    }
     const isExp = subPage === 'expenses';
 
     const blocks: MovementPrintBlock[] = list.map(item => ({
@@ -803,12 +855,15 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Add Account to Chart of Accounts
   const handleSaveAccount = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (!accCode.trim() || !accName.trim()) return alert('أكمل بيانات الحساب');
+    runWithLock(async () => {
+      if (!accCode.trim() || !accName.trim()) {
+        await appAlert('أكمل بيانات الحساب');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       if (updated.accounts.some(a => a.code === accCode.trim())) {
-        alert('كود الحساب موجود بالفعل');
+        await appAlert('كود الحساب موجود بالفعل', { variant: 'warning' });
         return;
       }
 
@@ -832,10 +887,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   // Add Manual Journal Entry
   const handleSaveJournal = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanAmt = roundMoney(journalAmount);
-      if (!isFinitePositive(cleanAmt)) return alert('المبلغ غير صالح');
-      if (debitAccId === creditAccId) return alert('لا يمكن اختيار نفس الحساب للمدين والدائن');
+      if (!isFinitePositive(cleanAmt)) {
+        await appAlert('المبلغ غير صالح');
+        return;
+      }
+      if (debitAccId === creditAccId) {
+        await appAlert('لا يمكن اختيار نفس الحساب للمدين والدائن');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const debitAcc = updated.accounts.find(a => a.id === debitAccId);
@@ -859,7 +920,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
       const balCheck = assertJournalBalanced(newEntry);
       if (!balCheck.balanced) {
-        alert(balCheck.reason || 'القيد المحاسبي غير متوازن.');
+        await appAlert(balCheck.reason || 'القيد المحاسبي غير متوازن.', { variant: 'error' });
         return;
       }
 

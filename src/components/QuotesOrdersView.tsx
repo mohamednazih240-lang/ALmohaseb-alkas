@@ -34,6 +34,7 @@ import { postInvoiceTransaction } from '../services/accountingEngine';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface QuotesOrdersViewProps {
   db: AccountingDB;
@@ -169,11 +170,11 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
 
   const openConvertQuoteModal = (q: Quote) => {
     if (q.status === 'تم التحويل') {
-      alert('تم تحويل عرض السعر هذا إلى فاتورة معتمدة مسبقاً.');
+      void appAlert('تم تحويل عرض السعر هذا إلى فاتورة معتمدة مسبقاً.');
       return;
     }
     if (!q.items || q.items.length === 0) {
-      alert('عرض السعر فارغ ولا يحتوي على أصناف.');
+      void appAlert('عرض السعر فارغ ولا يحتوي على أصناف.');
       return;
     }
     const qMethod = q.paymentMethod && q.paymentMethod !== 'آجل' ? q.paymentMethod : 'نقدي';
@@ -188,15 +189,15 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
     if (!convertingQuote) return;
     const q = convertingQuote;
 
-    runWithLock(() => {
+    runWithLock(async () => {
       if (q.status === 'تم التحويل') {
-        alert('تم تحويل عرض السعر هذا إلى فاتورة معتمدة بالفعل مسبقاً.');
+        await appAlert('تم تحويل عرض السعر هذا إلى فاتورة معتمدة بالفعل مسبقاً.');
         setConvertingQuote(null);
         return;
       }
 
       if (!q.items || q.items.length === 0) {
-        alert('عرض السعر فارغ ولا يحتوي على أصناف.');
+        await appAlert('عرض السعر فارغ ولا يحتوي على أصناف.');
         return;
       }
 
@@ -264,7 +265,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
 
       const res = postInvoiceTransaction(workingDb, newInvoice, workingDb.currentUser?.name || 'مدير النظام');
       if (!res.success) {
-        alert(res.message || 'تعذر تحويل عرض السعر إلى فاتورة بيع بسبب فشل التحقق المحاسبي.');
+        await appAlert(res.message || 'تعذر تحويل عرض السعر إلى فاتورة بيع بسبب فشل التحقق المحاسبي.', { variant: 'error' });
         return;
       }
 
@@ -274,6 +275,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
         currentQuote.status = 'تم التحويل';
         currentQuote.convertedInvoiceId = newInvoice.id;
         currentQuote.convertedInvoiceNumber = newInvoice.number;
+        currentQuote.updatedAt = new Date().toISOString();
       }
 
       logAudit(
@@ -286,8 +288,9 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       setConvertingQuote(null);
 
       const savedInv = updated.invoices.find(i => i.id === newInvoice.id) || newInvoice;
-      const wantsPreview = confirm(
-        `✓ تم اعتماد وتحويل عرض السعر (${q.number}) إلى فاتورة بيع معتمدة رقم (${newInvoice.number}) بنجاح!\n\nهل ترغب في معاينة وطباعة الفاتورة المعتمدة الآن؟`
+      const wantsPreview = await appConfirm(
+        `تم اعتماد وتحويل عرض السعر (${q.number}) إلى فاتورة بيع معتمدة رقم (${newInvoice.number}) بنجاح!\n\nهل ترغب في معاينة وطباعة الفاتورة المعتمدة الآن؟`,
+        { variant: 'success', title: 'تحويل عرض السعر', confirmText: 'معاينة وطباعة', cancelText: 'إغلاق' }
       );
       if (wantsPreview) {
         onPreviewInvoice(savedInv);
@@ -297,8 +300,11 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
 
   const handleSaveOrder = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (orderItems.length === 0) return alert('أضف بنوداً للأمر');
+    runWithLock(async () => {
+      if (orderItems.length === 0) {
+        await appAlert('أضف بنوداً للأمر');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const list = orderType === 'sale' ? updated.customers : updated.suppliers;
@@ -308,6 +314,7 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       updated.settings.nextOrder += 1;
 
       const total = roundMoney(orderItems.reduce((s, it) => s + (Number(it.total) || 0), 0));
+      const nowIso = new Date().toISOString();
 
       const newOrder: Order = {
         id: generateId('ord'),
@@ -321,7 +328,9 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
         status: 'قيد التنفيذ',
         notes: orderNotes,
         branchId: targetBranchId,
-        branchName: currentBranch.name
+        branchName: currentBranch.name,
+        createdAt: nowIso,
+        updatedAt: nowIso
       };
 
       updated.orders.unshift(newOrder);
@@ -332,8 +341,9 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
   };
 
   const handleDeleteQuote = (id: string) => {
-    runWithLock(() => {
-      if (!confirm('هل ترغب في حذف عرض السعر نهائياً؟')) return;
+    runWithLock(async () => {
+      const ok = await appConfirm('هل ترغب في حذف عرض السعر نهائياً؟', { variant: 'danger', title: 'تأكيد حذف عرض السعر' });
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.quotes = updated.quotes.filter(q => q.id !== id);
       markRecordsDeleted(updated, [id]);
@@ -342,8 +352,9 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
   };
 
   const handleDeleteOrder = (id: string) => {
-    runWithLock(() => {
-      if (!confirm('هل ترغب في حذف الأمر نهائياً؟')) return;
+    runWithLock(async () => {
+      const ok = await appConfirm('هل ترغب في حذف الأمر نهائياً؟', { variant: 'danger', title: 'تأكيد حذف الأمر' });
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.orders = updated.orders.filter(o => o.id !== id);
       markRecordsDeleted(updated, [id]);

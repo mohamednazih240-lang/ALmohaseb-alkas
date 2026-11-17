@@ -30,6 +30,7 @@ import { formatMoney, generateId, getTodayDate, logAudit, roundQty, roundMoney }
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert } from '../services/appDialog';
 
 interface ProcurementViewProps {
   db: AccountingDB;
@@ -136,7 +137,7 @@ export const ProcurementView: React.FC<ProcurementViewProps> = ({
   // Create GRN (Goods Received Note) from selected PO
   const handleCreateGRNFromPO = () => {
     if (!selectedPO) return;
-    runWithLock(() => {
+    runWithLock(async () => {
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const nextGRNNum = updated.settings.nextGRN || 7001;
       const grnNumber = `GRN-${nextGRNNum}`;
@@ -199,11 +200,12 @@ export const ProcurementView: React.FC<ProcurementViewProps> = ({
       const poIdx = updated.orders.findIndex(o => o.id === selectedPO.id);
       if (poIdx !== -1) {
         updated.orders[poIdx].status = 'مكتمل';
+        updated.orders[poIdx].updatedAt = new Date().toISOString();
       }
 
       logAudit(updated, 'استلام بضاعة مخزنية (GRN)', `تم استلام أمر الشراء ${selectedPO.number} بموجب الإذن ${grnNumber}`);
       onUpdateDb(updated);
-      alert(`تم إصدار إذن استلام المخزن ${grnNumber} وتحديث أرصدة المخازن بنجاح.`);
+      await appAlert(`تم إصدار إذن استلام المخزن ${grnNumber} وتحديث أرصدة المخازن بنجاح.`);
     });
   };
 

@@ -41,6 +41,7 @@ import {
   formatCleanNumber
 } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface PurchasesViewProps {
   db: AccountingDB;
@@ -105,7 +106,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   // Mobile back button: Strict protection against accidental exit from purchase invoice editor
   useModalBackHandler(
     activeTab === 'editor',
-    () => {
+    async () => {
       // If a submodal (e.g. item card, rapid modal, extra income) is open inside the invoice editor, close it first and DO NOT exit!
       if ((window as any).__hesabaty_has_open_modal && typeof (window as any).__hesabaty_close_topmost_modal === 'function') {
         const closed = (window as any).__hesabaty_close_topmost_modal();
@@ -123,11 +124,12 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
       } catch (e) {}
 
       if (hasItems || editingInvoice) {
-        const ok = confirm(
-          '⚠️ تنبيه مهم: هناك فاتورة قيد التحرير ولم يتم حفظها بعد.\n\n' +
+        const ok = await appConfirm(
+          'تنبيه مهم: هناك فاتورة قيد التحرير ولم يتم حفظها بعد.\n\n' +
           'هل تريد الخروج إلى قائمة الفواتير بدون حفظ؟\n' +
-          '• اضغط «موافق» للخروج (سيتم حفظ مسودة احتياطية يمكنك استعادتها فوراً).\n' +
-          '• اضغط «إلغاء» للبقاء في شاشة الفاتورة لمتابعة حفظها.'
+          '• اضغط «تأكيد» للخروج (سيتم حفظ مسودة احتياطية يمكنك استعادتها فوراً).\n' +
+          '• اضغط «إلغاء» للبقاء في شاشة الفاتورة لمتابعة حفظها.',
+          { variant: 'warning', title: 'تأكيد الخروج قبل الحفظ' }
         );
         if (!ok) return;
       }
@@ -267,7 +269,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   // Print all filtered purchase invoices in approved design
   const handlePrintBatch = () => {
     if (purchaseInvoices.length === 0) {
-      alert(purchasesSection === 'purchases' ? 'لا توجد فواتير مشتريات للطباعة!' : 'لا توجد فواتير مرتجع مشتريات للطباعة!');
+      void appAlert(purchasesSection === 'purchases' ? 'لا توجد فواتير مشتريات للطباعة!' : 'لا توجد فواتير مرتجع مشتريات للطباعة!');
       return;
     }
 
@@ -327,7 +329,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   // Export CSV
   const handleExportCsv = () => {
     if (purchaseInvoices.length === 0) {
-      alert(purchasesSection === 'purchases' ? 'لا توجد فواتير مشتريات للتصدير!' : 'لا توجد فواتير مرتجع مشتريات للتصدير!');
+      void appAlert(purchasesSection === 'purchases' ? 'لا توجد فواتير مشتريات للتصدير!' : 'لا توجد فواتير مرتجع مشتريات للتصدير!');
       return;
     }
 
@@ -349,16 +351,18 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
   };
 
   const handleDeleteInvoice = (inv: Invoice) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       if (!canDeletePurchases) {
-        alert('عذراً، ليس لديك صلاحية لحذف الفواتير.');
+        await appAlert('عذراً، ليس لديك صلاحية لحذف الفواتير.', { variant: 'warning' });
         return;
       }
 
       const isRet = inv.invoiceKind === 'purchase_return';
-      if (!confirm(`هل أنت متأكد من حذف ${isRet ? 'فاتورة مرتجع المشتريات' : 'فاتورة الشراء'} "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والمصروفات والأرصدة والقيود المحاسبية بدقة.`)) {
-        return;
-      }
+      const ok = await appConfirm(
+        `هل أنت متأكد من حذف ${isRet ? 'فاتورة مرتجع المشتريات' : 'فاتورة الشراء'} "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والمصروفات والأرصدة والقيود المحاسبية بدقة.`,
+        { variant: 'danger', title: 'تأكيد حذف الفاتورة' }
+      );
+      if (!ok) return;
 
       const updated = deleteInvoiceAndRevert(db, inv);
       onUpdateDb(updated);

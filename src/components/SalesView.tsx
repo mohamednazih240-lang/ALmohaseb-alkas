@@ -46,6 +46,7 @@ import {
   formatCleanNumber
 } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface SalesViewProps {
   db: AccountingDB;
@@ -111,7 +112,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
   // Mobile back button: Strict protection against accidental exit from sales invoice editor
   useModalBackHandler(
     activeTab === 'editor',
-    () => {
+    async () => {
       // If a submodal (e.g. item card, rapid modal, extra income) is open inside the invoice editor, close it first and DO NOT exit!
       if ((window as any).__hesabaty_has_open_modal && typeof (window as any).__hesabaty_close_topmost_modal === 'function') {
         const closed = (window as any).__hesabaty_close_topmost_modal();
@@ -129,11 +130,12 @@ export const SalesView: React.FC<SalesViewProps> = ({
       } catch (e) {}
 
       if (hasItems || editingInvoice) {
-        const ok = confirm(
-          '⚠️ تنبيه مهم: هناك فاتورة مبيعات قيد التحرير ولم يتم حفظها بعد.\n\n' +
+        const ok = await appConfirm(
+          'تنبيه مهم: هناك فاتورة مبيعات قيد التحرير ولم يتم حفظها بعد.\n\n' +
           'هل تريد الخروج إلى قائمة الفواتير بدون حفظ؟\n' +
-          '• اضغط «موافق» للخروج (سيتم حفظ مسودة احتياطية يمكنك استعادتها فوراً).\n' +
-          '• اضغط «إلغاء» للبقاء في شاشة الفاتورة لمتابعة حفظها.'
+          '• اضغط «تأكيد» للخروج (سيتم حفظ مسودة احتياطية يمكنك استعادتها فوراً).\n' +
+          '• اضغط «إلغاء» للبقاء في شاشة الفاتورة لمتابعة حفظها.',
+          { variant: 'warning', title: 'تأكيد الخروج قبل الحفظ' }
         );
         if (!ok) return;
       }
@@ -272,7 +274,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
   // Print all filtered sales invoices in approved design
   const handlePrintBatch = () => {
     if (salesInvoices.length === 0) {
-      alert('لا توجد فواتير مبيعات للطباعة!');
+      void appAlert('لا توجد فواتير مبيعات للطباعة!');
       return;
     }
 
@@ -331,7 +333,7 @@ export const SalesView: React.FC<SalesViewProps> = ({
   // Export CSV
   const handleExportCsv = () => {
     if (salesInvoices.length === 0) {
-      alert('لا توجد فواتير مبيعات للتصدير!');
+      void appAlert('لا توجد فواتير مبيعات للتصدير!');
       return;
     }
 
@@ -353,15 +355,17 @@ export const SalesView: React.FC<SalesViewProps> = ({
   };
 
   const handleDeleteInvoice = (inv: Invoice) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       if (!canDeleteSales) {
-        alert('عذراً، ليس لديك صلاحية لحذف فواتير المبيعات.');
+        await appAlert('عذراً، ليس لديك صلاحية لحذف فواتير المبيعات.', { variant: 'warning' });
         return;
       }
 
-      if (!confirm(`هل أنت متأكد من حذف فاتورة البيع "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) {
-        return;
-      }
+      const ok = await appConfirm(
+        `هل أنت متأكد من حذف فاتورة البيع "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`,
+        { variant: 'danger', title: 'تأكيد حذف فاتورة البيع' }
+      );
+      if (!ok) return;
 
       const updated = deleteInvoiceAndRevert(db, inv);
       onUpdateDb(updated);

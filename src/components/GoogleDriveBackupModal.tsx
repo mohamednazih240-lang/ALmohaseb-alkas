@@ -34,6 +34,7 @@ import {
 } from '../services/firebaseAuth';
 import { getActiveTenantId } from '../services/tenantService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
+import { appConfirm } from '../services/appDialog';
 
 interface GoogleDriveBackupModalProps {
   isOpen: boolean;
@@ -210,7 +211,7 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
 
   // Restore database from Google Drive file
   const handleRestoreFromDrive = async (file: DriveBackupFile) => {
-    const isConfirmed = window.confirm(
+    const isConfirmed = await appConfirm(
       `هل أنت متأكد من استرجاع النسخة الاحتياطية "${file.name}" من Google Drive؟\n\nتنبيه: سيتم استبدال البيانات الحالية بالبيانات المسترجعة من هذه النسخة.`
     );
     if (!isConfirmed) return;
@@ -235,7 +236,7 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
 
   // Delete backup from Google Drive
   const handleDeleteFromDrive = async (file: DriveBackupFile) => {
-    const isConfirmed = window.confirm(
+    const isConfirmed = await appConfirm(
       `هل أنت متأكد من حذف النسخة "${file.name}" نهائياً من Google Drive؟\n\nلا يمكن التراجع عن هذا الإجراء.`
     );
     if (!isConfirmed) return;
@@ -288,8 +289,8 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
   };
 
   // Restore Local Snapshot
-  const handleRestoreLocalSnapshot = (snap: LocalSnapshot) => {
-    const isConfirmed = window.confirm(
+  const handleRestoreLocalSnapshot = async (snap: LocalSnapshot) => {
+    const isConfirmed = await appConfirm(
       `هل أنت متأكد من استرجاع النسخة "${snap.name}"؟ سيتم استبدال البيانات الحالية.`
     );
     if (!isConfirmed) return;
@@ -307,8 +308,8 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
   };
 
   // Delete Local Snapshot
-  const handleDeleteLocalSnapshot = (snapId: string) => {
-    if (!window.confirm('هل تريد حذف هذه النسخة المحلية؟')) return;
+  const handleDeleteLocalSnapshot = async (snapId: string) => {
+    if (!(await appConfirm('هل تريد حذف هذه النسخة المحلية؟'))) return;
     const updated = localSnapshots.filter(s => s.id !== snapId);
     localStorage.setItem(snapshotsStorageKey, JSON.stringify(updated));
     setLocalSnapshots(updated);
@@ -339,7 +340,7 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const content = event.target?.result as string;
         const parsed = JSON.parse(content);
@@ -347,7 +348,7 @@ export const GoogleDriveBackupModal: React.FC<GoogleDriveBackupModalProps> = ({
         if (!targetDb.invoices || !targetDb.settings) {
           throw new Error('ملف النسخة الاحتياطية غير صالح.');
         }
-        if (!window.confirm(`هل أنت متأكد من استرجاع البيانات من الملف "${file.name}"؟ سيتم استبدال البيانات الحالية.`)) {
+        if (!(await appConfirm(`هل أنت متأكد من استرجاع البيانات من الملف "${file.name}"؟ سيتم استبدال البيانات الحالية.`))) {
           return;
         }
         onRestoreDb(targetDb);

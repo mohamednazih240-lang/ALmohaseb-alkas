@@ -30,6 +30,7 @@ import {
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert } from '../services/appDialog';
 
 interface BankReconciliationViewProps {
   db: AccountingDB;
@@ -242,14 +243,14 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
   // Add Bank Fee voucher + Treasury outflow + Balanced double-entry Journal
   const handleAddFee = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanAmt = roundMoney(Number(feeAmount));
       if (!isFinitePositive(cleanAmt)) {
-        alert('يرجى إدخال قيمة عمولة بنكية صحيحة أكبر من صفر.');
+        await appAlert('يرجى إدخال قيمة عمولة بنكية صحيحة أكبر من صفر.');
         return;
       }
       if (!feeDescription.trim()) {
-        alert('يرجى إدخال وصف العمولة البنكية.');
+        await appAlert('يرجى إدخال وصف العمولة البنكية.');
         return;
       }
 
@@ -294,7 +295,7 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
 
       const balCheck = assertJournalBalanced(jEntry);
       if (!balCheck.balanced) {
-        alert(balCheck.reason || 'القيد المحاسبي للعمولة غير متوازن.');
+        await appAlert(balCheck.reason || 'القيد المحاسبي للعمولة غير متوازن.');
         return;
       }
 
@@ -342,9 +343,9 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
   // Save Finalized Reconciliation
   const handleSaveReconciliation = () => {
     if (!selectedAccount) return;
-    runWithLock(() => {
+    runWithLock(async () => {
       if (!Number.isFinite(statementBalance)) {
-        alert('رصيد كشف الحساب البنكي غير صالح.');
+        await appAlert('رصيد كشف الحساب البنكي غير صالح.');
         return;
       }
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
@@ -368,7 +369,7 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
         `تسوية حساب ${selectedAccount.name} بتاريخ ${statementDate} - الفارق: ${difference.toFixed(2)}`
       );
       onUpdateDb(updated);
-      alert(isBalanced ? 'تم حفظ واعتماد التسوية البنكية بنجاح (مطابقة تامة 100%).' : 'تم حفظ مسودة التسوية البنكية للمراجعة لاحقاً.');
+      await appAlert(isBalanced ? 'تم حفظ واعتماد التسوية البنكية بنجاح (مطابقة تامة 100%).' : 'تم حفظ مسودة التسوية البنكية للمراجعة لاحقاً.');
     });
   };
 

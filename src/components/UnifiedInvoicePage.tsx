@@ -82,10 +82,12 @@ import {
   isAutoInvoiceVoucher,
   isVoucherLinkedToInvoice,
   partitionInvoicePaymentsForAutoPortion,
-  unblockActiveRecordIds
+  unblockActiveRecordIds,
+  markRecordsDeleted
 } from '../services/accountingStorage';
 import { validateDbTransactionIntegrity, getDeterministicJournalId } from '../services/accountingEngine';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert, appConfirm } from '../services/appDialog';
 import {
   InvoicePriceValidationModal,
   BelowCostItem,
@@ -463,6 +465,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   // Protection against double submission & accidental exit
   const [isSavingInvoice, setIsSavingInvoice] = useState<boolean>(false);
   const saveLockRef = useRef<boolean>(false);
+  const lastLoadedEditorKeyRef = useRef<string | null>(null);
   const { isSubmitting: isModalSubmitting, runWithLock } = useSubmitLock();
   const [hasUnsavedDraft, setHasUnsavedDraft] = useState<boolean>(false);
   const [unsavedDraftData, setUnsavedDraftData] = useState<any>(null);
@@ -626,14 +629,15 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   }, [invoiceItems.length]);
 
   // Safe close handler that warns before exiting
-  const handleAttemptClose = () => {
+  const handleAttemptClose = async () => {
     if (invoiceItems.length > 0) {
       const docLabel = mode === 'quote' ? 'عرض السعر' : 'الفاتورة';
-      const confirmExit = confirm(
-        `⚠️ تنبيه مهم: يوجد أصناف مدخلة في ${docLabel} لم يتم حفظها بعد.\n\n` +
+      const confirmExit = await appConfirm(
+        `تنبيه مهم: يوجد أصناف مدخلة في ${docLabel} لم يتم حفظها بعد.\n\n` +
         `هل تريد الخروج وإلغاء ${docLabel}؟\n\n` +
-        `• اضغط «موافق» للخروج وتجاهل ${docLabel} (سيتم حفظه كمسودة يمكنك استعادتها).\n` +
-        `• اضغط «إلغاء» للبقاء في شاشة ${docLabel} لحفظه.`
+        `• اضغط «تأكيد» للخروج وتجاهل ${docLabel} (سيتم حفظه كمسودة يمكنك استعادتها).\n` +
+        `• اضغط «إلغاء» للبقاء في شاشة ${docLabel} لحفظه.`,
+        { variant: 'warning', title: 'تأكيد الخروج قبل الحفظ' }
       );
       if (!confirmExit) return;
     }
@@ -729,8 +733,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     invoiceItems
   ]);
 
-  // Initialize or load editing invoice / quote
+  // Initialize or load editing invoice / quote (guarded by ID key so background sync never resets active user edits)
   useEffect(() => {
+    const editorKey = `${mode}::${editingInvoice?.id || ''}::${editingQuote?.id || ''}`;
+    if (lastLoadedEditorKeyRef.current === editorKey) return;
+    lastLoadedEditorKeyRef.current = editorKey;
+
     if (editingQuote) {
       const foundQuoteParty = db.customers.find(
         p => (editingQuote.partyId && p.id === editingQuote.partyId) ||
@@ -1038,7 +1046,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
 
   const saveRapidItemToInvoice = () => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const name = rapidItemName.trim();
       const qty = roundQty(parseNum(rapidItemQty));
       const price = roundMoney(parseNum(rapidItemPrice));
@@ -1047,17 +1055,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       const tax = roundMoney(parseNum(rapidItemTax));
 
       if (!name) {
-        alert('يرجى إدخال اسم الصنف');
+        await appAlert('يرجى إدخال اسم الصنف');
         rapidNameRef.current?.focus();
         return;
       }
       if (!isFinitePositive(qty)) {
-        alert('يرجى إدخال العدد الصحيح (أكبر من صفر)');
+        await appAlert('يرجى إدخال العدد الصحيح (أكبر من صفر)');
         rapidQtyRef.current?.focus();
         return;
       }
       if (!isFiniteNonNegative(price) || !isFiniteNonNegative(discount) || !isFiniteNonNegative(tax)) {
-        alert('القيم الرقمية للسعر أو الخصم أو الضريبة غير صالحة (لا يُسمح بقيم سالبة).');
+        await appAlert('القيم الرقمية للسعر أو الخصم أو الضريبة غير صالحة (لا يُسمح بقيم سالبة).');
         return;
       }
 
@@ -1067,7 +1075,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       if (!matched) {
         if (isStrictCatalogMode) {
-          alert(`⛔ غير مسموح ببيع أو إرجاع صنف غير مسجل في دليل الأصناف ("${name}").\nيرجى اختيار الصنف من الكتالوج المعتمد أو تسجيله أولاً من المخزون/المشتريات.`);
+          await appAlert(`غير مسموح ببيع أو إرجاع صنف غير مسجل في دليل الأصناف ("${name}").\nيرجى اختيار الصنف من الكتالوج المعتمد أو تسجيله أولاً من المخزون/المشتريات.`, { variant: 'warning' });
           rapidNameRef.current?.focus();
           return;
         }
@@ -1328,17 +1336,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
 
   // Confirm adding the item from the detailed card into invoice items (allows negative stock seamlessly)
-  const confirmAddItemFromCard = (closeCatalog: boolean = false) => {
+  const confirmAddItemFromCard = async (closeCatalog: boolean = false) => {
     if (!selectedCardProduct) return;
     const qty = parseFloat(itemCardQty);
     const unitPrice = itemCardPrice.trim() !== '' ? parseFloat(itemCardPrice) : itemCardDefaultPrice;
 
     if (isNaN(qty) || qty <= 0) {
-      alert('يرجى إدخال الكمية أو العدد للصنف');
+      await appAlert('يرجى إدخال الكمية أو العدد للصنف');
       return;
     }
     if (isNaN(unitPrice) || unitPrice < 0) {
-      alert('يرجى إدخال سعر الصنف');
+      await appAlert('يرجى إدخال سعر الصنف');
       return;
     }
 
@@ -1408,21 +1416,21 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
 
   // Fast on-the-fly item creation & registration into DB and invoice
-  const confirmFastCreateItem = () => {
+  const confirmFastCreateItem = async () => {
     const name = fastItemName.trim();
     if (!name) {
-      alert('يرجى إدخال اسم الصنف أو البند');
+      await appAlert('يرجى إدخال اسم الصنف أو البند');
       return;
     }
     const qty = parseFloat(fastItemQty);
     const price = parseFloat(fastItemPrice);
 
     if (isNaN(qty) || qty <= 0) {
-      alert('يرجى إدخال كمية أو عدد الصنف');
+      await appAlert('يرجى إدخال كمية أو عدد الصنف');
       return;
     }
     if (isNaN(price) || price < 0) {
-      alert('يرجى إدخال سعر الصنف');
+      await appAlert('يرجى إدخال سعر الصنف');
       return;
     }
 
@@ -1431,7 +1439,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     let existingProd = matchRes.exactMatch;
 
     if (!existingProd && isSaleOrStrictCatalog) {
-      alert(`⛔ غير مسموح بإنشاء أصناف جديدة من شاشة المبيعات أو المرتجعات ("${name}").\nيرجى اختيار صنف مسجل في الكتالوج.`);
+      await appAlert(`غير مسموح بإنشاء أصناف جديدة من شاشة المبيعات أو المرتجعات ("${name}").\nيرجى اختيار صنف مسجل في الكتالوج.`, { variant: 'warning' });
       return;
     }
 
@@ -1525,10 +1533,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Quick Register Party (عميل / مورد / شركة)
   const quickRegisterParty = (partyNameInput?: string) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const pName = (partyNameInput || custSearchInput).trim();
       if (!pName) {
-        alert(`يرجى كتابة اسم ${theme.partyLabel} / الشركة أولاً`);
+        await appAlert(`يرجى كتابة اسم ${theme.partyLabel} / الشركة أولاً`);
         return;
       }
 
@@ -1546,7 +1554,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           setShowCustDropdown(false);
           return;
         }
-        alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+        await appAlert(`منع التكرار: ${dupCheck.reason}`, { variant: 'warning' });
         return;
       }
 
@@ -1590,11 +1598,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setShowModifyModal(true);
   };
 
-  const saveModifiedItem = () => {
+  const saveModifiedItem = async () => {
     const cleanQty = roundQty(modifyQty);
     const cleanPrice = roundMoney(modifyPrice);
     if (modifyIndex < 0 || !isFinitePositive(cleanQty) || !isFiniteNonNegative(cleanPrice)) {
-      return alert('الكمية أو السعر غير صحيح.');
+      await appAlert('الكمية أو السعر غير صحيح.');
+      return;
     }
     setInvoiceItems(prev => {
       const copy = [...prev];
@@ -1634,9 +1643,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   // Add new item into database (strict duplicate guard & NO artificial auto-markups)
   const saveNewItemToDB = () => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanName = newItemName.trim();
-      if (!cleanName) return alert('أدخل اسم الصنف');
+      if (!cleanName) {
+        await appAlert('أدخل اسم الصنف');
+        return;
+      }
 
       const buy = roundMoney(parseFloat(newBuyPrice) || 0);
       const cash = roundMoney(parseFloat(newCashPriceManual) || 0);
@@ -1649,13 +1661,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         !isFiniteNonNegative(wholesale) ||
         !isFiniteNonNegative(stock)
       ) {
-        alert('الأسعار والكمية الافتتاحية يجب أن تكون قيماً غير سالبة.');
+        await appAlert('الأسعار والكمية الافتتاحية يجب أن تكون قيماً غير سالبة.');
         return;
       }
 
       const dupCheck = matchProductStrictly(db, { name: cleanName, code: newItemCode.trim() });
       if (dupCheck.exactMatch) {
-        alert(`⚠️ الصنف "${dupCheck.exactMatch.name}" مسجل بالفعل بالكود (${dupCheck.exactMatch.code}) ولا يمكن تكراره.`);
+        await appAlert(`الصنف "${dupCheck.exactMatch.name}" مسجل بالفعل بالكود (${dupCheck.exactMatch.code}) ولا يمكن تكراره.`, { variant: 'warning' });
         setShowEditItemModal(false);
         quickAddItem(dupCheck.exactMatch);
         return;
@@ -1706,22 +1718,22 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   };
 
   // SAVE INVOICE WITH COMPLETE ACCOUNTING IMPACT
-  const handleSaveInvoice = (approvalNote?: string) => {
+  const handleSaveInvoice = async (approvalNote?: string) => {
     if (isSavingInvoice || saveLockRef.current) return;
 
     if (invoiceItems.length === 0) {
-      alert('الفاتورة فارغة! أضف أصنافاً أولاً.');
+      await appAlert('الفاتورة فارغة! أضف أصنافاً أولاً.');
       return;
     }
 
     // Strict input & numeric validation before any modal warning or DB mutation
     for (const it of invoiceItems) {
       if (!isFinitePositive(Number(it.qty))) {
-        alert(`⚠️ كمية غير صالحة للصنف "${it.productName}". يجب أن تكون أكبر من صفر.`);
+        await appAlert(`كمية غير صالحة للصنف "${it.productName}". يجب أن تكون أكبر من صفر.`, { variant: 'warning' });
         return;
       }
       if (!isFiniteNonNegative(Number(it.unitPrice)) || !isFiniteNonNegative(Number(it.discount || 0))) {
-        alert(`⚠️ سعر أو خصم غير صالح للصنف "${it.productName}".`);
+        await appAlert(`سعر أو خصم غير صالح للصنف "${it.productName}".`, { variant: 'warning' });
         return;
       }
     }
@@ -1730,22 +1742,22 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const rawTaxInput = parseFloat(globalInvTax) || 0;
     const rawExtraInput = parseFloat(extraIncomeVal) || 0;
     if (rawDiscInput < 0 || rawTaxInput < 0 || rawExtraInput < 0) {
-      alert('⚠️ لا يُسمح بإدخال قيم سالبة للخصم أو الضريبة أو الإيرادات الإضافية.');
+      await appAlert('لا يُسمح بإدخال قيم سالبة للخصم أو الضريبة أو الإيرادات الإضافية.', { variant: 'warning' });
       return;
     }
     if (toCents(globalDiscCalculated) > toCents(itemsSubTotal)) {
-      alert('⚠️ قيمة الخصم العام لا يمكن أن تتجاوز المجموع الفرعي للأصناف.');
+      await appAlert('قيمة الخصم العام لا يمكن أن تتجاوز المجموع الفرعي للأصناف.', { variant: 'warning' });
       return;
     }
     if (settlementType === 'partial') {
       const pVal = parseFloat(partialPaidInput) || 0;
       if (pVal < 0 || toCents(pVal) > toCents(netTotal)) {
-        alert('⚠️ المبلغ المدفوع جزئياً لا يمكن أن يكون سالباً أو يتجاوز صافي الفاتورة.');
+        await appAlert('المبلغ المدفوع جزئياً لا يمكن أن يكون سالباً أو يتجاوز صافي الفاتورة.', { variant: 'warning' });
         return;
       }
     }
     if (settlementType !== 'credit' && toCents(paidTotal) > toCents(netTotal)) {
-      alert(`⚠️ مجموع الدفعات (${paidTotal.toFixed(2)}) يتجاوز صافي الفاتورة (${netTotal.toFixed(2)}).`);
+      await appAlert(`مجموع الدفعات (${paidTotal.toFixed(2)}) يتجاوز صافي الفاتورة (${netTotal.toFixed(2)}).`, { variant: 'warning' });
       return;
     }
 
@@ -1753,7 +1765,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (mode === 'sale' || mode === 'wholesale' || mode === 'sale_return' || mode === 'quote') {
       const uncataloged = invoiceItems.find(it => !matchProductStrictly(db, { id: it.productId, code: it.productCode, name: it.productName, unit: it.unit }).exactMatch);
       if (uncataloged) {
-        alert(`⛔ لا يمكن ترحيل فاتورة البيع: الصنف "${uncataloged.productName || uncataloged.productCode}" غير مسجل في دليل الأصناف. يرجى اختياره من الكتالوج المعتمد.`);
+        await appAlert(`لا يمكن ترحيل فاتورة البيع: الصنف "${uncataloged.productName || uncataloged.productCode}" غير مسجل في دليل الأصناف. يرجى اختياره من الكتالوج المعتمد.`, { variant: 'warning' });
         return;
       }
     }
@@ -1858,7 +1870,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
       // Strict duplicate check for invoice/quote number within the current section
       if (isDuplicateInvoiceNumber(updated, invNum, editingInvoice?.id || editingQuote?.id, mode)) {
-        alert(`⚠️ منع التكرار: رقم ${mode === 'quote' ? 'عرض السعر' : 'الفاتورة'} (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`);
+        await appAlert(`منع التكرار: رقم ${mode === 'quote' ? 'عرض السعر' : 'الفاتورة'} (${invNum}) مسجل مسبقاً في النظام ولا يمكن تكراره نهائياً.`, { variant: 'warning' });
         return;
       }
 
@@ -2074,7 +2086,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         };
 
         setInvoiceItems([]);
-        const wantsPrintQuote = confirm(`✓ تم حفظ عرض السعر رقم ${savedQuote.number} بنجاح في سجل عروض الأسعار!\n\nهل ترغب في معاينة وطباعة عرض السعر الآن؟`);
+        const wantsPrintQuote = await appConfirm(`تم حفظ عرض السعر رقم ${savedQuote.number} بنجاح في سجل عروض الأسعار!\n\nهل ترغب في معاينة وطباعة عرض السعر الآن؟`, { variant: 'info', title: 'حفظ عرض السعر', confirmText: 'معاينة وطباعة', cancelText: 'إغلاق' });
         if (wantsPrintQuote) {
           onPreviewInvoice(quotePreviewObj);
         }
@@ -2088,6 +2100,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
 
     const priorTrCreatedAtMap = new Map<string, string>();
+    const oldRemovedIds: string[] = [];
     // Reverse previous effects if editing
     if (editingInvoice) {
       // Revert stock specifically for the branch of that invoice
@@ -2128,9 +2141,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         ? `فاتورة مشتريات رقم ${editingInvoice.number}`
         : `فاتورة مبيعات رقم ${editingInvoice.number}`;
 
-      updated.stockMovements = updated.stockMovements.filter(
-        sm => sm.sourceId !== editingInvoice.id && !(!sm.sourceId && sm.refNumber === editingInvoice.number && sm.type === editSmType)
-      );
+      updated.stockMovements = updated.stockMovements.filter(sm => {
+        const matches = sm.sourceId === editingInvoice.id || (!sm.sourceId && sm.refNumber === editingInvoice.number && sm.type === editSmType);
+        if (matches && sm.id) oldRemovedIds.push(sm.id);
+        return !matches;
+      });
       updated.treasury = updated.treasury.filter(tr => {
         const explicitInv = tr.invoiceId || tr.sourceId;
         const hasOtherExplicitInv = Boolean(explicitInv && explicitInv !== editingInvoice.id && tr.sourceType === editTrSourceType);
@@ -2146,11 +2161,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           if (tr.id && tr.createdAt && tr.date === invDate) {
             priorTrCreatedAtMap.set(tr.id, tr.createdAt);
           }
+          if (tr.id) oldRemovedIds.push(tr.id);
           return false;
         }
         return true;
       });
-      updated.journals = updated.journals.filter(j => j.sourceId !== editingInvoice.id && j.id !== editingInvoice.journalEntryId);
+      updated.journals = updated.journals.filter(j => {
+        const matches = j.sourceId === editingInvoice.id || j.id === editingInvoice.journalEntryId;
+        if (matches && j.id) oldRemovedIds.push(j.id);
+        return !matches;
+      });
       updated.invoices = updated.invoices.filter(i => i.id !== editingInvoice.id);
       // Linked vouchers will be updated in-place by syncInvoiceVouchers below without duplicating or changing voucher numbers
     }
@@ -2311,6 +2331,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const whId = updated.warehouses[0]?.id || 'wh_main';
     const wh = updated.warehouses.find(w => w.id === whId);
     const fifoLedgerBeforeInv = isSale ? buildProductFifoLedger(updated, invoiceBranchId, invId) : null;
+    const activeChildIds = new Set<string>();
 
     savedInvoice.items.forEach(item => {
       const matchRes = matchProductStrictly(updated, {
@@ -2392,6 +2413,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         }
 
         const deterministicSmId = getDeterministicStockMovementId(invId, prod.id);
+        activeChildIds.add(deterministicSmId);
         const normProdName = normalizeArabicText(prod.name);
 
         const movementPayload = {
@@ -2410,7 +2432,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           refNumber: savedInvoice.number,
           sourceId: invId,
           branchId: invoiceBranchId,
-          branchName: invoiceBranch.name
+          branchName: invoiceBranch.name,
+          updatedAt: nowIso
         };
 
         const existingSmIdx = updated.stockMovements.findIndex(sm =>
@@ -2482,10 +2505,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         if (pLine.amount > 0 && pLine.method !== 'آجل') {
           const deterministicTrId = getDeterministicTreasuryId(mode, invId, pIdx, trDirection);
           createdTrIds.push(deterministicTrId);
+          activeChildIds.add(deterministicTrId);
           const trEntry: TreasuryEntry = {
             id: deterministicTrId,
             date: savedInvoice.date,
             createdAt: priorTrCreatedAtMap.get(deterministicTrId) || savedInvoice.createdAt || new Date().toISOString(),
+            updatedAt: nowIso,
             direction: trDirection,
             amount: pLine.amount,
             method: pLine.method,
@@ -2506,9 +2531,6 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           }
         }
       });
-      if (createdTrIds.length > 0) {
-        unblockActiveRecordIds(updated, createdTrIds);
-      }
     }
 
     // 2.5 Update customer / supplier current balances
@@ -2528,6 +2550,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
     // 3. Automated balanced double-entry journal (auto-payment portion to avoid double counting manual installment vouchers)
     const detJournalId = getDeterministicJournalId(mode, invId);
+    activeChildIds.add(detJournalId);
     const invForJournal: Invoice = manualInstallmentsPaid > 0
       ? {
           ...savedInvoice,
@@ -2540,8 +2563,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     const journal = createInvoiceJournal(updated, invForJournal);
     journal.id = detJournalId;
     journal.sourceId = invId;
+    journal.updatedAt = nowIso;
     savedInvoice.journalEntryId = detJournalId;
-    unblockActiveRecordIds(updated, [detJournalId]);
+    unblockActiveRecordIds(updated, Array.from(activeChildIds));
+    const staleOldIds = oldRemovedIds.filter(id => id && !activeChildIds.has(id));
+    if (staleOldIds.length > 0) {
+      markRecordsDeleted(updated, staleOldIds);
+    }
     updated.journals = updated.journals.filter(j => j.id !== detJournalId && j.sourceId !== invId);
     updated.journals.unshift(journal);
 
@@ -2617,7 +2645,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       // 7. Atomic pre-commit transaction integrity validation (rollback safely before state commit if violated)
       const integrity = validateDbTransactionIntegrity(updated, [journal.id], [savedInvoice.id]);
       if (!integrity.ok) {
-        alert(`⛔ تم إلغاء الترحيل تلقائياً (Rollback) لحماية توازن الحسابات:\n${integrity.error || 'خطأ في التحقق المحاسبي'}`);
+        await appAlert(`تم إلغاء الترحيل تلقائياً (Rollback) لحماية توازن الحسابات:\n${integrity.error || 'خطأ في التحقق المحاسبي'}`, { variant: 'error' });
         return;
       }
 
@@ -2629,7 +2657,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setHasUnsavedDraft(false);
       setUnsavedDraftData(null);
 
-      const wantsPrint = confirm(`✓ تم حفظ الفاتورة رقم ${savedInvoice.number} بنجاح وترحيل جميع الحركات المحاسبية للمخزن والخزينة!\n\nهل ترغب في طباعة الفاتورة الآن؟`);
+      const wantsPrint = await appConfirm(`تم حفظ الفاتورة رقم ${savedInvoice.number} بنجاح وترحيل جميع الحركات المحاسبية للمخزن والخزينة!\n\nهل ترغب في طباعة الفاتورة الآن؟`, { variant: 'success', title: 'تم حفظ الفاتورة', confirmText: 'معاينة وطباعة', cancelText: 'إغلاق' });
       if (wantsPrint) {
         onPreviewInvoice(savedInvoice);
       }
@@ -3469,7 +3497,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       setShowFastCreateModal(true);
                       setShowInlineDropdown(false);
                     } else {
-                      alert(`⛔ الصنف "${inlineProductSearch.trim()}" غير موجود في دليل الأصناف.\nلا يمكن بيع أصناف غير مسجلة بالكتالوج.`);
+                      void appAlert(`الصنف "${inlineProductSearch.trim()}" غير موجود في دليل الأصناف.\nلا يمكن بيع أصناف غير مسجلة بالكتالوج.`, { variant: 'warning' });
                     }
                   }
                 }}
@@ -3739,8 +3767,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 type="button"
                 disabled={isModalSubmitting || isSavingInvoice}
                 onClick={() => {
-                  runWithLock(() => {
-                    if (!confirm(`هل أنت متأكد من حذف فاتورة "${editingInvoice.number}" نهائياً؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`)) return;
+                  runWithLock(async () => {
+                    const ok = await appConfirm(
+                      `هل أنت متأكد من حذف فاتورة "${editingInvoice.number}" نهائياً؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`,
+                      { variant: 'danger', title: 'تأكيد حذف الفاتورة' }
+                    );
+                    if (!ok) return;
                     const updated = deleteInvoiceAndRevert(db, editingInvoice);
                     onUpdateDb(updated);
                     if (onCloseEdit) onCloseEdit();
@@ -3757,7 +3789,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             <button
               type="button"
               onClick={() => {
-                if (invoiceItems.length === 0) return alert('الفاتورة فارغة');
+                if (invoiceItems.length === 0) {
+                  void appAlert('الفاتورة فارغة');
+                  return;
+                }
                 const previewMethod: PaymentMethod =
                   settlementType === 'credit'
                     ? 'آجل'

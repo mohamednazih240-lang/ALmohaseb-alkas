@@ -394,6 +394,34 @@ export function purgeDeletedRecordsFromDb(db: AccountingDB, externalDeletedSet?:
   return db;
 }
 
+function parseIsoTs(val: unknown): number {
+  if (typeof val === 'number' && Number.isFinite(val)) return val;
+  if (typeof val === 'string' && val.trim()) {
+    const ms = Date.parse(val);
+    if (Number.isFinite(ms)) return ms;
+  }
+  return 0;
+}
+
+function getRecordEditTimestamp(rec: any): number {
+  if (!rec || typeof rec !== 'object') return 0;
+  return Math.max(
+    parseIsoTs(rec.updatedAt),
+    parseIsoTs(rec.sellingPriceUpdatedAt),
+    parseIsoTs(rec.closedAt),
+    parseIsoTs(rec.lastUpdated)
+  );
+}
+
+function getRecordAnyTimestamp(rec: any): number {
+  if (!rec || typeof rec !== 'object') return 0;
+  return Math.max(
+    getRecordEditTimestamp(rec),
+    parseIsoTs(rec.createdAt),
+    parseIsoTs(rec.at)
+  );
+}
+
 export function mergeArrayById<T extends { id?: string }>(
   existingList: T[] = [],
   incomingList: T[] = [],
@@ -411,7 +439,23 @@ export function mergeArrayById<T extends { id?: string }>(
     if (item.id && deletedIds?.has(item.id)) return;
     const key = item.id || JSON.stringify(item);
     const prev = map.get(key);
-    map.set(key, prev ? { ...prev, ...item } : item);
+    if (!prev) {
+      map.set(key, item);
+      return;
+    }
+    const prevEditTs = getRecordEditTimestamp(prev);
+    const incEditTs = getRecordEditTimestamp(item);
+    if (incEditTs > prevEditTs) {
+      map.set(key, { ...prev, ...item });
+      return;
+    }
+    if (prevEditTs > incEditTs) {
+      map.set(key, prev);
+      return;
+    }
+    const prevAnyTs = getRecordAnyTimestamp(prev);
+    const incAnyTs = getRecordAnyTimestamp(item);
+    map.set(key, incAnyTs > prevAnyTs ? { ...prev, ...item } : prev);
   });
   return Array.from(map.values());
 }
@@ -1753,7 +1797,7 @@ export function verifyAndCorrectStockMovements(db: AccountingDB): { db: Accounti
       inv.subtotal = calculatedItemsTotal;
       if (Math.abs((Number(inv.total) || 0) - expectedNetTotal) > 0.05) {
         inv.total = expectedNetTotal;
-        if (inv.status === 'مدفوع' || (inv.paymentMethod && inv.paymentMethod !== 'آجل')) {
+        if (inv.status === 'مدفوع') {
           inv.paid = expectedNetTotal;
           inv.remaining = 0;
         } else {
@@ -3767,22 +3811,36 @@ export function mergeInvoices(
     return `legacy_${kind}_${String(inv.number || '').trim()}_${inv.date || ''}`;
   };
 
+  const getInvoiceEditTs = (inv: Invoice): number => {
+    const directUpdated = parseIsoTs(inv.updatedAt);
+    const maxAuditEdit = (inv.auditLog || []).reduce((mx, aud) => {
+      if (!aud) return mx;
+      const t = parseIsoTs(aud.timestamp);
+      return t > mx ? t : mx;
+    }, 0);
+    return Math.max(directUpdated, maxAuditEdit);
+  };
+
   const mergeTwoInvoices = (a: Invoice, b: Invoice): Invoice => {
-    const timeA = new Date(a.updatedAt || a.createdAt || a.date || 0).getTime();
-    const timeB = new Date(b.updatedAt || b.createdAt || b.date || 0).getTime();
+    const editTsA = getInvoiceEditTs(a);
+    const editTsB = getInvoiceEditTs(b);
+    const timeA = Math.max(editTsA, parseIsoTs(a.createdAt), parseIsoTs(a.date));
+    const timeB = Math.max(editTsB, parseIsoTs(b.createdAt), parseIsoTs(b.date));
     const itemsA = a.items?.length || 0;
     const itemsB = b.items?.length || 0;
 
-    // Prefer newer edit timestamp if updatedAt exists on one/both; otherwise richer items
-    const aEdited = Boolean(a.updatedAt);
-    const bEdited = Boolean(b.updatedAt);
     let primary: Invoice;
-    if (aEdited && bEdited) {
-      primary = timeB >= timeA ? b : a;
+    if (editTsA !== editTsB) {
+      // Any explicitly edited version (higher edit timestamp) ALWAYS wins even if items were deleted!
+      primary = editTsB > editTsA ? b : a;
+    } else if (editTsA > 0) {
+      // Both edited at exact same timestamp -> keep local copy `a`
+      primary = a;
     } else if (itemsA !== itemsB) {
+      // Neither has ever been edited: prefer richer items list
       primary = itemsA > itemsB ? a : b;
     } else {
-      primary = timeB >= timeA ? b : a;
+      primary = timeB > timeA ? b : a;
     }
     const secondary = primary === b ? a : b;
 
@@ -3791,13 +3849,13 @@ export function mergeInvoices(
     const effectiveCreatedById = a.createdById || b.createdById;
     const effectiveCreatedAt = a.createdAt || b.createdAt;
 
-    // Editor is captured
-    let effectiveUpdatedBy = b.updatedBy || a.updatedBy;
+    // Editor metadata must come from the winning version first
+    let effectiveUpdatedBy = primary.updatedBy || secondary.updatedBy;
     if (!effectiveUpdatedBy && b.createdBy && a.createdBy && b.createdBy !== a.createdBy) {
-      effectiveUpdatedBy = timeB > timeA ? b.createdBy : a.createdBy;
+      effectiveUpdatedBy = primary.createdBy || (timeB > timeA ? b.createdBy : a.createdBy);
     }
-    const effectiveUpdatedById = b.updatedById || a.updatedById;
-    const effectiveUpdatedAt = b.updatedAt || a.updatedAt || (effectiveUpdatedBy ? new Date().toISOString() : undefined);
+    const effectiveUpdatedById = primary.updatedById || secondary.updatedById;
+    const effectiveUpdatedAt = primary.updatedAt || secondary.updatedAt || (effectiveUpdatedBy ? new Date().toISOString() : undefined);
 
     // Merge audit log
     const seenAudits = new Set<string>();
@@ -3805,11 +3863,15 @@ export function mergeInvoices(
       if (!aud.id || seenAudits.has(aud.id)) return false;
       seenAudits.add(aud.id);
       return true;
-    }).sort((x, y) => new Date(y.timestamp).getTime() - new Date(x.timestamp).getTime());
+    }).sort((x, y) => parseIsoTs(y.timestamp) - parseIsoTs(x.timestamp));
+
+    const resolvedItems = (primary.updatedAt || (primary.items && primary.items.length > 0))
+      ? (primary.items || [])
+      : (secondary.items || []);
 
     return {
       ...primary,
-      items: primary.items && primary.items.length > 0 ? primary.items : (secondary.items || []),
+      items: resolvedItems,
       createdBy: effectiveCreatedBy,
       createdById: effectiveCreatedById,
       createdAt: effectiveCreatedAt,
@@ -3876,7 +3938,21 @@ export function mergeVouchers(
     if (v && v.id && !isDeleted(v) && !isReturnRelatedVoucher(v)) {
       const key = getKey(v);
       const existing = map.get(key);
-      map.set(key, existing ? { ...existing, ...v } : v);
+      if (!existing) {
+        map.set(key, v);
+        return;
+      }
+      const exEditTs = getRecordEditTimestamp(existing);
+      const incEditTs = getRecordEditTimestamp(v);
+      if (incEditTs > exEditTs) {
+        map.set(key, { ...existing, ...v });
+      } else if (exEditTs > incEditTs) {
+        map.set(key, existing);
+      } else {
+        const exAny = getRecordAnyTimestamp(existing);
+        const incAny = getRecordAnyTimestamp(v);
+        map.set(key, incAny > exAny ? { ...existing, ...v } : existing);
+      }
     }
   });
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -3917,7 +3993,21 @@ export function mergeTreasury(
     if (tr && tr.id && !isDeleted(tr)) {
       const key = getKey(tr);
       const existing = map.get(key);
-      map.set(key, existing ? { ...existing, ...tr } : tr);
+      if (!existing) {
+        map.set(key, tr);
+        return;
+      }
+      const exEditTs = getRecordEditTimestamp(existing);
+      const incEditTs = getRecordEditTimestamp(tr);
+      if (incEditTs > exEditTs) {
+        map.set(key, { ...existing, ...tr });
+      } else if (exEditTs > incEditTs) {
+        map.set(key, existing);
+      } else {
+        const exAny = getRecordAnyTimestamp(existing);
+        const incAny = getRecordAnyTimestamp(tr);
+        map.set(key, incAny > exAny ? { ...existing, ...tr } : existing);
+      }
     }
   });
   return Array.from(map.values()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -3958,7 +4048,22 @@ export function mergeStockMovements(
     if (sm && (sm.id || (sm.sourceId && sm.productId)) && !isDeleted(sm)) {
       const key = getKey(sm);
       const existing = map.get(key);
-      const merged = existing ? { ...existing, ...sm } : sm;
+      let merged: StockMovement;
+      if (!existing) {
+        merged = sm;
+      } else {
+        const exEditTs = getRecordEditTimestamp(existing);
+        const incEditTs = getRecordEditTimestamp(sm);
+        if (incEditTs > exEditTs) {
+          merged = { ...existing, ...sm };
+        } else if (exEditTs > incEditTs) {
+          merged = existing;
+        } else {
+          const exAny = getRecordAnyTimestamp(existing);
+          const incAny = getRecordAnyTimestamp(sm);
+          merged = incAny > exAny ? { ...existing, ...sm } : existing;
+        }
+      }
       if (merged.sourceId && merged.productId) {
         merged.id = `sm_${merged.sourceId}_${merged.productId}`;
       }
@@ -3972,7 +4077,7 @@ export function mergeStockMovements(
 
 /**
  * Union & merge product catalogs across devices by normalized Arabic name or ID,
- * preserving newly created products and updated pricing before stock verification recalculates balances/costs.
+ * preserving newly created products and updated pricing/metadata strictly by latest timestamp.
  */
 export function mergeProducts(
   existingList: Product[] = [],
@@ -3992,30 +4097,56 @@ export function mergeProducts(
     if (!existing) {
       byKey.set(key, p);
       if (p.id) idToKey.set(p.id, key);
-    } else {
-      const merged = isIncoming
-        ? {
-            ...existing,
-            ...p,
-            barcode: (p.barcode && p.barcode.trim()) ? p.barcode : existing.barcode,
-            notes: (p.notes && p.notes.trim()) ? p.notes : existing.notes,
-            sellPrice: (Number(p.sellPrice) > 0) ? p.sellPrice : existing.sellPrice,
-            wholesalePrice: (Number(p.wholesalePrice) > 0) ? p.wholesalePrice : existing.wholesalePrice,
-            buyPrice: (Number(p.buyPrice) > 0) ? p.buyPrice : existing.buyPrice,
-            avgCost: (Number(p.avgCost) > 0) ? p.avgCost : existing.avgCost,
-            sellingPriceUpdatedAt: ((p.sellingPriceUpdatedAt || '') >= (existing.sellingPriceUpdatedAt || ''))
-              ? (p.sellingPriceUpdatedAt || existing.sellingPriceUpdatedAt)
-              : existing.sellingPriceUpdatedAt,
-            sellingPriceUpdatedBy: ((p.sellingPriceUpdatedAt || '') >= (existing.sellingPriceUpdatedAt || ''))
-              ? (p.sellingPriceUpdatedBy || existing.sellingPriceUpdatedBy)
-              : existing.sellingPriceUpdatedBy,
-            sellingPriceHistory: Array.from(
-              new Map(
-                [...(existing.sellingPriceHistory || []), ...(p.sellingPriceHistory || [])].map(h => [h.id, h])
-              ).values()
-            )
-          }
-        : existing;
+    } else if (isIncoming) {
+      const exTs = getRecordEditTimestamp(existing);
+      const incTs = getRecordEditTimestamp(p);
+      const incomingWins = incTs > exTs;
+      const primary = incomingWins ? p : existing;
+      const secondary = incomingWins ? existing : p;
+
+      const mergedBranchesData: Record<string, BranchProductData> = {};
+      const allBranchKeys = new Set([
+        ...Object.keys(existing.branchesData || {}),
+        ...Object.keys(p.branchesData || {})
+      ]);
+      allBranchKeys.forEach(bKey => {
+        const exB = existing.branchesData?.[bKey];
+        const incB = p.branchesData?.[bKey];
+        if (!exB && incB) {
+          mergedBranchesData[bKey] = incB;
+        } else if (exB && !incB) {
+          mergedBranchesData[bKey] = exB;
+        } else if (exB && incB) {
+          const exBTs = parseIsoTs(exB.sellingPriceUpdatedAt);
+          const incBTs = parseIsoTs(incB.sellingPriceUpdatedAt);
+          if (incBTs > exBTs) mergedBranchesData[bKey] = incB;
+          else if (exBTs > incBTs) mergedBranchesData[bKey] = exB;
+          else mergedBranchesData[bKey] = incomingWins ? incB : exB;
+        }
+      });
+
+      const merged: Product = {
+        ...secondary,
+        ...primary,
+        barcode: primary.barcode !== undefined ? primary.barcode : secondary.barcode,
+        notes: primary.notes !== undefined ? primary.notes : secondary.notes,
+        sellPrice: primary.sellPrice !== undefined ? primary.sellPrice : secondary.sellPrice,
+        wholesalePrice: primary.wholesalePrice !== undefined ? primary.wholesalePrice : secondary.wholesalePrice,
+        buyPrice: (Number(primary.buyPrice) > 0 || exTs > 0 || incTs > 0) ? primary.buyPrice : secondary.buyPrice,
+        avgCost: (Number(primary.avgCost) > 0) ? primary.avgCost : secondary.avgCost,
+        branchesData: Object.keys(mergedBranchesData).length > 0 ? mergedBranchesData : primary.branchesData,
+        sellingPriceUpdatedAt: ((p.sellingPriceUpdatedAt || '') > (existing.sellingPriceUpdatedAt || ''))
+          ? p.sellingPriceUpdatedAt
+          : (existing.sellingPriceUpdatedAt || p.sellingPriceUpdatedAt),
+        sellingPriceUpdatedBy: ((p.sellingPriceUpdatedAt || '') > (existing.sellingPriceUpdatedAt || ''))
+          ? (p.sellingPriceUpdatedBy || existing.sellingPriceUpdatedBy)
+          : (existing.sellingPriceUpdatedBy || p.sellingPriceUpdatedBy),
+        sellingPriceHistory: Array.from(
+          new Map(
+            [...(existing.sellingPriceHistory || []), ...(p.sellingPriceHistory || [])].map(h => [h.id, h])
+          ).values()
+        )
+      };
       byKey.set(key, merged);
       if (p.id) idToKey.set(p.id, key);
     }
@@ -5054,11 +5185,16 @@ export function syncInvoiceVouchers(
 
   // Return invoices stay strictly in Returns & Treasury—never inject auto-vouchers into Receipts/Payments
   if (isSaleReturn || isPurchaseReturn) {
+    const removedRetVIds: string[] = [];
     updated.vouchers = updated.vouchers.filter(v => {
       if (v.isManualInstallment) return true;
       const isLinked = v.invoiceId === invoiceId || v.sourceId === invoiceId;
+      if (isLinked && v.id) removedRetVIds.push(v.id);
       return !isLinked;
     });
+    if (removedRetVIds.length > 0) {
+      markRecordsDeleted(updated, removedRetVIds);
+    }
     return updated;
   }
 
@@ -5087,9 +5223,17 @@ export function syncInvoiceVouchers(
     );
   };
 
-  // If no auto-payment portion remains (credit invoice or 100% covered by manual installment vouchers), remove any stale auto-vouchers
+  // If no auto-payment portion remains (credit invoice or 100% covered by manual installment vouchers), remove & tombstone any stale auto-vouchers
   if (autoPaidPortion <= 0) {
-    updated.vouchers = updated.vouchers.filter(v => !matchesAutoForThisInvoice(v));
+    const staleIds: string[] = [];
+    updated.vouchers = updated.vouchers.filter(v => {
+      const rm = matchesAutoForThisInvoice(v);
+      if (rm && v.id) staleIds.push(v.id);
+      return !rm;
+    });
+    if (staleIds.length > 0) {
+      markRecordsDeleted(updated, staleIds);
+    }
     return updated;
   }
 
@@ -5147,8 +5291,14 @@ export function syncInvoiceVouchers(
     resolvedVouchers.push(voucherObj);
   });
 
-  // Unblock active deterministic voucher IDs from deletedRecordIds so an edited/paid invoice isn't wiped by tombstone cleanup
+  // Unblock active deterministic voucher IDs from deletedRecordIds and tombstone obsolete ones
   unblockActiveRecordIds(updated, Array.from(expectedIds));
+  const obsoleteAutoIds = existingAutoVouchers
+    .filter(v => v.id && !expectedIds.has(v.id))
+    .map(v => v.id);
+  if (obsoleteAutoIds.length > 0) {
+    markRecordsDeleted(updated, obsoleteAutoIds);
+  }
 
   // Replace all matched auto-vouchers for this invoice cleanly without duplicates
   updated.vouchers = updated.vouchers.filter(v => !matchesAutoForThisInvoice(v) && !expectedIds.has(v.id));

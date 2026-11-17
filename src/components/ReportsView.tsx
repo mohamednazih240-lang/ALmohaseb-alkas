@@ -38,6 +38,7 @@ import {
   exportFinancialReportToPdf,
   FinancialPdfReportConfig
 } from '../services/printAndPdfService';
+import { appAlert } from '../services/appDialog';
 
 interface ReportsViewProps {
   db: AccountingDB;
@@ -690,7 +691,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
       } else if (activeReportTab === 'statement') {
         const party = selectedStatementParty;
         if (!party) {
-          alert('يرجى اختيار عميل أو مورد أولاً لتصدير كشف الحساب.');
+          await appAlert('يرجى اختيار عميل أو مورد أولاً لتصدير كشف الحساب.');
           return;
         }
         config = {

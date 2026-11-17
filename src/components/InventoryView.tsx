@@ -58,6 +58,7 @@ import {
   assertJournalBalanced,
   markRecordsDeleted
 } from '../services/accountingStorage';
+import { appAlert, appConfirm } from '../services/appDialog';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import {
   Building2,
@@ -248,15 +249,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   };
 
   const handleBulkDeleteProducts = () => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const isManager = db.currentUser?.role === 'مدير';
       if (!isManager) {
-        alert('عذراً، لا يمكن حذف الأصناف إلا من قِبل المدير العام فقط.');
+        await appAlert('عذراً، لا يمكن حذف الأصناف إلا من قِبل المدير العام فقط.', { variant: 'warning' });
         return;
       }
       const count = selectedProductIds.size;
       if (count === 0) return;
-      if (!confirm(`هل أنت متأكد تماماً من حذف (${count}) صنف محدد نهائياً من دليل الأصناف؟`)) return;
+      const ok = await appConfirm(`هل أنت متأكد تماماً من حذف (${count}) صنف محدد نهائياً من دليل الأصناف؟`, { variant: 'danger', title: 'تأكيد الحذف الجماعي' });
+      if (!ok) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const removedIds: string[] = Array.from(selectedProductIds);
@@ -278,8 +280,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   // Save new Warehouse
   const handleSaveWarehouse = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (!whName.trim()) return alert('اكتب اسم المخزن');
+    runWithLock(async () => {
+      if (!whName.trim()) {
+        await appAlert('اكتب اسم المخزن');
+        return;
+      }
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const newWh: WarehouseType = {
         id: generateId('wh'),
@@ -298,17 +303,23 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   // Stock Transfer between Warehouses
   const handleSaveTransfer = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (fromWhId === toWhId) return alert('اختر مخزنين مختلفين للتحويل');
+    runWithLock(async () => {
+      if (fromWhId === toWhId) {
+        await appAlert('اختر مخزنين مختلفين للتحويل');
+        return;
+      }
       const cleanQty = roundQty(transferQty);
-      if (!isFinitePositive(cleanQty)) return alert('الكمية يجب أن تكون أكبر من صفر');
+      if (!isFinitePositive(cleanQty)) {
+        await appAlert('الكمية يجب أن تكون أكبر من صفر');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const prod = updated.products.find(p => p.id === transferProductId);
       if (!prod) return;
 
       if (prod.currentQty < cleanQty) {
-        alert('الرصيد الإجمالي للصنف لا يكفي لإتمام هذا التحويل');
+        await appAlert('الرصيد الإجمالي للصنف لا يكفي لإتمام هذا التحويل', { variant: 'warning' });
         return;
       }
 
@@ -371,10 +382,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   // Stock Adjustment (الجرد والتسويات)
   const handleSaveAdjustment = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanActualQty = roundQty(actualQty);
       if (!isFiniteNonNegative(cleanActualQty)) {
-        return alert('الرصيد الفعلي يجب أن يكون رقماً غير سالب.');
+        await appAlert('الرصيد الفعلي يجب أن يكون رقماً غير سالب.');
+        return;
       }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
@@ -385,7 +397,8 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       const systemQty = roundQty(bp.currentQty);
       const diff = roundQty(cleanActualQty - systemQty);
       if (Math.abs(diff) <= 0.0001) {
-        return alert(`الرصيد الفعلي مطابق للرصيد الدفتري بفرع (${currentBranch.name})، لا يوجد فرق تسوية`);
+        await appAlert(`الرصيد الفعلي مطابق للرصيد الدفتري بفرع (${currentBranch.name})، لا يوجد فرق تسوية`);
+        return;
       }
 
       const adjId = generateId('adj');
@@ -488,10 +501,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
         const balCheck = assertJournalBalanced(adjJournal);
         if (!balCheck.balanced) {
-          alert(balCheck.reason || 'القيد المحاسبي لتسوية الجرد غير متوازن.');
+          await appAlert(balCheck.reason || 'القيد المحاسبي لتسوية الجرد غير متوازن.', { variant: 'error' });
           return;
         }
         updated.journals.unshift(adjJournal);
+      }
+
+      // Update physical product edit timestamp
+      const adjProdIdx = updated.products.findIndex(p => p.id === prod.id);
+      if (adjProdIdx > -1) {
+        updated.products[adjProdIdx].updatedAt = new Date().toISOString();
       }
 
       logAudit(updated, 'تسوية جرد مخزني', `${prod.name}: الرصيد السابق ${systemQty} -> الرصيد الفعلي ${cleanActualQty} (فرق: ${diff})`);
@@ -501,14 +520,18 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   };
 
   const handleDeleteProduct = (p: Product) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const isManager = db.currentUser?.role === 'مدير';
       if (!isManager) {
-        alert('عذراً، لا يمكن حذف أي صنف من المخزون إلا من قِبل المدير العام فقط.');
+        await appAlert('عذراً، لا يمكن حذف أي صنف من المخزون إلا من قِبل المدير العام فقط.', { variant: 'warning' });
         return;
       }
 
-      if (!confirm(`هل أنت متأكد تماماً من حذف الصنف "${p.name}" (كود: ${p.code}) نهائياً؟`)) return;
+      const ok = await appConfirm(
+        `هل أنت متأكد تماماً من حذف الصنف "${p.name}" (كود: ${p.code}) نهائياً؟`,
+        { variant: 'danger', title: 'تأكيد حذف الصنف' }
+      );
+      if (!ok) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const removedIds: string[] = [p.id];
@@ -534,7 +557,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   // Export Products to CSV / Excel
   const handleExportProductsCsv = () => {
     if (filteredProducts.length === 0) {
-      alert('لا توجد أصناف للتصدير');
+      void appAlert('لا توجد أصناف للتصدير');
       return;
     }
     const headers = ['كود الصنف', 'اسم الصنف', 'الباركود', 'الوحدة', 'الرصيد الحالي', 'سعر التكلفة (آخر شراء)', 'الحد الأدنى', 'تقييم المخزون (FIFO)'];
@@ -558,7 +581,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   // Print Products Catalog (Cost Prices Only)
   const handlePrintCatalog = () => {
     if (filteredProducts.length === 0) {
-      alert('لا توجد أصناف للطباعة');
+      void appAlert('لا توجد أصناف للطباعة');
       return;
     }
     const today = getTodayDate();
@@ -606,7 +629,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   // Print Stock Valuation & Physical Count (Cost Only)
   const handlePrintStockValuation = () => {
     if (filteredProducts.length === 0) {
-      alert('لا توجد أصناف للطباعة');
+      void appAlert('لا توجد أصناف للطباعة');
       return;
     }
     const today = getTodayDate();

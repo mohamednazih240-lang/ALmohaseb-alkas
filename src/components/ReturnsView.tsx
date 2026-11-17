@@ -29,6 +29,7 @@ import {
   formatCleanNumber
 } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface ReturnsViewProps {
   db: AccountingDB;
@@ -139,7 +140,7 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   // Batch print all filtered returns
   const handlePrintBatch = () => {
     if (filteredReturns.length === 0) {
-      alert('لا توجد سجلات مرتجعات للطباعة!');
+      void appAlert('لا توجد سجلات مرتجعات للطباعة!');
       return;
     }
 
@@ -193,7 +194,7 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   // Export CSV
   const handleExportCsv = () => {
     if (filteredReturns.length === 0) {
-      alert('لا توجد بيانات مرتجعات للتصدير!');
+      void appAlert('لا توجد بيانات مرتجعات للتصدير!');
       return;
     }
     const headers = ['رقم السند', 'النوع', 'التاريخ', 'الطرف', 'الصنف', 'الكمية', 'السعر', 'الإجمالي', 'طريقة السداد'];
@@ -212,14 +213,15 @@ export const ReturnsView: React.FC<ReturnsViewProps> = ({
   };
 
   const handleDeleteReturn = (ret: ReturnInvoice) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const isManager = db.currentUser?.role === 'مدير';
       if (!isManager) {
-        alert('عذراً، لا يمكن حذف أي حركة أو سند مرتجع إلا من قِبل المدير العام فقط.');
+        await appAlert('عذراً، لا يمكن حذف أي حركة أو سند مرتجع إلا من قِبل المدير العام فقط.', { variant: 'warning' });
         return;
       }
 
-      if (!confirm(`هل أنت متأكد من حذف المرتجع "${ret.number}" وعكس آثاره؟`)) return;
+      const ok = await appConfirm(`هل أنت متأكد من حذف المرتجع "${ret.number}" وعكس آثاره؟`, { variant: 'danger', title: 'تأكيد حذف المرتجع' });
+      if (!ok) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const prod = updated.products.find(p => p.id === ret.productId);

@@ -32,6 +32,7 @@ import {
   assertJournalBalanced
 } from '../services/accountingStorage';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert } from '../services/appDialog';
 
 interface ProductModalProps {
   isOpen: boolean;
@@ -76,6 +77,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   const [marginPercentage, setMarginPercentage] = useState('20');
 
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const lastInitKeyRef = useRef<string>('');
   const { isSubmitting, runWithLock } = useSubmitLock();
 
   // Sync selected branch if activeBranchId changes
@@ -85,8 +87,18 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     }
   }, [activeBranchId, isOpen]);
 
-  // Load product branch-specific pricing and stock when product or selected branch changes
+  // Load product branch-specific pricing and stock ONLY when opening or switching product/branch (never on background sync!)
   useEffect(() => {
+    if (!isOpen) {
+      lastInitKeyRef.current = '';
+      return;
+    }
+    const initKey = `${product?.id || 'new'}::${selectedBranchId}`;
+    if (lastInitKeyRef.current === initKey) {
+      return;
+    }
+    lastInitKeyRef.current = initKey;
+
     if (product) {
       setName(product.name);
       setCode(product.code);
@@ -113,7 +125,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       setMinStock(1);
       setInitialQty(0);
     }
-  }, [product, isOpen, db.products.length, selectedBranchId]);
+  }, [product, isOpen, selectedBranchId, db]);
 
   // Auto-focus name field whenever modal opens or resets
   useEffect(() => {
@@ -148,9 +160,9 @@ export const ProductModal: React.FC<ProductModalProps> = ({
 
   const handleSave = (e?: React.FormEvent, shouldClose: boolean = false) => {
     if (e) e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       if (!name.trim()) {
-        alert('يرجى كتابة اسم الصنف');
+        await appAlert('يرجى كتابة اسم الصنف');
         nameInputRef.current?.focus();
         return;
       }
@@ -168,7 +180,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
         !isFiniteNonNegative(cleanMinStock) ||
         !Number.isFinite(cleanInitialQty)
       ) {
-        alert('يوجد حقل رقمي غير صالح. الأسعار والحد الأدنى يجب أن تكون قيماً غير سالبة.');
+        await appAlert('يوجد حقل رقمي غير صالح. الأسعار والحد الأدنى يجب أن تكون قيماً غير سالبة.');
         return;
       }
 
@@ -177,7 +189,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       // Strict duplicate check for code, barcode, and normalized name + unit
       const dupCheck = isDuplicateProduct(updated, code.trim(), barcode.trim(), product?.id);
       if (dupCheck.isDuplicate) {
-        alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+        await appAlert(`⚠️ منع التكرار: ${dupCheck.reason}`);
         return;
       }
 
@@ -188,7 +200,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       barcode: barcode.trim()
     });
     if (!product && strictMatch.exactMatch) {
-      alert(`⚠️ منع التكرار: الصنف "${strictMatch.exactMatch.name}" مسجل بالفعل بنفس الاسم والوحدة (${strictMatch.exactMatch.code}).`);
+      await appAlert(`⚠️ منع التكرار: الصنف "${strictMatch.exactMatch.name}" مسجل بالفعل بنفس الاسم والوحدة (${strictMatch.exactMatch.code}).`);
       return;
     }
 
@@ -224,13 +236,14 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             ].slice(0, 100)
           : prevProd.sellingPriceHistory;
 
-        // 1. Update master metadata (name, code, barcode, unit)
+        // 1. Update master metadata (name, code, barcode, unit) and ALWAYS stamp updatedAt
         let targetProd: Product = {
           ...prevProd,
           name: name.trim(),
           code: code.trim(),
           barcode: barcode.trim(),
           unit,
+          updatedAt: nowIso,
           ...(sellingChanged
             ? {
                 sellingPriceUpdatedAt: nowIso,
@@ -376,7 +389,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           };
           const balCheck = assertJournalBalanced(openingJournal);
           if (!balCheck.balanced) {
-            alert(balCheck.reason || 'القيد الافتتاحي غير متوازن.');
+            await appAlert(balCheck.reason || 'القيد الافتتاحي غير متوازن.');
             return;
           }
           updated.journals.push(openingJournal);

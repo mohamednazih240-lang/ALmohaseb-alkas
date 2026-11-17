@@ -24,6 +24,7 @@ import { formatMoney, generateId, getTodayDate, logAudit, roundMoney, isFiniteNo
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface CostCentersViewProps {
   db: AccountingDB;
@@ -75,15 +76,19 @@ export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (!name.trim()) return alert('أدخل اسم مركز التكلفة');
+    runWithLock(async () => {
+      if (!name.trim()) {
+        await appAlert('أدخل اسم مركز التكلفة');
+        return;
+      }
       const cleanBudget = roundMoney(Number(budget) || 0);
       if (!isFiniteNonNegative(cleanBudget)) {
-        alert('الميزانية التقديرية يجب أن تكون رقماً غير سالب.');
+        await appAlert('الميزانية التقديرية يجب أن تكون رقماً غير سالب.');
         return;
       }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const nowIso = new Date().toISOString();
 
       if (editingCenter) {
         const idx = updated.costCenters.findIndex(c => c.id === editingCenter.id);
@@ -95,7 +100,8 @@ export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb
             type,
             budget: cleanBudget,
             manager: manager.trim(),
-            notes: notes.trim()
+            notes: notes.trim(),
+            updatedAt: nowIso
           };
         }
         logAudit(updated, 'تعديل مركز تكلفة', name);
@@ -108,7 +114,9 @@ export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb
           budget: cleanBudget,
           manager: manager.trim(),
           notes: notes.trim(),
-          status: 'نشط'
+          status: 'نشط',
+          createdAt: nowIso,
+          updatedAt: nowIso
         };
         updated.costCenters.push(newCC);
         setSelectedCenterId(newCC.id);
@@ -121,8 +129,9 @@ export const CostCentersView: React.FC<CostCentersViewProps> = ({ db, onUpdateDb
   };
 
   const handleDelete = (id: string, ccName: string) => {
-    runWithLock(() => {
-      if (!confirm(`هل أنت متأكد من حذف مركز التكلفة (${ccName})؟`)) return;
+    runWithLock(async () => {
+      const ok = await appConfirm(`هل أنت متأكد من حذف مركز التكلفة (${ccName})؟`, { variant: 'danger', title: 'تأكيد حذف مركز التكلفة' });
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.costCenters = updated.costCenters.filter(c => c.id !== id);
       markRecordsDeleted(updated, [id]);

@@ -36,6 +36,7 @@ import {
 } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface ProfitsViewProps {
   db: AccountingDB;
@@ -533,19 +534,17 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
   // Delete invoice handler
   const handleDeleteInvoice = (inv: Invoice) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       if (!canDeleteSales) {
-        alert('عذراً، ليس لديك صلاحية لحذف الفواتير. الحذف مقتصر على المدير أو من يمنحه المدير الصلاحية.');
+        await appAlert('عذراً، ليس لديك صلاحية لحذف الفواتير. الحذف مقتصر على المدير أو من يمنحه المدير الصلاحية.', { variant: 'warning' });
         return;
       }
 
-      if (
-        !confirm(
-          `هل أنت متأكد من حذف الفاتورة "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`
-        )
-      ) {
-        return;
-      }
+      const ok = await appConfirm(
+        `هل أنت متأكد من حذف الفاتورة "${inv.number}"؟\nسيتم عكس كميات المخزون بالكامل وإعادتها، وعكس الخزينة والأرصدة والقيود المحاسبية.`,
+        { variant: 'danger', title: 'تأكيد حذف الفاتورة' }
+      );
+      if (!ok) return;
 
       const updated = deleteInvoiceAndRevert(db, inv);
       onUpdateDb(updated);
@@ -621,7 +620,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   // Batch Print all invoice profits
   const handleBatchPrintInvoices = () => {
     if (invoiceProfitsData.length === 0) {
-      alert('لا توجد فواتير للطباعة');
+      void appAlert('لا توجد فواتير للطباعة');
       return;
     }
     const blocks = invoiceProfitsData.map(r => buildInvoiceProfitPrintBlock(r));
@@ -633,7 +632,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   // Batch Print all product profits (Image 2 clean bordered table style)
   const handleBatchPrintItems = () => {
     if (itemProfitsData.length === 0) {
-      alert('لا توجد أصناف للطباعة');
+      void appAlert('لا توجد أصناف للطباعة');
       return;
     }
 
@@ -716,7 +715,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   // Export Invoices to Excel
   const handleExportInvoicesCsv = () => {
     if (invoiceProfitsData.length === 0) {
-      alert('لا توجد بيانات للتصدير');
+      void appAlert('لا توجد بيانات للتصدير');
       return;
     }
 
@@ -763,7 +762,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   // Export Items to Excel
   const handleExportItemsCsv = () => {
     if (itemProfitsData.length === 0) {
-      alert('لا توجد بيانات للتصدير');
+      void appAlert('لا توجد بيانات للتصدير');
       return;
     }
 
@@ -816,7 +815,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   // Export Transactions to Excel
   const handleExportTransactionsCsv = () => {
     if (saleTransactionProfitsData.length === 0) {
-      alert('لا توجد بيانات للتصدير');
+      void appAlert('لا توجد بيانات للتصدير');
       return;
     }
 
@@ -868,7 +867,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
   // Print all transaction profits
   const handleBatchPrintTransactions = () => {
     if (saleTransactionProfitsData.length === 0) {
-      alert('لا توجد حركات للطباعة');
+      void appAlert('لا توجد حركات للطباعة');
       return;
     }
 

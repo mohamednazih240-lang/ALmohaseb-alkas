@@ -21,6 +21,7 @@ import { formatMoney, generateId, getTodayDate, logAudit, roundQty, isFinitePosi
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface CurrenciesViewProps {
   db: AccountingDB;
@@ -70,15 +71,19 @@ export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (!code.trim() || !name.trim()) return alert('أدخل بيانات العملة بالكامل');
+    runWithLock(async () => {
+      if (!code.trim() || !name.trim()) {
+        await appAlert('أدخل بيانات العملة بالكامل');
+        return;
+      }
       const cleanRate = isBase ? 1 : roundQty(Number(rate));
       if (!isFinitePositive(cleanRate)) {
-        alert('سعر الصرف يجب أن يكون رقماً موجباً أكبر من صفر.');
+        await appAlert('سعر الصرف يجب أن يكون رقماً موجباً أكبر من صفر.');
         return;
       }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const nowIso = new Date().toISOString();
 
       if (isBase) {
         // Unset other base currencies
@@ -95,7 +100,8 @@ export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }
             symbol: symbol.trim(),
             rate: cleanRate,
             isBase,
-            lastUpdated: getTodayDate()
+            lastUpdated: getTodayDate(),
+            updatedAt: nowIso
           };
         }
         logAudit(updated, 'تعديل سعر صرف عملة', `${name} (${cleanRate})`);
@@ -107,7 +113,9 @@ export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }
           symbol: symbol.trim(),
           rate: cleanRate,
           isBase,
-          lastUpdated: getTodayDate()
+          lastUpdated: getTodayDate(),
+          createdAt: nowIso,
+          updatedAt: nowIso
         };
         updated.currencies.push(newCurr);
         logAudit(updated, 'إضافة عملة جديدة', `${newCurr.name} (${newCurr.code})`);
@@ -119,12 +127,13 @@ export const CurrenciesView: React.FC<CurrenciesViewProps> = ({ db, onUpdateDb }
   };
 
   const handleDelete = (id: string, cName: string, isBaseCurr: boolean) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       if (isBaseCurr) {
-        alert('لا يمكن حذف العملة الأساسية للنظام.');
+        await appAlert('لا يمكن حذف العملة الأساسية للنظام.', { variant: 'warning' });
         return;
       }
-      if (!confirm(`هل أنت متأكد من حذف العملة (${cName})؟`)) return;
+      const ok = await appConfirm(`هل أنت متأكد من حذف العملة (${cName})؟`, { variant: 'danger', title: 'تأكيد حذف العملة' });
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.currencies = updated.currencies.filter(c => c.id !== id);
       markRecordsDeleted(updated, [id]);

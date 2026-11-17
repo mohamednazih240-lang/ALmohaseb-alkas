@@ -47,6 +47,7 @@ import {
   formatCleanNumber
 } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface PartiesViewProps {
   type: 'customer' | 'supplier';
@@ -165,17 +166,22 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
   const handleSaveParty = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanName = name.trim();
-      if (!cleanName) return alert('يرجى كتابة الاسم');
+      if (!cleanName) {
+        await appAlert('يرجى كتابة الاسم');
+        return;
+      }
 
       const rawOpening = Number(openingBalance);
       const rawLimit = Number(creditLimit);
       if (!Number.isFinite(rawOpening)) {
-        return alert('يرجى إدخال قيمة رقمية صالحة للرصيد الافتتاحي.');
+        await appAlert('يرجى إدخال قيمة رقمية صالحة للرصيد الافتتاحي.');
+        return;
       }
       if (!isFiniteNonNegative(rawLimit)) {
-        return alert('يرجى إدخال قيمة صالحة غير سالبة للحد الائتماني.');
+        await appAlert('يرجى إدخال قيمة صالحة غير سالبة للحد الائتماني.');
+        return;
       }
       const cleanOpeningBalance = roundMoney(rawOpening);
       const cleanCreditLimit = roundMoney(rawLimit);
@@ -192,10 +198,11 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
         editingParty?.id
       );
       if (dupCheck.isDuplicate) {
-        alert(`⚠️ منع التكرار: ${dupCheck.reason}`);
+        await appAlert(`⚠️ منع التكرار: ${dupCheck.reason}`);
         return;
       }
 
+      const nowIso = new Date().toISOString();
       if (editingParty) {
         const idx = targetArray.findIndex(p => p.id === editingParty.id);
         if (idx !== -1) {
@@ -207,7 +214,8 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
             openingBalance: cleanOpeningBalance,
             creditLimit: cleanCreditLimit,
             taxNumber: taxNumber.trim(),
-            notes: notes.trim()
+            notes: notes.trim(),
+            updatedAt: nowIso
           };
           logAudit(updated, `تعديل بيانات ${isCustomer ? 'عميل' : 'مورد'}`, `الاسم: ${cleanName}`);
         }
@@ -223,7 +231,9 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
           openingBalance: cleanOpeningBalance,
           creditLimit: cleanCreditLimit,
           taxNumber: taxNumber.trim(),
-          notes: notes.trim()
+          notes: notes.trim(),
+          createdAt: nowIso,
+          updatedAt: nowIso
         };
         targetArray.push(newParty);
         logAudit(updated, `إضافة ${isCustomer ? 'عميل' : 'مورد'} جديد`, `الاسم: ${cleanName} (كود: ${uniqueCode})`);
@@ -234,26 +244,25 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
     });
   };
 
-  const handleDeleteParty = (partyId: string, partyName: string) => {
+  const handleDeleteParty = async (partyId: string, partyName: string) => {
+    const isManager = db.currentUser?.role === 'مدير';
+    if (!isManager) {
+      await appAlert('عذراً، لا يمكن حذف أي طرف أو حساب إلا من قِبل المدير العام فقط.');
+      return;
+    }
+
+    const hasInvoices = db.invoices.some(i => i.partyId === partyId);
+    const hasVouchers = db.vouchers.some(v => v.partyId === partyId);
+
+    if (hasInvoices || hasVouchers) {
+      await appAlert('لا يمكن حذف هذه الجهة لوجود فواتير أو سندات مالية مسجلة باسمها.');
+      return;
+    }
+
+    const ok = await appConfirm(`هل أنت متأكد من حذف ${isCustomer ? 'العميل' : 'المورد'} "${partyName}"؟`);
+    if (!ok) return;
+
     runWithLock(() => {
-      const isManager = db.currentUser?.role === 'مدير';
-      if (!isManager) {
-        alert('عذراً، لا يمكن حذف أي طرف أو حساب إلا من قِبل المدير العام فقط.');
-        return;
-      }
-
-      const hasInvoices = db.invoices.some(i => i.partyId === partyId);
-      const hasVouchers = db.vouchers.some(v => v.partyId === partyId);
-
-      if (hasInvoices || hasVouchers) {
-        alert('لا يمكن حذف هذه الجهة لوجود فواتير أو سندات مالية مسجلة باسمها.');
-        return;
-      }
-
-      if (!confirm(`هل أنت متأكد من حذف ${isCustomer ? 'العميل' : 'المورد'} "${partyName}"؟`)) {
-        return;
-      }
-
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       if (isCustomer) {
         updated.customers = updated.customers.filter(c => c.id !== partyId);
@@ -523,7 +532,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
   // Print all parties directory
   const handlePrintAllParties = (autoPrint: boolean = false) => {
     if (filteredParties.length === 0) {
-      alert('لا توجد بيانات للطباعة');
+      void appAlert('لا توجد بيانات للطباعة');
       return;
     }
     const today = new Date().toISOString().slice(0, 10);
@@ -572,7 +581,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
   // Export to CSV
   const handleExportCsv = () => {
     if (filteredParties.length === 0) {
-      alert('لا توجد بيانات للتصدير');
+      void appAlert('لا توجد بيانات للتصدير');
       return;
     }
     const headers = ['الاسم', 'الهاتف', 'العنوان', 'الرقم الضريبي', 'حد الائتمان', 'الرصيد'];

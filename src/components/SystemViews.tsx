@@ -36,6 +36,7 @@ import {
 } from '../types/accounting';
 import { normalizeCompanyCode } from '../services/cloudSyncService';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 export interface PermissionItem {
   key: keyof UserPermissions;
@@ -595,11 +596,15 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
   const handleSaveUser = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (!userName.trim() || !userUsername.trim()) return alert('أكمل بيانات المستخدم');
+    runWithLock(async () => {
+      if (!userName.trim() || !userUsername.trim()) {
+        await appAlert('أكمل بيانات المستخدم');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const branch = (updated.branches || []).find(b => b.id === userBranchId);
+      const nowIso = new Date().toISOString();
 
       const targetPermissions: UserPermissions = { ...userPermissions };
       targetPermissions.canViewInvoices = targetPermissions.canViewSales !== false;
@@ -616,7 +621,8 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
             role: userRole,
             branchId: userBranchId || undefined,
             branchName: branch?.name || undefined,
-            permissions: targetPermissions
+            permissions: targetPermissions,
+            updatedAt: nowIso
           };
           logAudit(updated, 'تعديل بيانات مستخدم وصلاحياته', `${userName} (${userRole})`);
         }
@@ -630,7 +636,9 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
           active: true,
           branchId: userBranchId || undefined,
           branchName: branch?.name || undefined,
-          permissions: targetPermissions
+          permissions: targetPermissions,
+          createdAt: nowIso,
+          updatedAt: nowIso
         };
         updated.users.push(newUser);
         logAudit(updated, 'إضافة مستخدم جديد وتحديد الصلاحيات', `${newUser.name} (${newUser.role})`);
@@ -642,12 +650,13 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   };
 
   const handleDeleteUser = (u: User) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       if (u.role === 'مدير' && db.users.filter(x => x.role === 'مدير').length <= 1) {
-        alert('لا يمكن حذف المدير العام الوحيد للنظام.');
+        await appAlert('لا يمكن حذف المدير العام الوحيد للنظام.', { variant: 'warning' });
         return;
       }
-      if (!confirm(`هل أنت متأكد من حذف المستخدم "${u.name}"؟`)) return;
+      const ok = await appConfirm(`هل أنت متأكد من حذف المستخدم "${u.name}"؟`, { variant: 'danger', title: 'تأكيد حذف المستخدم' });
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.users = updated.users.filter(x => x.id !== u.id);
       markRecordsDeleted(updated, [u.id]);
@@ -681,11 +690,15 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
 
   const handleSaveBranch = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (!branchName.trim()) return alert('يرجى إدخال اسم الفرع');
+    runWithLock(async () => {
+      if (!branchName.trim()) {
+        await appAlert('يرجى إدخال اسم الفرع');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       if (!updated.branches) updated.branches = [];
+      const nowIso = new Date().toISOString();
 
       const isTargetMawan = (editingBranch && isBranchMawan(editingBranch)) || branchName.includes('الموان') || branchCode === 'BR-02';
       const cleanPin = branchPin.trim() || (isTargetMawan ? '1272000' : '1234');
@@ -701,7 +714,8 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
             address: branchAddress.trim(),
             phone: branchPhone.trim(),
             isMain: branchIsMain,
-            pin: cleanPin
+            pin: cleanPin,
+            updatedAt: nowIso
           };
           if (branchIsMain || idx === 0) {
             const brId = updated.branches[idx].id;
@@ -735,7 +749,9 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
           address: branchAddress.trim(),
           phone: branchPhone.trim(),
           isMain: branchIsMain || updated.branches.length === 0,
-          pin: cleanPin
+          pin: cleanPin,
+          createdAt: nowIso,
+          updatedAt: nowIso
         };
         updated.branches.push(newBranch);
         logAudit(updated, 'إضافة فرع جديد مع رقم سري للحماية', newBranch.name);
@@ -747,17 +763,18 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   };
 
   const handleDeleteBranch = (b: Branch) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       if (b.isMain) {
-        alert('لا يمكن حذف الفرع الرئيسي للمحل.');
+        await appAlert('لا يمكن حذف الفرع الرئيسي للمحل.', { variant: 'warning' });
         return;
       }
       const hasInvoices = (db.invoices || []).some(inv => inv.branchId === b.id);
       if (hasInvoices) {
-        alert('لا يمكن حذف هذا الفرع لوجود فواتير مسجلة مرتبطة به.');
+        await appAlert('لا يمكن حذف هذا الفرع لوجود فواتير مسجلة مرتبطة به.', { variant: 'warning' });
         return;
       }
-      if (!confirm(`هل ترغب في حذف فرع "${b.name}"؟`)) return;
+      const ok = await appConfirm(`هل ترغب في حذف فرع "${b.name}"؟`, { variant: 'danger', title: 'تأكيد حذف الفرع' });
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.branches = (updated.branches || []).filter(x => x.id !== b.id);
       markRecordsDeleted(updated, [b.id]);
@@ -769,9 +786,15 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   // Add Period
   const handleSavePeriod = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
-      if (!periodName.trim() || !periodFrom || !periodTo) return alert('أكمل تواريخ الفترة');
-      if (periodFrom > periodTo) return alert('تاريخ بداية الفترة يجب أن يسبق أو يساوي تاريخ نهايتها.');
+    runWithLock(async () => {
+      if (!periodName.trim() || !periodFrom || !periodTo) {
+        await appAlert('أكمل تواريخ الفترة');
+        return;
+      }
+      if (periodFrom > periodTo) {
+        await appAlert('تاريخ بداية الفترة يجب أن يسبق أو يساوي تاريخ نهايتها.');
+        return;
+      }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const newPeriod: FiscalPeriod = {
@@ -789,8 +812,9 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
   };
 
   const handleClosePeriod = (pId: string) => {
-    runWithLock(() => {
-      if (!confirm('هل ترغب في إقفال هذه الفترة المحاسبية؟')) return;
+    runWithLock(async () => {
+      const ok = await appConfirm('هل ترغب في إقفال هذه الفترة المحاسبية؟', { variant: 'warning', title: 'تأكيد إقفال الفترة' });
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const p = updated.periods.find(item => item.id === pId);
       if (p) p.status = 'مغلق';
@@ -817,20 +841,19 @@ export const SystemViews: React.FC<SystemViewsProps> = ({
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = event => {
+    reader.onload = async event => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (!parsed || !Array.isArray(parsed.products) || !Array.isArray(parsed.accounts)) {
-          alert('ملف النسخ الاحتياطي غير صالح أو تالف.');
+          await appAlert('ملف النسخ الاحتياطي غير صالح أو تالف.', { variant: 'error' });
           return;
         }
-        if (!confirm('تحذير: سيتم استبدال جميع البيانات الحالية بالبيانات المستوردة. هل تود المتابعة؟')) {
-          return;
-        }
+        const ok = await appConfirm('تحذير: سيتم استبدال جميع البيانات الحالية بالبيانات المستوردة. هل تود المتابعة؟', { variant: 'danger', title: 'تأكيد استيراد النسخة الاحتياطية' });
+        if (!ok) return;
         onUpdateDb(parsed);
-        alert('تم استيراد قاعدة البيانات بنجاح واستعادة جميع الفواتير والحسابات.');
+        await appAlert('تم استيراد قاعدة البيانات بنجاح واستعادة جميع الفواتير والحسابات.', { variant: 'success' });
       } catch (err) {
-        alert('حدث خطأ أثناء قراءة الملف.');
+        await appAlert('حدث خطأ أثناء قراءة الملف.', { variant: 'error' });
       }
     };
     reader.readAsText(file);

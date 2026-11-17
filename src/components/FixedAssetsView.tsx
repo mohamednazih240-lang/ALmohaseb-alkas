@@ -34,6 +34,7 @@ import {
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface FixedAssetsViewProps {
   db: AccountingDB;
@@ -89,25 +90,26 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanCost = roundMoney(Number(purchaseCost));
       const cleanSalvage = roundMoney(Number(salvageValue) || 0);
       const cleanLife = Math.round(Number(usefulLifeYears) || 0);
 
       if (!code.trim() || !name.trim() || !isFinitePositive(cleanCost)) {
-        alert('أكمل بيانات الأصل وأدخل تكلفة شراء صحيحة أكبر من صفر.');
+        await appAlert('أكمل بيانات الأصل وأدخل تكلفة شراء صحيحة أكبر من صفر.');
         return;
       }
       if (!isFiniteNonNegative(cleanSalvage) || cleanSalvage >= cleanCost) {
-        alert('قيمة الخردة يجب أن تكون غير سالبة وأقل من تكلفة الشراء الأصلية.');
+        await appAlert('قيمة الخردة يجب أن تكون غير سالبة وأقل من تكلفة الشراء الأصلية.');
         return;
       }
       if (cleanLife < 1) {
-        alert('العمر الإنتاجي يجب أن يكون سنة واحدة على الأقل.');
+        await appAlert('العمر الإنتاجي يجب أن يكون سنة واحدة على الأقل.');
         return;
       }
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      const nowIso = new Date().toISOString();
 
       if (editingAsset) {
         const idx = updated.fixedAssets.findIndex(a => a.id === editingAsset.id);
@@ -121,7 +123,8 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
             purchaseCost: cleanCost,
             salvageValue: cleanSalvage,
             usefulLifeYears: cleanLife,
-            notes: notes.trim()
+            notes: notes.trim(),
+            updatedAt: nowIso
           };
         }
         logAudit(updated, 'تعديل أصل ثابت', name.trim());
@@ -137,7 +140,9 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
           usefulLifeYears: cleanLife,
           depreciationMethod: 'straight_line',
           accumulatedDepreciation: 0,
-          notes: notes.trim()
+          notes: notes.trim(),
+          createdAt: nowIso,
+          updatedAt: nowIso
         };
         updated.fixedAssets.push(newAsset);
         setSelectedAssetId(newAsset.id);
@@ -150,8 +155,9 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
   };
 
   const handleDelete = (id: string, astName: string) => {
-    runWithLock(() => {
-      if (!confirm(`هل أنت متأكد من حذف الأصل (${astName})؟`)) return;
+    runWithLock(async () => {
+      const ok = await appConfirm(`هل أنت متأكد من حذف الأصل (${astName})؟`, { variant: 'danger', title: 'تأكيد حذف الأصل الثابت' });
+      if (!ok) return;
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       updated.fixedAssets = updated.fixedAssets.filter(a => a.id !== id);
       markRecordsDeleted(updated, [id]);
@@ -182,13 +188,13 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
 
   // Post Automated Depreciation Entry for Selected Asset
   const handlePostDepreciation = (ast: FixedAsset, monthsToDepreciate: number = 12) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const { annualDepreciation, monthlyDepreciation, remainingDepreciable } = calculateDepreciation(ast);
       const rawAmount = monthsToDepreciate === 12 ? annualDepreciation : roundMoney(monthlyDepreciation * monthsToDepreciate);
       const amount = roundMoney(Math.min(remainingDepreciable, rawAmount));
 
       if (amount <= 0 || remainingDepreciable <= 0) {
-        alert('الأصل مهلك دفترياً بالكامل أو تم الوصول لقيمة الخردة.');
+        await appAlert('الأصل مهلك دفترياً بالكامل أو تم الوصول لقيمة الخردة.', { variant: 'warning' });
         return;
       }
 
@@ -199,10 +205,12 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
         `من حـ/ مصروف إهلاك الأصول الثابتة (5401)\n` +
         `إلى حـ/ مجمع إهلاك الأصول الثابتة (1402)`;
 
-      if (!confirm(confirmMsg)) return;
+      const ok = await appConfirm(confirmMsg, { variant: 'info', title: 'ترحيل قيد الإهلاك' });
+      if (!ok) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const today = getTodayDate();
+      const nowIso = new Date().toISOString();
       const entryId = generateId('jrn_dep');
       const entryNumber = `DEP-${ast.code}-${Date.now().toString().slice(-4)}`;
 
@@ -240,11 +248,11 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
         sourceType: 'adjustment',
         sourceId: ast.id,
         lines,
-        createdAt: new Date().toISOString()
+        createdAt: nowIso
       };
       const bal = assertJournalBalanced(jEntry);
       if (!bal.balanced) {
-        alert(bal.reason || 'قيد الإهلاك غير متوازن.');
+        await appAlert(bal.reason || 'قيد الإهلاك غير متوازن.', { variant: 'error' });
         return;
       }
       updated.journals.push(jEntry);
@@ -254,11 +262,12 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
       if (astIdx !== -1) {
         updated.fixedAssets[astIdx].accumulatedDepreciation = roundMoney(updated.fixedAssets[astIdx].accumulatedDepreciation + amount);
         updated.fixedAssets[astIdx].lastDepreciationDate = today;
+        updated.fixedAssets[astIdx].updatedAt = nowIso;
       }
 
       logAudit(updated, 'ترحيل قيد إهلاك أصل ثابت', `${ast.name} بمبلغ ${formatMoney(amount, db.settings.currency)}`);
       onUpdateDb(updated);
-      alert('تم احتساب وترحيل قيد الإهلاك إلى دفتر اليومية ومجمع الإهلاك بنجاح.');
+      await appAlert('تم احتساب وترحيل قيد الإهلاك إلى دفتر اليومية ومجمع الإهلاك بنجاح.', { variant: 'success' });
     });
   };
 

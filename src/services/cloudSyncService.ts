@@ -910,6 +910,10 @@ export async function pushDatabaseToCloud(db: AccountingDB, immediate: boolean =
   });
 }
 
+export function isCloudPushInFlight(): boolean {
+  return isPushWorkerRunning || pendingPushEntry !== null;
+}
+
 /**
  * Fetch latest database from Cloud Firestore for a specific company code (transparently supports sharded & legacy docs)
  */

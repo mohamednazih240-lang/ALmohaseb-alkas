@@ -229,7 +229,8 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
             : product.wholesalePrice,
         sellingPriceUpdatedAt: nowIso,
         sellingPriceUpdatedBy: currentUserName,
-        sellingPriceHistory: nextHistory
+        sellingPriceHistory: nextHistory,
+        updatedAt: nowIso
       };
 
       const updatedProducts = (db.products || []).map(p => (p.id === product.id ? finalProduct : p));

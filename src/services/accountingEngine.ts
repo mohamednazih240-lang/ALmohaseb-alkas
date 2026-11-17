@@ -1800,6 +1800,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
         vouchersReconciledCount += autoLinkedVouchers.length;
         const removeIds = new Set(autoLinkedVouchers.map(v => v.id));
         updated.vouchers = updated.vouchers.filter(v => !removeIds.has(v.id));
+        markRecordsDeleted(updated, Array.from(removeIds));
       }
     } else {
       // Backfill & repair deterministic Receipt ('سند قبض' for Sales) and Payment ('سند صرف' for Purchases) vouchers
@@ -1905,6 +1906,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
       );
       if (extraVoucherIds.size > 0) {
         updated.vouchers = updated.vouchers.filter(v => !extraVoucherIds.has(v.id));
+        markRecordsDeleted(updated, Array.from(extraVoucherIds));
         duplicateVouchersRemoved += extraVoucherIds.size;
         vouchersReconciledCount += extraVoucherIds.size;
         fixedInvoicesCount++;
@@ -1954,6 +1956,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
         fixedDiscrepanciesCount += linkedTreasury.length;
         const removeIds = new Set(linkedTreasury.map(t => t.id));
         updated.treasury = updated.treasury.filter(t => !removeIds.has(t.id));
+        markRecordsDeleted(updated, Array.from(removeIds));
       }
     } else {
       const trSplits = partitionInvoicePaymentsForAutoPortion(inv, autoExpectedPaid);

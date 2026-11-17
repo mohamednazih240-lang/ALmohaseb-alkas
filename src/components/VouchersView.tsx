@@ -42,6 +42,7 @@ import { exportTableToCsv } from '../services/exportService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
 import { tafqeetCurrency } from '../services/tafqeetService';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface VouchersViewProps {
   type: 'receipt' | 'payment';
@@ -144,10 +145,16 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
   const handleSaveVoucher = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanAmt = roundMoney(amount);
-      if (!isFinitePositive(cleanAmt)) return alert('المبلغ يجب أن يكون أكبر من صفر');
-      if (paymentMethod === 'آجل') return alert('يرجى اختيار وسيلة سداد/تحصيل نقدية أو بنكية للسند.');
+      if (!isFinitePositive(cleanAmt)) {
+        await appAlert('المبلغ يجب أن يكون أكبر من صفر');
+        return;
+      }
+      if (paymentMethod === 'آجل') {
+        await appAlert('يرجى اختيار وسيلة سداد/تحصيل نقدية أو بنكية للسند.');
+        return;
+      }
 
       const list = isReceipt ? db.customers : db.suppliers;
       const party = list.find(p => p.id === partyId);
@@ -206,7 +213,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
       const result = postManualVoucherTransaction(workingDb, voucherPayload, operatorName);
       if (!result.success) {
-        alert(result.message);
+        await appAlert(result.message, { variant: 'error' });
         return;
       }
 
@@ -217,20 +224,22 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   };
 
   const handleDeleteVoucher = (v: Voucher) => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const isManager = db.currentUser?.role === 'مدير';
       if (!isManager) {
-        alert('عذراً، لا يمكن حذف أي سند مالي إلا من قِبل المدير العام فقط.');
+        await appAlert('عذراً، لا يمكن حذف أي سند مالي إلا من قِبل المدير العام فقط.', { variant: 'warning' });
         return;
       }
 
-      if (!confirm(`هل أنت متأكد من حذف ${isReceipt ? 'سند القبض' : 'سند الصرف'} "${v.number}" وعكس القيود والأرصدة المالية بالكامل؟`)) {
-        return;
-      }
+      const ok = await appConfirm(
+        `هل أنت متأكد من حذف ${isReceipt ? 'سند القبض' : 'سند الصرف'} "${v.number}" وعكس القيود والأرصدة المالية بالكامل؟`,
+        { variant: 'danger', title: 'تأكيد حذف السند' }
+      );
+      if (!ok) return;
 
       const res = cancelOrDeleteVoucherTransaction(db, v.id, db.currentUser?.name || 'المدير العام', 'حذف السند من إدارة السندات');
       if (!res.success) {
-        alert(res.message);
+        await appAlert(res.message, { variant: 'error' });
         return;
       }
       onUpdateDb(res.db);
@@ -238,7 +247,10 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   };
 
   const handleBatchExportExcel = () => {
-    if (vouchersList.length === 0) return alert('لا توجد سندات للتصدير');
+    if (vouchersList.length === 0) {
+      void appAlert('لا توجد سندات للتصدير');
+      return;
+    }
     const headers = ['رقم السند', 'التاريخ', 'الطرف', 'طريقة السداد', 'البيان', 'المبلغ'];
     const rows = vouchersList.map(v => [
       v.number,

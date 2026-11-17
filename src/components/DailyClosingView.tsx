@@ -57,6 +57,7 @@ import {
   formatCleanNumber
 } from './UniversalPrintModal';
 import { exportTableToCsv } from '../services/exportService';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface DailyClosingViewProps {
   db: AccountingDB;
@@ -587,10 +588,10 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   // Quick inline Freeze / Unfreeze cash reserve action
   const handleQuickFreezeAction = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const amt = roundMoney(parseFloat(freezeInputAmount) || 0);
       if (amt <= 0) {
-        alert('يرجى إدخال مبلغ صحيح أكبر من صفر.');
+        await appAlert('يرجى إدخال مبلغ صحيح أكبر من صفر.');
         return;
       }
       const res = executeCashFreezeTransfer(db, {
@@ -602,7 +603,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         branchName: currentBranch.name
       });
       if (!res.ok) {
-        alert(res.error);
+        await appAlert(res.error);
         return;
       }
       onUpdateDb(res.db);
@@ -622,10 +623,10 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   // Permanent daily gross profit withdrawal out of cash drawer ('نقدي')
   const handleProfitWithdrawAction = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       const amt = roundMoney(parseFloat(profitWithdrawInput) || 0);
       if (amt <= 0) {
-        alert('يرجى إدخال مبلغ أرباح صحيح أكبر من صفر.');
+        await appAlert('يرجى إدخال مبلغ أرباح صحيح أكبر من صفر.');
         return;
       }
       const res = executeProfitWithdrawalFromDrawer(db, {
@@ -636,7 +637,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         branchName: currentBranch.name
       });
       if (!res.ok) {
-        alert(res.error);
+        await appAlert(res.error);
         return;
       }
       onUpdateDb(res.db);
@@ -655,20 +656,20 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
   // Save current shift closing with full next-day opening balances for all payment methods + Frozen Cash Reserve
   const handleSaveClosing = () => {
-    runWithLock(() => {
+    runWithLock(async () => {
       const cleanStarting = roundMoney(isBaselineMode ? 0 : startingCash);
       const cleanActual = roundMoney(liveStats.effectiveActualCash);
       const hasAnyBaselineInput = actualCashEdited || Object.values(baselineChannelInputs).some(v => v.trim() !== '');
       if (isBaselineMode && !hasAnyBaselineInput) {
-        alert('يرجى إدخال المبلغ الفعلي الموجود في وسائل الخزينة أولاً.');
+        await appAlert('يرجى إدخال المبلغ الفعلي الموجود في وسائل الخزينة أولاً.');
         return;
       }
       if (cleanActual < 0) {
-        alert('النقد الفعلي يجب أن يكون قيمة غير سالبة.');
+        await appAlert('النقد الفعلي يجب أن يكون قيمة غير سالبة.');
         return;
       }
       if (!shiftName.trim()) {
-        alert('يرجى كتابة اسم أو رقم الوردية.');
+        await appAlert('يرجى كتابة اسم أو رقم الوردية.');
         return;
       }
       const existingSameDay = (db.dailyClosings || []).filter(
@@ -679,7 +680,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         : isBaselineMode
         ? `سيتم اعتماد "${shiftName}" وترحيل الأرصدة المدخلة لجميع وسائل الخزينة (${formatMoney(liveStats.totalNextDayOpening, db.settings.currency)}) كرصيد افتتاحي ليوم ${nextDayDate}. هل أنت متأكد؟`
         : `هل أنت متأكد من حفظ واعتماد تقفيل "${shiftName}" لتاريخ ${selectedDate} وترحيل الرصيد الافتتاحي لليوم التالي (${nextDayDate})؟`;
-      if (!confirm(confirmMsg)) {
+      if (!(await appConfirm(confirmMsg))) {
         return;
       }
 
@@ -749,12 +750,12 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   // Update existing closing
   const handleUpdateClosing = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       if (!editingClosing) return;
       const cleanActual = roundMoney(editingClosing.actualCash);
       const cleanExpected = roundMoney(editingClosing.expectedCash);
       if (!isFiniteNonNegative(cleanActual) || !isFiniteNonNegative(cleanExpected)) {
-        alert('قيم النقد الفعلي والمتوقع يجب أن تكون أرقاماً غير سالبة.');
+        await appAlert('قيم النقد الفعلي والمتوقع يجب أن تكون أرقاماً غير سالبة.');
         return;
       }
 
@@ -786,7 +787,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
           expectedCash: cleanExpected,
           difference: nextDifference,
           channelSummaries: updatedChannelSummaries,
-          nextDayOpeningBalances: updatedNextDayOpeningBalances
+          nextDayOpeningBalances: updatedNextDayOpeningBalances,
+          updatedAt: new Date().toISOString()
         };
 
         updated.dailyClosings[idx] = savedClosing;
@@ -796,17 +798,19 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
           setReviewingClosing(savedClosing);
         }
         setEditingClosing(null);
-        alert('تم تحديث التقفيل بنجاح');
+        await appAlert('تم تحديث التقفيل بنجاح', { variant: 'success' });
       }
     });
   };
 
   // Delete closing
   const handleDeleteClosing = (closing: DailyClosing) => {
-    runWithLock(() => {
-      if (!confirm(`هل أنت متأكد من حذف سجل تقفيل الوردية "${closing.shiftNumber}" المؤرخ في ${closing.date}؟`)) {
-        return;
-      }
+    runWithLock(async () => {
+      const ok = await appConfirm(
+        `هل أنت متأكد من حذف سجل تقفيل الوردية "${closing.shiftNumber}" المؤرخ في ${closing.date}؟`,
+        { variant: 'danger', title: 'تأكيد حذف سجل التقفيل' }
+      );
+      if (!ok) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       if (!updated.dailyClosings) updated.dailyClosings = [];
@@ -827,14 +831,12 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
   // Reopen a closed shift/day so the user can review, adjust invoices/movements, and re-close cleanly
   const handleReopenClosing = (closing: DailyClosing) => {
-    runWithLock(() => {
-      if (
-        !confirm(
-          `هل تريد إعادة فتح يومية "${closing.shiftNumber}" بتاريخ ${closing.date} للمراجعة والتعديل وإعادة التقفيل؟\n(لن يتم حذف أي فاتورة أو سند أو حركة خزينة)`
-        )
-      ) {
-        return;
-      }
+    runWithLock(async () => {
+      const ok = await appConfirm(
+        `هل تريد إعادة فتح يومية "${closing.shiftNumber}" بتاريخ ${closing.date} للمراجعة والتعديل وإعادة التقفيل؟\n(لن يتم حذف أي فاتورة أو سند أو حركة خزينة)`,
+        { variant: 'warning', title: 'إعادة فتح اليومية للمراجعة' }
+      );
+      if (!ok) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       if (!updated.dailyClosings) updated.dailyClosings = [];
@@ -872,7 +874,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     const closings = filteredHistory;
 
     if (closings.length === 0) {
-      alert('لا توجد سجلات تقفيل للطباعة');
+      void appAlert('لا توجد سجلات تقفيل للطباعة');
       return;
     }
 
@@ -886,7 +888,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
   const handleExportHistoryCsv = () => {
     const closings = filteredHistory;
     if (closings.length === 0) {
-      alert('لا توجد تقفيلات لتصديرها');
+      void appAlert('لا توجد تقفيلات لتصديرها');
       return;
     }
 

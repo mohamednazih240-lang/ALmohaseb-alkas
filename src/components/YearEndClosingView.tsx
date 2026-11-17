@@ -30,6 +30,7 @@ import {
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
+import { appAlert, appConfirm } from '../services/appDialog';
 
 interface YearEndClosingViewProps {
   db: AccountingDB;
@@ -171,9 +172,9 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
   // Execute Year-End Closing
   const handleExecuteClosing = () => {
     if (!selectedPeriod) return;
-    runWithLock(() => {
+    runWithLock(async () => {
       if (selectedPeriod.status === 'مغلق') {
-        alert('هذه الفترة مغلقة بالفعل ومرحلة مسبقاً.');
+        await appAlert('هذه الفترة مغلقة بالفعل ومرحلة مسبقاً.');
         return;
       }
 
@@ -183,7 +184,7 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
         `صافي الأرباح/الخسائر: ${formatMoney(financials.netProfit, db.settings.currency)}\n\n` +
         `سيتم إنشاء قيد إقفال آلي وترحيل صافي النتيجة لحساب (الأرباح والخسائر المرحلة) وقفل الفترة لمنع التعديل.`;
 
-      if (!confirm(confirmMsg)) return;
+      if (!(await appConfirm(confirmMsg))) return;
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const closingDate = selectedPeriod.to;
@@ -257,7 +258,7 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
         });
         const bal = assertJournalBalanced(closingEntry);
         if (!bal.balanced) {
-          alert(`⚠️ تعذر تنفيذ الإقفال السنوي لعدم توازن القيد: ${bal.reason}`);
+          await appAlert(`⚠️ تعذر تنفيذ الإقفال السنوي لعدم توازن القيد: ${bal.reason}`);
           return;
         }
         updated.journals.push(closingEntry);
@@ -283,17 +284,17 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
       );
 
       onUpdateDb(updated);
-      alert('تم إقفال الفترة المالية وترحيل الأرصدة بنجاح وقفل العمليات.');
+      await appAlert('تم إقفال الفترة المالية وترحيل الأرصدة بنجاح وقفل العمليات.');
     });
   };
 
   // Re-open period
   const handleReopenPeriod = () => {
     if (!selectedPeriod) return;
-    runWithLock(() => {
+    runWithLock(async () => {
       if (selectedPeriod.status !== 'مغلق') return;
 
-      if (!confirm(`هل أنت متأكد من فتح الفترة المالية (${selectedPeriod.name}) مجدداً؟\nسيتم حذف قيد الإقفال السنوي التلقائي للسماح بإدخال تسويات إضافية.`)) {
+      if (!(await appConfirm(`هل أنت متأكد من فتح الفترة المالية (${selectedPeriod.name}) مجدداً؟\nسيتم حذف قيد الإقفال السنوي التلقائي للسماح بإدخال تسويات إضافية.`))) {
         return;
       }
 
@@ -314,20 +315,20 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
 
       logAudit(updated, 'إلغاء إقفال فترة مالية', `تم إعادة فتح الفترة ${selectedPeriod.name}`);
       onUpdateDb(updated);
-      alert('تم فتح الفترة المالية بنجاح.');
+      await appAlert('تم فتح الفترة المالية بنجاح.');
     });
   };
 
   // Create new period
   const handleCreatePeriod = (e: React.FormEvent) => {
     e.preventDefault();
-    runWithLock(() => {
+    runWithLock(async () => {
       if (!newPeriodName.trim() || !newPeriodFrom || !newPeriodTo) {
-        alert('يرجى استكمال جميع بيانات الفترة المالية.');
+        await appAlert('يرجى استكمال جميع بيانات الفترة المالية.');
         return;
       }
       if (newPeriodFrom > newPeriodTo) {
-        alert('تاريخ بداية الفترة يجب أن يسبق تاريخ نهايتها.');
+        await appAlert('تاريخ بداية الفترة يجب أن يسبق تاريخ نهايتها.');
         return;
       }
 

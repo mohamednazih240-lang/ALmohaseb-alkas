@@ -61,6 +61,7 @@ import { GoogleDriveBackupModal } from './components/GoogleDriveBackupModal';
 import { BranchPinModal } from './components/BranchPinModal';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { QuickMenuPage } from './components/QuickMenuPage';
+import { AppDialogHost } from './components/AppDialogHost';
 import { useModalBackHandler } from './hooks/useModalBackHandler';
 import { getStoredAuthSession, logoutUser, AuthSession } from './services/firebaseAuth';
 import { mergeCatalogIntoDb } from './data/defaultCatalog1001';
@@ -71,6 +72,7 @@ import {
   fetchDatabaseFromCloud,
   getCloudLatestTimestamp,
   subscribeToSyncStatus,
+  isCloudPushInFlight,
   normalizeCompanyCode,
   testFirestoreConnection,
   doesCloudNeedCleanupSync,
@@ -109,6 +111,8 @@ export default function App() {
   const dbRef = useRef<AccountingDB>(db);
   dbRef.current = db;
   const hasPendingCloudPushRef = useRef<boolean>(false);
+  const localMutationSeqRef = useRef<number>(0);
+  const lastLocalMutationAtRef = useRef<number>(0);
   const syncStatusRef = useRef<CloudSyncState['status']>('connected');
   syncStatusRef.current = syncState.status;
 
@@ -471,6 +475,10 @@ export default function App() {
 
     const pullLatest = async (forceCheck: boolean = false) => {
       try {
+        // Never download & merge stale cloud data while a local edit/delete push is actively uploading
+        if (isCloudPushInFlight() || (Date.now() - lastLocalMutationAtRef.current < 3000)) {
+          return;
+        }
         const needsRetryPush =
           hasPendingCloudPushRef.current ||
           syncStatusRef.current === 'offline' ||
@@ -487,7 +495,11 @@ export default function App() {
             remoteTimestampChanged = true;
           }
         }
+        const pullStartedAtMutationSeq = localMutationSeqRef.current;
         const cloudDb = await fetchDatabaseFromCloud(currentCompanyCode);
+        if (isCloudPushInFlight() || localMutationSeqRef.current !== pullStartedAtMutationSeq) {
+          return;
+        }
         if (cloudDb && Array.isArray(cloudDb.products) && cloudDb.settings) {
           let mergedToPush: AccountingDB | null = null;
           setDb(prevDb => {
@@ -532,11 +544,15 @@ export default function App() {
           });
           if (mergedToPush) {
             const ok = await pushDatabaseToCloud(mergedToPush, true);
-            if (ok) hasPendingCloudPushRef.current = false;
+            if (ok && localMutationSeqRef.current === pullStartedAtMutationSeq) {
+              hasPendingCloudPushRef.current = false;
+            }
           }
         } else if (needsRetryPush) {
           const ok = await pushDatabaseToCloud(dbRef.current, true);
-          if (ok) hasPendingCloudPushRef.current = false;
+          if (ok && localMutationSeqRef.current === pullStartedAtMutationSeq) {
+            hasPendingCloudPushRef.current = false;
+          }
         }
       } catch (e) {
         // silent
@@ -562,13 +578,17 @@ export default function App() {
 
   // Save changes to IndexedDB, localStorage, and Firestore Cloud Realtime (COMP-102 Mawan)
   const handleUpdateDb = useCallback((updated: AccountingDB, skipCloudPush?: boolean) => {
+    const mutationSeq = ++localMutationSeqRef.current;
+    lastLocalMutationAtRef.current = Date.now();
     dbRef.current = updated;
     setDb(updated);
     saveDatabase(updated);
     if (!skipCloudPush && isCompanyMawan(updated.settings?.companyCode)) {
       hasPendingCloudPushRef.current = true;
       void pushDatabaseToCloud(updated, true).then(ok => {
-        if (ok) hasPendingCloudPushRef.current = false;
+        if (ok && localMutationSeqRef.current === mutationSeq) {
+          hasPendingCloudPushRef.current = false;
+        }
       });
     }
   }, []);
@@ -1233,6 +1253,8 @@ export default function App() {
           </button>
         </div>
       )}
+      {/* Global Non-Native Confirm / Alert Dialog Host */}
+      <AppDialogHost />
     </div>
   );
 }

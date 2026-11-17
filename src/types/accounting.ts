@@ -37,6 +37,7 @@ export interface JournalEntry {
   sourceId?: string;
   lines: JournalLine[];
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface SellingPriceHistoryEntry {
@@ -113,6 +114,8 @@ export interface Product {
   // بيانات المخزون والتسعير المستقلة لكل فرع
   // الأصناف موحدة في كل الفروع لكن الكميات والأسعار تدخل حسب الفرع ولا تؤثر على أي فرع آخر
   branchesData?: Record<string, BranchProductData>;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Warehouse {
@@ -137,6 +140,8 @@ export interface StockMovement {
   sourceId?: string;
   branchId?: string;
   branchName?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Party {
@@ -152,6 +157,8 @@ export interface Party {
   creditLimit: number;
   taxNumber?: string;
   notes?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface InvoiceItem {
@@ -258,6 +265,8 @@ export interface ReturnInvoice {
   journalEntryId?: string;
   branchId?: string;
   branchName?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Quote {
@@ -306,6 +315,8 @@ export interface Order {
   notes?: string;
   branchId?: string;
   branchName?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Voucher {
@@ -353,6 +364,7 @@ export interface TreasuryEntry {
   costCenterName?: string;
   branchId?: string;
   branchName?: string;
+  updatedAt?: string;
 }
 
 export interface SimpleRecord {
@@ -369,6 +381,8 @@ export interface SimpleRecord {
   exchangeRate?: number;
   branchId?: string;
   branchName?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface StockAdjustment {
@@ -451,6 +465,7 @@ export interface DailyClosing {
   status: 'مفتوح' | 'مغلق';
   notes?: string;
   createdAt: string;
+  updatedAt?: string;
   branchId?: string;
   branchName?: string;
   nextDayDate?: string;
@@ -468,6 +483,8 @@ export interface CostCenter {
   manager?: string;
   notes?: string;
   status: 'نشط' | 'مكتمل' | 'معلق';
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Currency {
@@ -478,6 +495,8 @@ export interface Currency {
   rate: number; // rate to base currency
   isBase: boolean;
   lastUpdated: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface FixedAsset {
@@ -496,6 +515,8 @@ export interface FixedAsset {
   accumulatedDepreciation: number;
   lastDepreciationDate?: string;
   notes?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface BankReconciliation {
@@ -559,6 +580,8 @@ export interface Branch {
   phone?: string;
   isMain?: boolean;
   pin?: string; // الرقم السري للدخول إلى الفرع وحمايته من المقر الرئيسي (Branch Access PIN)
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface User {
@@ -572,6 +595,8 @@ export interface User {
   branchName?: string;
   permissions?: UserPermissions;
   lastLogin?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface UserPermissions {
