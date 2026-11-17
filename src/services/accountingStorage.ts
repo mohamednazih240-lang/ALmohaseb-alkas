@@ -86,6 +86,10 @@ export const PURGED_COMP101_PRODUCT_IDS = new Set<string>([
 
 export const PURGED_EKHWA_INVOICE_IDS = PURGED_COMP101_INVOICE_IDS;
 
+export const REOPENED_CLOSING_IDS = new Set<string>([
+  'cls_mwjszie2_9zsb7'
+]);
+
 function openIndexedDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === 'undefined') {
@@ -212,6 +216,7 @@ export function getAllDeletedRecordIds(
 ): Set<string> {
   const set = new Set<string>([
     ...PURGED_COMP101_INVOICE_IDS,
+    ...REOPENED_CLOSING_IDS,
     ...loadLocalDeletedRecordIds(db?.settings?.companyCode),
     ...(db?.deletedInvoiceIds || []),
     ...(db?.deletedRecordIds || [])

@@ -671,7 +671,12 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         alert('يرجى كتابة اسم أو رقم الوردية.');
         return;
       }
-      const confirmMsg = isBaselineMode
+      const existingSameDay = (db.dailyClosings || []).filter(
+        c => isTargetBranch(c.branchId) && c.date === selectedDate
+      );
+      const confirmMsg = existingSameDay.length > 0
+        ? `يوجد تقفيل محفوظ مسبقاً ليوم ${selectedDate}. هل تريد استبداله بالتقفيل الجديد المحدّث وترحيل الرصيد الافتتاحي لليوم التالي (${nextDayDate})؟`
+        : isBaselineMode
         ? `سيتم اعتماد "${shiftName}" وترحيل الأرصدة المدخلة لجميع وسائل الخزينة (${formatMoney(liveStats.totalNextDayOpening, db.settings.currency)}) كرصيد افتتاحي ليوم ${nextDayDate}. هل أنت متأكد؟`
         : `هل أنت متأكد من حفظ واعتماد تقفيل "${shiftName}" لتاريخ ${selectedDate} وترحيل الرصيد الافتتاحي لليوم التالي (${nextDayDate})؟`;
       if (!confirm(confirmMsg)) {
@@ -680,6 +685,13 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       if (!updated.dailyClosings) updated.dailyClosings = [];
+
+      if (existingSameDay.length > 0) {
+        const oldIds = existingSameDay.map(c => c.id);
+        const oldIdSet = new Set(oldIds);
+        updated.dailyClosings = updated.dailyClosings.filter(c => !oldIdSet.has(c.id));
+        markRecordsDeleted(updated, oldIds);
+      }
 
       const expected = isBaselineMode ? cleanActual : roundMoney(liveStats.expectedCash);
       const diff = isBaselineMode ? 0 : roundMoney(liveStats.totalChannelVariance !== 0 ? liveStats.totalChannelVariance : (cleanActual - expected));
@@ -813,6 +825,40 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     });
   };
 
+  // Reopen a closed shift/day so the user can review, adjust invoices/movements, and re-close cleanly
+  const handleReopenClosing = (closing: DailyClosing) => {
+    runWithLock(() => {
+      if (
+        !confirm(
+          `هل تريد إعادة فتح يومية "${closing.shiftNumber}" بتاريخ ${closing.date} للمراجعة والتعديل وإعادة التقفيل؟\n(لن يتم حذف أي فاتورة أو سند أو حركة خزينة)`
+        )
+      ) {
+        return;
+      }
+
+      const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
+      if (!updated.dailyClosings) updated.dailyClosings = [];
+
+      updated.dailyClosings = updated.dailyClosings.filter(c => c.id !== closing.id);
+      markRecordsDeleted(updated, [closing.id]);
+      logAudit(
+        updated,
+        'إعادة فتح يومية للمراجعة',
+        `تم إعادة فتح تقفيل يومية ${closing.date} (${closing.shiftNumber}) للمراجعة وإعادة التقفيل`
+      );
+
+      onUpdateDb(updated);
+      if (reviewingClosing?.id === closing.id) {
+        setReviewingClosing(null);
+      }
+      if (justClosedRecord?.id === closing.id) {
+        setJustClosedRecord(null);
+      }
+      setSelectedDate(closing.date);
+      setActiveTab('current');
+    });
+  };
+
   // Print single closing
   const handlePrintSingle = (closing: DailyClosing) => {
     const block = buildClosingPrintBlock(closing);
@@ -916,6 +962,28 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       .sort(sortClosingsDesc),
     [db.dailyClosings, selectedDate, targetBranchId]
   );
+
+  // Detect any prior day (before today) that has invoices/treasury movements after the earliest closing but is currently open/unclosed
+  const unclosedPriorDates = useMemo(() => {
+    const today = getTodayDate();
+    const branchClosings = (db.dailyClosings || []).filter(c => isTargetBranch(c.branchId));
+    const closedDates = new Set(branchClosings.map(c => c.date));
+    const minRefDate = branchClosings.map(c => c.date).sort()[0] || today;
+    const activeDates = new Set<string>();
+    (db.invoices || []).forEach(inv => {
+      if (inv && inv.date && inv.date < today && inv.date >= minRefDate && inv.invoiceKind !== 'quote' && isTargetBranch(inv.branchId)) {
+        activeDates.add(inv.date);
+      }
+    });
+    (db.treasury || []).forEach(tr => {
+      if (tr && tr.date && tr.date < today && tr.date >= minRefDate && isTargetBranch(tr.branchId)) {
+        activeDates.add(tr.date);
+      }
+    });
+    return Array.from(activeDates)
+      .filter(d => !closedDates.has(d))
+      .sort((a, b) => b.localeCompare(a));
+  }, [db.dailyClosings, db.invoices, db.treasury, targetBranchId]);
 
   // Filter history by branch, date, and search query
   const filteredHistory = useMemo(() => {
@@ -1079,6 +1147,50 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
             </div>
           )}
 
+          {/* Unclosed Prior Day Alert Banner (e.g. 2026-11-16 reopened for review & re-closing) */}
+          {unclosedPriorDates.length > 0 && (
+            <div className="bg-amber-50 border-2 border-amber-400 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 shadow-2xs">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-950">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>
+                  {selectedDate === unclosedPriorDates[0]
+                    ? `أنت تراجع الآن اليومية المفتوحة ليوم ${unclosedPriorDates[0]} — يمكنك التعديل ثم الضغط على "حفظ واعتماد تقفيل الوردية" لإغلاقها مجدداً.`
+                    : `توجد يومية مفتوحة للمراجعة لم يتم تقفيلها بعد (${unclosedPriorDates.join('، ')}) — يفضل مراجعتها وتقفيلها قبل فواتير اليوم.`}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {unclosedPriorDates.map(d =>
+                  selectedDate !== d ? (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => {
+                        setSelectedDate(d);
+                        setJustClosedRecord(null);
+                      }}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-black flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                    >
+                      <Unlock className="w-3.5 h-3.5" />
+                      <span>فتح ومراجعة يومية {d}</span>
+                    </button>
+                  ) : (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => {
+                        setSelectedDate(getTodayDate());
+                        setJustClosedRecord(null);
+                      }}
+                      className="px-3 py-1.5 bg-white hover:bg-amber-100 text-amber-900 border border-amber-400 rounded-lg text-xs font-bold cursor-pointer"
+                    >
+                      الانتقال لتاريخ اليوم ({getTodayDate()})
+                    </button>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Shift Configuration Bar */}
           <div className={`bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs grid grid-cols-1 ${isBaselineMode ? 'sm:grid-cols-3' : 'sm:grid-cols-4'} gap-3`}>
             <div>
@@ -1196,16 +1308,26 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
               </div>
               <div className="flex flex-wrap items-center gap-1.5">
                 {closingsForSelectedDate.map(sc => (
-                  <button
-                    key={sc.id}
-                    type="button"
-                    onClick={() => openClosingReview(sc)}
-                    className="px-2.5 py-1 bg-white hover:bg-blue-600 text-blue-900 hover:text-white border border-blue-300 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
-                  >
-                    <Eye className="w-3.5 h-3.5" />
-                    <span>{sc.shiftNumber}</span>
-                    <span className="text-[10px] font-mono opacity-80">({sc.time || '18:00'})</span>
-                  </button>
+                  <div key={sc.id} className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => openClosingReview(sc)}
+                      className="px-2.5 py-1 bg-white hover:bg-blue-600 text-blue-900 hover:text-white border border-blue-300 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>{sc.shiftNumber}</span>
+                      <span className="text-[10px] font-mono opacity-80">({sc.time || '18:00'})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleReopenClosing(sc)}
+                      className="px-2.5 py-1 bg-amber-100 hover:bg-amber-600 text-amber-950 hover:text-white border border-amber-300 rounded-lg text-xs font-bold flex items-center gap-1 shadow-2xs transition-colors cursor-pointer"
+                      title="إعادة فتح هذه اليومية للمراجعة والتعديل وإعادة التقفيل"
+                    >
+                      <Unlock className="w-3.5 h-3.5" />
+                      <span>إعادة فتح للتعديل</span>
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -2154,6 +2276,19 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                         type="button"
                         onClick={e => {
                           e.stopPropagation();
+                          handleReopenClosing(c);
+                        }}
+                        className="px-2 py-1 text-amber-800 bg-amber-50 hover:bg-amber-600 hover:text-white border border-amber-200 rounded text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                        title="إعادة فتح اليومية للمراجعة وإعادة التقفيل"
+                      >
+                        <Unlock className="w-3 h-3" />
+                        <span>إعادة فتح</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={e => {
+                          e.stopPropagation();
                           setEditingClosing(c);
                         }}
                         className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors cursor-pointer"
@@ -2655,6 +2790,14 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => handleReopenClosing(reviewingClosing)}
+                  className="px-3 py-1.5 bg-amber-50 hover:bg-amber-600 text-amber-900 hover:text-white border border-amber-300 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <Unlock className="w-3.5 h-3.5" />
+                  <span>إعادة فتح للمراجعة والتعديل</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     setSelectedDate(reviewingClosing.date);
                     setReviewingClosing(null);
@@ -2662,7 +2805,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
                   }}
                   className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold cursor-pointer"
                 >
-                  فتح يومية {reviewingClosing.date}
+                  عرض يومية {reviewingClosing.date}
                 </button>
               </div>
 

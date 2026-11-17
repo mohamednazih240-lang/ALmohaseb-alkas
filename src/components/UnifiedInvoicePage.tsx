@@ -2760,11 +2760,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           </div>
         </div>
 
-        {/* Main Workspace Content (non-scrolling flex column so top + table + bottom stay pinned in frame) */}
+        {/* Main Workspace Content (flexible scroll for header + all items while top bar & bottom summary/actions stay pinned) */}
         <div
-          className={`p-1 sm:p-1.5 flex flex-col gap-1 flex-1 min-h-0 ${
-            isInlineKeyboardActive ? 'overflow-y-auto' : 'overflow-hidden'
-          }`}
+          className="p-1 sm:p-1.5 flex flex-col gap-1 flex-1 min-h-0 overflow-y-auto overscroll-contain pb-2"
         >
           {/* Unsaved Draft Recovery Banner (User Request: استعادة الفاتورة غير المحفوظة وحمايتها من الضياع) */}
           {hasUnsavedDraft && (
@@ -3598,8 +3596,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           {/* Close Compact Pinned Top Section Wrapper */}
           </div>
 
-          {/* Invoice Items Table (ONLY scrollable section inside fixed invoice page) */}
-          <div className="flex-1 min-h-0 border border-slate-300 rounded bg-white overflow-y-auto overscroll-contain">
+          {/* Invoice Items Table (expands flexibly inside scrollable workspace so all rows remain clearly visible) */}
+          <div className="grow shrink-0 min-h-[160px] border border-slate-300 rounded bg-white">
             <table className="w-full table-fixed text-center text-[8.5px] border-collapse">
               <thead>
                 <tr className="bg-slate-100 text-slate-800 font-bold border-b border-slate-300 sticky top-0 z-10">
