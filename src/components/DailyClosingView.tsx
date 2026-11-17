@@ -48,6 +48,7 @@ import {
   markRecordsDeleted,
   isBranchMatch
 } from '../services/accountingStorage';
+import { computeShiftSalesAndProfitMetrics } from '../services/accountingEngine';
 import { useSubmitLock } from '../hooks/useSubmitLock';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import {
@@ -216,26 +217,18 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
   // Calculate live shift statistics & per-channel next-day opening balances for selectedDate strictly for this branch
   const liveStats = useMemo(() => {
-    // 1. Invoices on selected date for target branch (exclude quotes and sale_return)
-    const daySalesInvoices = db.invoices.filter(
-      i =>
-        i.date === selectedDate &&
-        (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
-        i.invoiceKind !== 'quote' &&
-        i.invoiceKind !== 'sale_return' &&
-        isTargetBranch(i.branchId)
-    );
-    const dayPurchaseInvoices = db.invoices.filter(
-      i => i.date === selectedDate && i.type === 'purchase' && i.invoiceKind !== 'purchase_return' && isTargetBranch(i.branchId)
-    );
-    const dayReturns = (db.returns || []).filter(r => r.date === selectedDate && isTargetBranch(r.branchId));
-
-    // Sales metrics (only count sale returns against net sales, never purchase returns)
-    const salesTotal = roundMoney(daySalesInvoices.reduce((sum, i) => sum + (Number(i.total) || 0), 0));
-    const returnsTotal = roundMoney(
-      dayReturns.filter(r => r.type === 'sale').reduce((sum, r) => sum + (Number(r.total) || 0), 0)
-    );
-    const netSales = roundMoney(Math.max(0, salesTotal - returnsTotal));
+    // 1. Authoritative Sales, Deduplicated Returns, COGS & Return-Aware Gross Profit for selectedDate
+    const shiftMetrics = computeShiftSalesAndProfitMetrics(db, fifoLedger, selectedDate, targetBranchId);
+    const {
+      salesCount,
+      purchasesCount,
+      salesTotal,
+      returnsTotal,
+      netSales,
+      cogs,
+      grossProfit,
+      profitMargin
+    } = shiftMetrics;
 
     // Authoritative Treasury movements on selected date for target branch (excluding internal freeze allocations & daily profit withdrawals from operational In/Out)
     const dayTreasury = db.treasury.filter(t => t.date === selectedDate && isTargetBranch(t.branchId));
@@ -302,43 +295,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         .reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
 
-    // Cost of Goods Sold (COGS) & Gross Profit strictly via FIFO ledger (reconciled with ProfitsView)
-    let rawVerifiedRev = 0;
-    let rawCogs = 0;
-    daySalesInvoices.forEach(inv => {
-      let invVerifiedRev = 0;
-      let invCogs = 0;
-      let invLinesSum = 0;
-      let hasAnyVerified = false;
-      let hasUndefined = false;
-
-      inv.items.forEach((it, idx) => {
-        const q = Number(it.qty) || 0;
-        const lineTotal = Number(it.total) || q * (Number(it.unitPrice) || 0);
-        invLinesSum += lineTotal;
-        const alloc = fifoLedger.getSaleAllocation(inv.id, it.productId, it.productName, idx);
-        if (alloc && alloc.hasVerifiedCost) {
-          hasAnyVerified = true;
-          invCogs += alloc.verifiedCostTotal;
-          const coveredRatio = q > 0 ? Math.min(1, alloc.coveredQty / q) : 0;
-          invVerifiedRev += lineTotal * coveredRatio;
-          if (!alloc.hasFullVerifiedCost) hasUndefined = true;
-        } else {
-          hasUndefined = true;
-        }
-      });
-
-      if (hasAnyVerified) {
-        const invNetAdj = (Number(inv.total) || 0) - invLinesSum;
-        const effRev = hasUndefined ? (invVerifiedRev + invNetAdj) : (Number(inv.total) || 0);
-        rawVerifiedRev += effRev;
-        rawCogs += invCogs;
-      }
-    });
-
-    const cogs = roundMoney(rawCogs);
-    const grossProfit = roundMoney(rawVerifiedRev - rawCogs - returnsTotal);
-    const profitMargin = rawVerifiedRev > 0 ? (grossProfit / rawVerifiedRev) * 100 : 0;
+    // (COGS, Gross Profit & Profit Margin already computed cleanly by shiftMetrics above without double-subtracting deficit-settled returns)
 
     // Un-withdrawn profit carried over from latest prior closing (strictly before selectedDate)
     let carriedOverProfit = 0;
@@ -486,8 +443,8 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     const totalNextDayOpening = roundMoney(totalWorkingNextDayOpening + effectiveFrozenCash);
 
     return {
-      salesCount: daySalesInvoices.length,
-      purchasesCount: dayPurchaseInvoices.length,
+      salesCount,
+      purchasesCount,
       salesTotal,
       returnsTotal,
       netSales,
@@ -998,9 +955,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     const treasury = (db.treasury || []).filter(
       t => t.date === rDate && matchesReviewScope(t.branchId)
     );
-    const returns = (db.returns || []).filter(
-      r => r.date === rDate && matchesReviewScope(r.branchId)
-    );
+    const returns = computeShiftSalesAndProfitMetrics(db, fifoLedger, rDate, rBranch).dedupedDayReturns;
     const expenses = (db.expenses || []).filter(
       e => e.date === rDate && matchesReviewScope(e.branchId)
     );
@@ -1009,7 +964,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
     );
 
     return { invoices, treasury, returns, expenses, revenues };
-  }, [reviewingClosing, db.invoices, db.treasury, db.returns, db.expenses, db.revenues, targetBranchId]);
+  }, [reviewingClosing, db, fifoLedger, targetBranchId]);
 
   return (
     <div className="space-y-4 pb-12">

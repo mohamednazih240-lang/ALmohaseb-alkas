@@ -4184,10 +4184,21 @@ export function deleteInvoiceAndRevert(db: AccountingDB, invoice: Invoice): Acco
     return !rm;
   });
 
-  // 4. Hard-delete any return entries tied to this invoice
+  // 4. Hard-delete any return entries tied strictly to this invoice (only match by number if this invoice itself is a return)
   if (updated.returns) {
+    const invIsReturn =
+      invoice.invoiceKind === 'sale_return' ||
+      invoice.invoiceKind === 'purchase_return' ||
+      (invoice.type as string) === 'sale_return' ||
+      (invoice.type as string) === 'purchase_return';
+    const retKindType =
+      invoice.invoiceKind === 'purchase_return' || (invoice.type as string) === 'purchase_return'
+        ? 'purchase'
+        : 'sale';
     updated.returns = updated.returns.filter(r => {
-      const rm = r.originalInvoiceId === invoice.id || (r.number === invoice.number && r.type === invoice.type);
+      const rm =
+        r.originalInvoiceId === invoice.id ||
+        (invIsReturn && r.number === invoice.number && r.type === retKindType);
       if (rm && r.id) removedIds.push(r.id);
       return !rm;
     });
@@ -5223,5 +5234,6 @@ export function mergeDatabasesSafely(
   };
 
   const purged = purgeDeletedRecordsFromDb(rawMerged, deletedIdsSet);
-  return verifyAndCorrectStockMovements(purged).db;
+  const stockVerified = verifyAndCorrectStockMovements(purged).db;
+  return reconcileAndDeduplicateAllFinancialRecords(stockVerified).db;
 }

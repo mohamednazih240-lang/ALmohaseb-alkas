@@ -255,7 +255,19 @@ function computeFinancialSyncSignature(db: AccountingDB): string {
     .map(j => `${j.id}:${j.sourceId || ''}:${(j.lines || []).length}`)
     .sort()
     .join('|');
-  return quickHash(`${vSig}#${tSig}#${jSig}`);
+  const rSig = [...(db.returns || [])]
+    .map(r => `${r.id}:${r.date}:${r.originalInvoiceId || ''}:${Math.round((Number(r.total) || 0) * 100)}`)
+    .sort()
+    .join('|');
+  const cSig = [...(db.dailyClosings || [])]
+    .map(c => `${c.id}:${c.date}:${Math.round((Number(c.returnsTotal) || 0) * 100)}:${Math.round((Number(c.grossProfit) || 0) * 100)}:${Math.round((Number(c.remainingProfitToCarry) || 0) * 100)}`)
+    .sort()
+    .join('|');
+  const iSig = [...(db.invoices || [])]
+    .map(i => `${i.id}:${i.createdAt || ''}:${(i.auditLog || []).length}`)
+    .sort()
+    .join('|');
+  return quickHash(`${vSig}#${tSig}#${jSig}#${rSig}#${cSig}#${iSig}`);
 }
 
 export function doesCloudNeedCleanupSync(companyCode: string | undefined, currentDb: AccountingDB): boolean {

@@ -57,6 +57,7 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-y: contain;
+  scroll-padding-top: 14px;
   scroll-padding-bottom: 90px;
 }
 
@@ -68,12 +69,14 @@
   .mobile-kb-scroll,
   .mobile-modal-body {
     padding-bottom: max(24px, calc(env(safe-area-inset-bottom, 0px) + 16px)) !important;
+    scroll-padding-top: 14px;
     scroll-padding-bottom: 90px;
   }
 
   .mobile-modal-body-pinned {
-    padding-bottom: max(12px, calc(env(safe-area-inset-bottom, 0px) + 8px)) !important;
-    scroll-padding-bottom: 70px;
+    padding-bottom: max(14px, calc(env(safe-area-inset-bottom, 0px) + 10px)) !important;
+    scroll-padding-top: 14px;
+    scroll-padding-bottom: 24px;
   }
 
   /* Ensure generic modal cards fit comfortably above keyboard without breaking internal-scroll mobile-modal-card headers */

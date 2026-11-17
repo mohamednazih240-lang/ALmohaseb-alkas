@@ -1373,6 +1373,188 @@ export function isReturnRelatedVoucher(
   return false;
 }
 
+/**
+ * Authoritative FIFO shift sales, returns, COGS & gross profit calculation.
+ * Prevents double-subtracting sale returns that already settled uncovered FIFO sale deficits,
+ * and credits back returned inventory cost when returns come from FIFO-covered batches.
+ */
+export function computeShiftSalesAndProfitMetrics(
+  db: AccountingDB,
+  fifoLedger: ReturnType<typeof buildProductFifoLedger>,
+  targetDate: string,
+  targetBranchId?: string
+): {
+  salesCount: number;
+  purchasesCount: number;
+  salesTotal: number;
+  returnsTotal: number;
+  netSales: number;
+  cogs: number;
+  grossProfit: number;
+  profitMargin: number;
+  dedupedDayReturns: ReturnInvoice[];
+} {
+  const isPrimaryBranch = (b?: string) => !b || b === 'br_main' || b === 'br_mawan';
+  const matchesBranch = (bId?: string) => {
+    if (!targetBranchId || targetBranchId === 'all') return true;
+    if (isPrimaryBranch(targetBranchId)) return isPrimaryBranch(bId);
+    return bId === targetBranchId;
+  };
+
+  const daySalesInvoices = (db.invoices || []).filter(
+    i =>
+      i &&
+      i.date === targetDate &&
+      (i.type === 'sale' || i.invoiceKind === 'sale' || i.invoiceKind === 'wholesale') &&
+      i.invoiceKind !== 'quote' &&
+      i.invoiceKind !== 'sale_return' &&
+      matchesBranch(i.branchId)
+  );
+  const dayPurchaseInvoices = (db.invoices || []).filter(
+    i => i && i.date === targetDate && i.type === 'purchase' && i.invoiceKind !== 'purchase_return' && matchesBranch(i.branchId)
+  );
+
+  // Deduplicate return lines defensively by linked invoice + item signature or id
+  const rawDayReturns = (db.returns || []).filter(r => r && r.date === targetDate && matchesBranch(r.branchId));
+  const returnInvoiceById = new Map<string, Invoice>();
+  (db.invoices || []).forEach(inv => {
+    if (inv && (inv.invoiceKind === 'sale_return' || inv.invoiceKind === 'purchase_return')) {
+      returnInvoiceById.set(inv.id, inv);
+    }
+  });
+
+  const dedupedDayReturns: ReturnInvoice[] = [];
+  const seenRetKeys = new Set<string>();
+  const retCountPerInv = new Map<string, number>();
+
+  rawDayReturns.forEach(r => {
+    if (r.originalInvoiceId && returnInvoiceById.has(r.originalInvoiceId)) {
+      const linkedInv = returnInvoiceById.get(r.originalInvoiceId)!;
+      const maxLines = Math.max(1, linkedInv.items?.length || 1);
+      const curCount = retCountPerInv.get(r.originalInvoiceId) || 0;
+      const sig = `${r.originalInvoiceId}::${r.productId || normalizeArabicText(r.productName)}::${roundQty(Number(r.qty) || 0)}::${roundMoney(Number(r.total) || 0)}`;
+      if (curCount >= maxLines || seenRetKeys.has(sig)) {
+        return;
+      }
+      retCountPerInv.set(r.originalInvoiceId, curCount + 1);
+      seenRetKeys.add(sig);
+      dedupedDayReturns.push(r);
+    } else {
+      const sig = r.id || `${r.type}::${r.date}::${r.productId || normalizeArabicText(r.productName)}::${r.qty}::${r.total}`;
+      if (!seenRetKeys.has(sig)) {
+        seenRetKeys.add(sig);
+        dedupedDayReturns.push(r);
+      }
+    }
+  });
+
+  const salesTotal = roundMoney(daySalesInvoices.reduce((sum, i) => sum + (Number(i.total) || 0), 0));
+  const returnsTotal = roundMoney(
+    dedupedDayReturns.filter(r => r.type === 'sale').reduce((sum, r) => sum + (Number(r.total) || 0), 0)
+  );
+  const netSales = roundMoney(Math.max(0, salesTotal - returnsTotal));
+
+  let rawVerifiedRev = 0;
+  let rawCogs = 0;
+
+  // Track same-day uncovered deficit & verified unit costs per product so sale_return never double-subtracts
+  const uncoveredQtyByKey = new Map<string, number>();
+  const dayUnitCostByKey = new Map<string, number>();
+
+  daySalesInvoices.forEach(inv => {
+    let invVerifiedRev = 0;
+    let invCogs = 0;
+    let invLinesSum = 0;
+    let hasAnyVerified = false;
+    let hasUndefined = false;
+
+    (inv.items || []).forEach((it, idx) => {
+      const q = Number(it.qty) || 0;
+      const lineTotal = Number(it.total) || q * (Number(it.unitPrice) || 0);
+      invLinesSum += lineTotal;
+      const alloc = fifoLedger.getSaleAllocation(inv.id, it.productId, it.productName, idx);
+      const pKey = it.productId || normalizeArabicText(it.productName);
+
+      if (alloc && alloc.hasVerifiedCost) {
+        hasAnyVerified = true;
+        invCogs += alloc.verifiedCostTotal;
+        const coveredRatio = q > 0 ? Math.min(1, alloc.coveredQty / q) : 0;
+        invVerifiedRev += lineTotal * coveredRatio;
+        if (alloc.effectiveUnitCost && alloc.effectiveUnitCost > 0 && pKey) {
+          dayUnitCostByKey.set(pKey, alloc.effectiveUnitCost);
+        }
+        if (!alloc.hasFullVerifiedCost) {
+          hasUndefined = true;
+          if (pKey && alloc.uncoveredQty > 0) {
+            uncoveredQtyByKey.set(pKey, roundQty((uncoveredQtyByKey.get(pKey) || 0) + alloc.uncoveredQty));
+          }
+        }
+      } else {
+        hasUndefined = true;
+        if (pKey && q > 0) {
+          uncoveredQtyByKey.set(pKey, roundQty((uncoveredQtyByKey.get(pKey) || 0) + q));
+        }
+      }
+    });
+
+    if (hasAnyVerified) {
+      const invNetAdj = (Number(inv.total) || 0) - invLinesSum;
+      const effRev = hasUndefined ? (invVerifiedRev + invNetAdj) : (Number(inv.total) || 0);
+      rawVerifiedRev += effRev;
+      rawCogs += invCogs;
+    }
+  });
+
+  // For sale returns today: portion settling same-day uncovered deficit was ALREADY excluded from rawVerifiedRev & rawCogs;
+  // only non-deficit returns subtract revenue and credit back returned inventory cost.
+  let untrimmedReturnsRev = 0;
+  let returnedCostCredit = 0;
+  dedupedDayReturns
+    .filter(r => r.type === 'sale')
+    .forEach(ret => {
+      const retQty = Math.abs(Number(ret.qty) || 0);
+      const retTotal = Number(ret.total) || 0;
+      const retUnitPrice = retQty > 0 ? retTotal / retQty : Number(ret.price) || 0;
+      const pKey = ret.productId || normalizeArabicText(ret.productName);
+
+      const availUncovered = pKey ? (uncoveredQtyByKey.get(pKey) || 0) : 0;
+      const trimmedQty = Math.min(retQty, availUncovered);
+      if (pKey && trimmedQty > 0) {
+        uncoveredQtyByKey.set(pKey, roundQty(availUncovered - trimmedQty));
+      }
+      const nonTrimmedQty = roundQty(Math.max(0, retQty - trimmedQty));
+      if (nonTrimmedQty > 0) {
+        untrimmedReturnsRev += nonTrimmedQty * retUnitPrice;
+        const prodSummary = fifoLedger.getProductSummary(ret.productId, ret.productName);
+        const prodCatalog = (db.products || []).find(
+          p => (ret.productId && p.id === ret.productId) || normalizeArabicText(p.name) === normalizeArabicText(ret.productName)
+        );
+        const fallbackUnitCost =
+          (pKey ? dayUnitCostByKey.get(pKey) : undefined) ||
+          (prodSummary.latestBuyPrice > 0 ? prodSummary.latestBuyPrice : 0) ||
+          (prodCatalog?.buyPrice || 0);
+        returnedCostCredit += nonTrimmedQty * fallbackUnitCost;
+      }
+    });
+
+  const netVerifiedRev = roundMoney(Math.max(0, rawVerifiedRev - untrimmedReturnsRev));
+  const cogs = roundMoney(Math.max(0, rawCogs - returnedCostCredit));
+  const grossProfit = roundMoney(netVerifiedRev - cogs);
+  const profitMargin = netVerifiedRev > 0 ? roundMoney((grossProfit / netVerifiedRev) * 100) : 0;
+
+  return {
+    salesCount: daySalesInvoices.length,
+    purchasesCount: dayPurchaseInvoices.length,
+    salesTotal,
+    returnsTotal,
+    netSales,
+    cogs,
+    grossProfit,
+    profitMargin,
+    dedupedDayReturns
+  };
+}
+
 export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   db: AccountingDB;
   duplicateVouchersRemoved: number;
@@ -1639,6 +1821,12 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
 
         if (existingSlot) {
           matchedOldIds.add(existingSlot.id);
+          const needsStaleCreatedAtFix = Boolean(
+            existingSlot.createdAt &&
+            invDate &&
+            existingSlot.createdAt.slice(0, 10) < invDate &&
+            inv.createdAt
+          );
           const needsUpdate =
             existingSlot.id !== detVoucherId ||
             existingSlot.type !== expectedVoucherType ||
@@ -1651,13 +1839,17 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
             existingSlot.partyName !== partyName ||
             !existingSlot.isAutoFromInvoice ||
             Boolean(existingSlot.isManualInstallment) ||
-            !existingSlot.branchId;
+            !existingSlot.branchId ||
+            needsStaleCreatedAtFix;
 
           if (needsUpdate) {
             existingSlot.id = detVoucherId;
             existingSlot.type = expectedVoucherType;
             existingSlot.amount = pLine.amount;
             existingSlot.date = invDate;
+            if (needsStaleCreatedAtFix && inv.createdAt) {
+              existingSlot.createdAt = inv.createdAt;
+            }
             existingSlot.partyId = inv.partyId;
             existingSlot.partyName = partyName;
             existingSlot.paymentMethod = pLine.method;
@@ -2075,7 +2267,165 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   });
   updated.vouchers = cleanVouchers;
 
-  // 6. Recompute Customer & Supplier cached balances cleanly
+  // 6. Repair cross-merged audit/timestamp pollution between regular invoices and return invoices sharing the same #number (e.g. sale #1 vs sale_return #1)
+  const returnInvoiceAudits = new Map<string, { inv: Invoice; auditIds: Set<string> }>();
+  updated.invoices.forEach(inv => {
+    if (inv && (inv.invoiceKind === 'sale_return' || inv.invoiceKind === 'purchase_return')) {
+      const audIds = new Set<string>((inv.auditLog || []).map(a => a.id).filter(Boolean));
+      if (audIds.size > 0) {
+        returnInvoiceAudits.set(inv.id, { inv, auditIds: audIds });
+      }
+    }
+  });
+
+  if (returnInvoiceAudits.size > 0) {
+    updated.invoices.forEach(inv => {
+      if (!inv || inv.invoiceKind === 'sale_return' || inv.invoiceKind === 'purchase_return') return;
+      if (!Array.isArray(inv.auditLog) || inv.auditLog.length === 0) return;
+
+      const foreignAuditIds = new Set<string>();
+      inv.auditLog.forEach(aud => {
+        if (!aud?.id) return;
+        for (const { inv: retInv, auditIds } of returnInvoiceAudits.values()) {
+          if (
+            auditIds.has(aud.id) &&
+            retInv.id !== inv.id &&
+            Math.abs((Number(aud.newTotal) || 0) - (Number(inv.total) || 0)) > 0.01 &&
+            Math.abs((Number(aud.previousTotal ?? aud.newTotal) || 0) - (Number(inv.total) || 0)) > 0.01
+          ) {
+            foreignAuditIds.add(aud.id);
+          }
+        }
+      });
+
+      if (foreignAuditIds.size > 0) {
+        inv.auditLog = inv.auditLog.filter(a => !a.id || !foreignAuditIds.has(a.id));
+        const ownCreateAud = inv.auditLog.find(a => a.action === 'create');
+        if (ownCreateAud?.timestamp) {
+          inv.createdAt = ownCreateAud.timestamp;
+        }
+        const ownEditAud = inv.auditLog.find(a => a.action === 'edit');
+        if (!ownEditAud) {
+          delete inv.updatedAt;
+          delete inv.updatedBy;
+          delete inv.updatedById;
+        } else if (ownEditAud.timestamp) {
+          inv.updatedAt = ownEditAud.timestamp;
+          inv.updatedBy = ownEditAud.userName;
+          inv.updatedById = ownEditAud.userId;
+        }
+        fixedInvoicesCount++;
+        fixedDiscrepanciesCount += foreignAuditIds.size;
+      }
+    });
+  }
+
+  // 7. Deduplicate duplicate return rows created during edits (keeping canonical rows matching return invoices without deleting any invoice)
+  if (Array.isArray(updated.returns) && updated.returns.length > 0) {
+    const returnInvMap = new Map<string, Invoice>();
+    updated.invoices.forEach(inv => {
+      if (inv && (inv.invoiceKind === 'sale_return' || inv.invoiceKind === 'purchase_return')) {
+        returnInvMap.set(inv.id, inv);
+      }
+    });
+
+    const groupedByRetInv = new Map<string, ReturnInvoice[]>();
+    const standaloneReturns: ReturnInvoice[] = [];
+    updated.returns.forEach(r => {
+      if (!r) return;
+      if (r.originalInvoiceId && returnInvMap.has(r.originalInvoiceId)) {
+        const list = groupedByRetInv.get(r.originalInvoiceId) || [];
+        list.push(r);
+        groupedByRetInv.set(r.originalInvoiceId, list);
+      } else {
+        standaloneReturns.push(r);
+      }
+    });
+
+    const cleanedReturns: ReturnInvoice[] = [];
+    const duplicateReturnIds: string[] = [];
+
+    groupedByRetInv.forEach((rows, retInvId) => {
+      const retInv = returnInvMap.get(retInvId)!;
+      const expectedLines = Math.max(1, retInv.items?.length || 1);
+      if (rows.length <= expectedLines) {
+        cleanedReturns.push(...rows);
+        return;
+      }
+      // Prefer rows with notes / matching latest journalEntryId / newer ID, keeping exact item signature count
+      const sortedRows = [...rows].sort((a, b) => {
+        const scoreA = (a.journalEntryId && a.journalEntryId === retInv.journalEntryId ? 4 : 0) + (a.notes ? 2 : 0);
+        const scoreB = (b.journalEntryId && b.journalEntryId === retInv.journalEntryId ? 4 : 0) + (b.notes ? 2 : 0);
+        if (scoreB !== scoreA) return scoreB - scoreA;
+        return String(b.id || '').localeCompare(String(a.id || ''));
+      });
+      const keptForInv: ReturnInvoice[] = [];
+      const seenItemSigs = new Set<string>();
+      for (const row of sortedRows) {
+        const sig = `${row.productId || normalizeArabicText(row.productName)}::${roundQty(Number(row.qty) || 0)}::${roundMoney(Number(row.total) || 0)}`;
+        if (keptForInv.length < expectedLines && !seenItemSigs.has(sig)) {
+          seenItemSigs.add(sig);
+          keptForInv.push(row);
+        } else if (row.id) {
+          duplicateReturnIds.push(row.id);
+        }
+      }
+      cleanedReturns.push(...keptForInv);
+    });
+
+    const seenStandalone = new Set<string>();
+    standaloneReturns.forEach(r => {
+      const sig = `${r.type}::${r.date}::${r.originalInvoiceId || ''}::${r.productId || normalizeArabicText(r.productName)}::${roundQty(Number(r.qty) || 0)}::${roundMoney(Number(r.total) || 0)}`;
+      if (!seenStandalone.has(sig)) {
+        seenStandalone.add(sig);
+        cleanedReturns.push(r);
+      } else if (r.id) {
+        duplicateReturnIds.push(r.id);
+      }
+    });
+
+    if (duplicateReturnIds.length > 0) {
+      updated.returns = cleanedReturns;
+      markRecordsDeleted(updated, duplicateReturnIds);
+      fixedDiscrepanciesCount += duplicateReturnIds.length;
+    }
+  }
+
+  // 8. Reconcile drifted historical dailyClosings (e.g. 2026-11-16 double-counted returnsTotal & double-deducted grossProfit)
+  if (Array.isArray(updated.dailyClosings) && updated.dailyClosings.length > 0) {
+    const ledgerByBranch = new Map<string, ReturnType<typeof buildProductFifoLedger>>();
+    const sortedClosings = [...updated.dailyClosings].sort((a, b) => a.date.localeCompare(b.date));
+    for (const dc of sortedClosings) {
+      if (!dc || !dc.date) continue;
+      const bKey = dc.branchId || 'br_mawan';
+      if (!ledgerByBranch.has(bKey)) {
+        ledgerByBranch.set(bKey, buildProductFifoLedger(updated, bKey));
+      }
+      const metrics = computeShiftSalesAndProfitMetrics(updated, ledgerByBranch.get(bKey)!, dc.date, bKey);
+      const returnsDrifted = Math.abs((Number(dc.returnsTotal) || 0) - metrics.returnsTotal) > 0.01;
+      const profitDriftedWithReturns =
+        metrics.returnsTotal > 0 &&
+        (Math.abs((Number(dc.grossProfit) || 0) - metrics.grossProfit) > 0.01 ||
+          Math.abs((Number(dc.netSales) || 0) - metrics.netSales) > 0.01);
+
+      if (returnsDrifted || profitDriftedWithReturns) {
+        dc.returnsTotal = metrics.returnsTotal;
+        dc.netSales = roundMoney(Math.max(0, (Number(dc.salesTotal) || metrics.salesTotal) - metrics.returnsTotal));
+        dc.cogs = metrics.cogs;
+        dc.grossProfit = metrics.grossProfit;
+        dc.profitMargin = metrics.profitMargin;
+        if (dc.withdrawnProfit !== undefined || dc.carriedOverProfit !== undefined || dc.remainingProfitToCarry !== undefined) {
+          dc.remainingProfitToCarry = Math.max(
+            0,
+            roundMoney((Number(dc.carriedOverProfit) || 0) + metrics.grossProfit - (Number(dc.withdrawnProfit) || 0))
+          );
+        }
+        fixedDiscrepanciesCount++;
+      }
+    }
+  }
+
+  // 9. Recompute Customer & Supplier cached balances cleanly
   updated.customers.forEach(c => {
     c.balance = calculateCustomerBalance(updated, c.id);
   });
