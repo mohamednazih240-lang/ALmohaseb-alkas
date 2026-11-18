@@ -27,8 +27,9 @@ export const VoucherPrintModal: React.FC<VoucherPrintModalProps> = ({
   if (!voucher) return null;
 
   const isReceipt = voucher.type === 'receipt';
-  const voucherTitle = isReceipt ? 'سند قبض مالي' : 'سند صرف مالي';
-  const partyLabel = isReceipt ? 'المستلم منه' : 'المستفيد / يصرف إلى';
+  const isExpenseVoucher = !isReceipt && voucher.paymentCategory === 'expense';
+  const voucherTitle = isReceipt ? 'سند قبض مالي' : isExpenseVoucher ? 'سند صرف مصروفات' : 'سند صرف مالي';
+  const partyLabel = isReceipt ? 'المستلم منه' : isExpenseVoucher ? 'بند المصروف / المستفيد' : 'المستفيد / يصرف إلى';
   const tafqeetWords = tafqeetCurrency(voucher.amount, settings.currency || 'ج.م');
 
   const docBlock: MovementPrintBlock = {

@@ -690,6 +690,12 @@ export function postManualVoucherTransaction(
     updatedBy: voucher.updatedBy || operatorName
   };
 
+  if (voucherToSave.type === 'payment' && voucherToSave.paymentCategory === 'expense') {
+    voucherToSave.partyId = undefined;
+    voucherToSave.invoiceId = undefined;
+    voucherToSave.referenceNumber = undefined;
+  }
+
   // Validate overpayment against target linked invoice before mutating balances
   if (voucherToSave.invoiceId || voucherToSave.referenceNumber) {
     const expectedInvType = voucherToSave.type === 'receipt' ? 'sale' : 'purchase';
@@ -837,7 +843,7 @@ export function postManualVoucherTransaction(
       direction: trDirection,
       amount: voucherToSave.amount,
       method: voucherToSave.paymentMethod,
-      description: `${isReceipt ? 'سند قبض' : 'سند صرف'} ${voucherToSave.number} - ${voucherToSave.partyName}: ${voucherToSave.description || ''}`,
+      description: `${isReceipt ? 'سند قبض' : voucherToSave.paymentCategory === 'expense' ? 'سند صرف مصروف' : 'سند صرف'} ${voucherToSave.number} - ${voucherToSave.partyName}: ${voucherToSave.description || ''}`,
       sourceType: voucherToSave.type,
       sourceId: voucherId,
       invoiceId: voucherToSave.invoiceId,
@@ -931,8 +937,10 @@ export function postManualVoucherTransaction(
 
   logAudit(
     updated,
-    existingVIdx > -1 ? (isReceipt ? 'تعديل سند قبض' : 'تعديل سند صرف') : (isReceipt ? 'تسجيل سند قبض' : 'تسجيل سند صرف'),
-    `سند رقم ${voucherToSave.number} بمبلغ ${formatMoney(voucherToSave.amount, updated.settings.currency)} للطرف ${voucherToSave.partyName} بواسطة [${operatorName}]`
+    existingVIdx > -1
+      ? (isReceipt ? 'تعديل سند قبض' : voucherToSave.paymentCategory === 'expense' ? 'تعديل سند صرف مصروف' : 'تعديل سند صرف')
+      : (isReceipt ? 'تسجيل سند قبض' : voucherToSave.paymentCategory === 'expense' ? 'تسجيل سند صرف مصروف' : 'تسجيل سند صرف'),
+    `سند رقم ${voucherToSave.number} بمبلغ ${formatMoney(voucherToSave.amount, updated.settings.currency)} (${voucherToSave.partyName}) بواسطة [${operatorName}]`
   );
 
   return {

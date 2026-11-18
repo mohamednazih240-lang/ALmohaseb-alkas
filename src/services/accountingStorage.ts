@@ -3201,7 +3201,13 @@ export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
 
   const totalCOGS = roundMoney(rawTotalCogs);
 
-  const totalExpenses = roundMoney(branchExpenses.reduce((acc, e) => acc + (Number(e.amount) || 0), 0));
+  const branchExpenseVouchers = (db.vouchers || []).filter(
+    v => v.type === 'payment' && v.paymentCategory === 'expense' && isTargetBranch(v.branchId)
+  );
+  const totalExpenses = roundMoney(
+    branchExpenses.reduce((acc, e) => acc + (Number(e.amount) || 0), 0) +
+    branchExpenseVouchers.reduce((acc, v) => acc + (Number(v.amount) || 0), 0)
+  );
   const totalOtherRevenues = roundMoney(branchRevenues.reduce((acc, r) => acc + (Number(r.amount) || 0), 0));
 
   const grossProfit = roundMoney(rawVerifiedSalesRev - rawTotalCogs);
@@ -3654,6 +3660,26 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
       credit: amt,
       notes: `سداد حساب العميل: ${voucher.partyName}`
     });
+  } else if (voucher.paymentCategory === 'expense') {
+    // سند صرف مصروف: من حـ/ المصروفات العمومية والتشغيلية (مدين) إلى حـ/ الخزينة أو البنك (دائن)
+    const expAcc = db.accounts.find(a => a.id === 'acc_exp')!;
+    const expLabel = voucher.expenseCategory || voucher.partyName || 'مصروفات تشغيلية';
+    lines.push({
+      accountId: expAcc.id,
+      accountCode: expAcc.code,
+      accountName: expAcc.name,
+      debit: amt,
+      credit: 0,
+      notes: `صرف مصروف (${expLabel})${voucher.description ? `: ${voucher.description}` : ''}`
+    });
+    lines.push({
+      accountId: methodAcc.id,
+      accountCode: methodAcc.code,
+      accountName: methodAcc.name,
+      debit: 0,
+      credit: amt,
+      notes: `سداد من الخزينة/البنك (${voucher.paymentMethod}) — ${expLabel}`
+    });
   } else {
     // سند صرف: من حـ/ الموردين (مدين) إلى حـ/ الخزينة أو البنك (دائن)
     const apAcc = db.accounts.find(a => a.id === 'acc_ap')!;
@@ -3679,7 +3705,11 @@ export function createVoucherJournal(db: AccountingDB, voucher: Voucher): Journa
     id: generateId('j'),
     number: jNum,
     date: voucher.date,
-    description: isReceipt ? `سند قبض رقم ${voucher.number} من ${voucher.partyName}` : `سند صرف رقم ${voucher.number} إلى ${voucher.partyName}`,
+    description: isReceipt
+      ? `سند قبض رقم ${voucher.number} من ${voucher.partyName}`
+      : voucher.paymentCategory === 'expense'
+        ? `سند صرف مصروف رقم ${voucher.number} — ${voucher.expenseCategory || voucher.partyName}`
+        : `سند صرف رقم ${voucher.number} إلى ${voucher.partyName}`,
     sourceType: voucher.type,
     sourceId: voucher.id,
     lines,

@@ -203,12 +203,16 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
     );
   }, [invoiceProfitsData]);
 
-  // Operating Expenses for date and branch filter
+  // Operating Expenses for date and branch filter (includes standalone expenses + expense payment vouchers)
   const operatingExpenses = useMemo(() => {
-    return (db.expenses || [])
+    const directExpenses = (db.expenses || [])
       .filter(e => isDateMatch(e.date) && isTargetBranch(e.branchId))
       .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-  }, [db.expenses, dateFilter, fromDate, toDate, selectedBranchId]);
+    const voucherExpenses = (db.vouchers || [])
+      .filter(v => v.type === 'payment' && v.paymentCategory === 'expense' && isDateMatch(v.date) && isTargetBranch(v.branchId))
+      .reduce((sum, v) => sum + (Number(v.amount) || 0), 0);
+    return Number((directExpenses + voucherExpenses).toFixed(2));
+  }, [db.expenses, db.vouchers, dateFilter, fromDate, toDate, selectedBranchId]);
 
   // Net Business Profit = Gross Merchandise Profit - Operating Expenses
   const netBusinessProfit = useMemo(() => {

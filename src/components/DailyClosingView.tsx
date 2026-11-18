@@ -285,14 +285,20 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
         .filter(t => t.direction === 'in' && (t.sourceType === 'receipt' || t.sourceType === 'voucher'))
         .reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
+    const dayExpenseVouchers = (db.vouchers || []).filter(
+      v => v.date === selectedDate && v.type === 'payment' && v.paymentCategory === 'expense' && isTargetBranch(v.branchId)
+    );
+    const expenseVoucherIds = new Set(dayExpenseVouchers.map(v => v.id));
+
     const vouchersCashOut = roundMoney(
       operationalDayTreasury
-        .filter(t => t.direction === 'out' && (t.sourceType === 'payment' || t.sourceType === 'voucher'))
+        .filter(t => t.direction === 'out' && (t.sourceType === 'payment' || t.sourceType === 'voucher') && (!t.sourceId || !expenseVoucherIds.has(t.sourceId)))
         .reduce((s, t) => s + (Number(t.amount) || 0), 0)
     );
 
     const dayExpenses = roundMoney(
-      db.expenses.filter(e => e.date === selectedDate && isTargetBranch(e.branchId)).reduce((sum, e) => sum + (Number(e.amount) || 0), 0)
+      db.expenses.filter(e => e.date === selectedDate && isTargetBranch(e.branchId)).reduce((sum, e) => sum + (Number(e.amount) || 0), 0) +
+      dayExpenseVouchers.reduce((sum, v) => sum + (Number(v.amount) || 0), 0)
     );
     const dayRevenues = roundMoney(
       db.revenues.filter(r => r.date === selectedDate && isTargetBranch(r.branchId)).reduce((sum, r) => sum + (Number(r.amount) || 0), 0)
@@ -1214,9 +1220,22 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
       t => t.date === rDate && matchesReviewScope(t.branchId)
     );
     const returns = computeShiftSalesAndProfitMetrics(db, fifoLedger, rDate, rBranch).dedupedDayReturns;
-    const expenses = (db.expenses || []).filter(
+    const directExpenses = (db.expenses || []).filter(
       e => e.date === rDate && matchesReviewScope(e.branchId)
     );
+    const voucherExpenses = (db.vouchers || [])
+      .filter(v => v.date === rDate && v.type === 'payment' && v.paymentCategory === 'expense' && matchesReviewScope(v.branchId))
+      .map(v => ({
+        id: v.id,
+        date: v.date,
+        category: v.expenseCategory || v.partyName || 'مصروفات',
+        amount: Number(v.amount) || 0,
+        method: v.paymentMethod,
+        description: v.description ? `${v.description} (سند #${v.number})` : `سند صرف #${v.number}`,
+        branchId: v.branchId,
+        branchName: v.branchName
+      }));
+    const expenses = [...directExpenses, ...voucherExpenses];
     const revenues = (db.revenues || []).filter(
       r => r.date === rDate && matchesReviewScope(r.branchId)
     );

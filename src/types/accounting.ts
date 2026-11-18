@@ -323,6 +323,8 @@ export interface Voucher {
   id: string;
   number: string;
   type: 'receipt' | 'payment'; // receipt = قبض, payment = صرف
+  paymentCategory?: 'supplier' | 'expense'; // نوع سند الصرف: سداد مورد أو مصروف تشغيلي (إيجار، كهرباء، رواتب...)
+  expenseCategory?: string; // تصنيف المصروف عند اختيار مصروفات
   date: string;
   partyId?: string;
   partyName: string;

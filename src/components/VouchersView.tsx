@@ -52,6 +52,19 @@ interface VouchersViewProps {
   activeBranchId?: string;
 }
 
+const EXPENSE_PAYMENT_CATEGORIES: string[] = [
+  'إيجار المحل / المقر',
+  'كهرباء ومياه وإنترنت',
+  'مرتبات وأجور',
+  'نقل ومشال وشحن',
+  'صيانة وإصلاحات',
+  'بوفيه وضيافة',
+  'دعاية وإعلان',
+  'ضرائب ورسوم حكومية',
+  'أكياس وتغليف ومستلزمات',
+  'مصروفات متنوعة / أخرى'
+];
+
 export const VouchersView: React.FC<VouchersViewProps> = ({
   type,
   db,
@@ -64,6 +77,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
   const targetBranchId = activeBranchId || branches[0]?.id || 'br_main';
   const currentBranch = branches.find(b => b.id === targetBranchId) || branches[0];
   const [branchFilter, setBranchFilter] = useState<'current' | 'all'>('current');
+  const [paymentFilter, setPaymentFilter] = useState<'all' | 'expense' | 'supplier'>('all');
   const { isSubmitting, runWithLock } = useSubmitLock();
 
   const [showModal, setShowModal] = useState(false);
@@ -80,6 +94,9 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
   // Form states
   const [voucherDate, setVoucherDate] = useState(getTodayDate());
+  const [paymentCategory, setPaymentCategory] = useState<'supplier' | 'expense'>(preselectedPartyId ? 'supplier' : 'expense');
+  const [expenseCategory, setExpenseCategory] = useState<string>(EXPENSE_PAYMENT_CATEGORIES[0]);
+  const [payeeName, setPayeeName] = useState<string>('');
   const [partyId, setPartyId] = useState(preselectedPartyId || '');
   const [linkedInvoiceId, setLinkedInvoiceId] = useState<string>('');
   const [amount, setAmount] = useState<number>(0);
@@ -106,7 +123,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
 
   const selectedLinkedInvoice = linkableInvoices.find(inv => inv.id === linkedInvoiceId);
 
-  const vouchersList = db.vouchers
+  const allBranchVouchers = db.vouchers
     .filter(v => v.type === type && isTargetBranch(v.branchId) && !isReturnRelatedVoucher(v))
     .sort((a, b) => {
       const dateCmp = (b.date || '').localeCompare(a.date || '');
@@ -118,23 +135,55 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
       return numB - numA;
     });
 
-  const totalAmount = vouchersList.reduce((sum, v) => sum + v.amount, 0);
+  const vouchersList = (!isReceipt && paymentFilter !== 'all')
+    ? allBranchVouchers.filter(v =>
+        paymentFilter === 'expense' ? v.paymentCategory === 'expense' : v.paymentCategory !== 'expense'
+      )
+    : allBranchVouchers;
 
-  const handleOpenNewModal = () => {
+  const totalAmount = vouchersList.reduce((sum, v) => sum + v.amount, 0);
+  const totalExpenseVouchers = allBranchVouchers
+    .filter(v => v.paymentCategory === 'expense')
+    .reduce((sum, v) => sum + v.amount, 0);
+  const totalSupplierVouchers = allBranchVouchers
+    .filter(v => v.paymentCategory !== 'expense')
+    .reduce((sum, v) => sum + v.amount, 0);
+
+  const handleOpenNewModal = (defaultPayCategory?: 'supplier' | 'expense') => {
     setEditingVoucher(null);
     setVoucherDate(getTodayDate());
+    const chosenCat: 'supplier' | 'expense' = defaultPayCategory || (preselectedPartyId ? 'supplier' : 'expense');
+    setPaymentCategory(chosenCat);
+    setExpenseCategory(EXPENSE_PAYMENT_CATEGORIES[0]);
+    setPayeeName('');
     const defaultParty = isReceipt ? db.customers[0]?.id : db.suppliers[0]?.id;
     setPartyId(preselectedPartyId || defaultParty || '');
     setLinkedInvoiceId('');
     setAmount(0);
     setPaymentMethod('نقدي');
-    setDescription(isReceipt ? 'دفعة نقدية سداد حساب' : 'سداد دفعة للمورد');
+    setDescription(isReceipt ? 'دفعة نقدية سداد حساب' : chosenCat === 'expense' ? '' : 'سداد دفعة للمورد');
     setShowModal(true);
   };
 
   const handleOpenEditModal = (v: Voucher) => {
     setEditingVoucher(v);
     setVoucherDate(v.date);
+    const isExp = v.type === 'payment' && v.paymentCategory === 'expense';
+    setPaymentCategory(isExp ? 'expense' : 'supplier');
+    const expCat = v.expenseCategory || (isExp ? v.partyName : EXPENSE_PAYMENT_CATEGORIES[0]);
+    setExpenseCategory(expCat);
+    if (isExp && v.partyName) {
+      const prefix = `${expCat} — `;
+      if (v.partyName.startsWith(prefix)) {
+        setPayeeName(v.partyName.slice(prefix.length));
+      } else if (v.partyName !== expCat) {
+        setPayeeName(v.partyName);
+      } else {
+        setPayeeName('');
+      }
+    } else {
+      setPayeeName('');
+    }
     setPartyId(v.partyId || '');
     setLinkedInvoiceId(v.invoiceId || '');
     setAmount(v.amount);
@@ -156,9 +205,19 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
         return;
       }
 
+      const isExpensePayment = !isReceipt && paymentCategory === 'expense';
+      const cleanExpenseCategory = expenseCategory.trim();
+      if (isExpensePayment && !cleanExpenseCategory) {
+        await appAlert('يرجى تحديد أو كتابة بند المصروف (مثل: إيجار، كهرباء، رواتب...)');
+        return;
+      }
+
       const list = isReceipt ? db.customers : db.suppliers;
-      const party = list.find(p => p.id === partyId);
-      const partyName = party ? party.name : (isReceipt ? 'عميل نقدي' : 'مورد عام');
+      const party = isExpensePayment ? undefined : list.find(p => p.id === partyId);
+      const cleanPayee = payeeName.trim();
+      const partyName = isExpensePayment
+        ? (cleanPayee ? `${cleanExpenseCategory} — ${cleanPayee}` : cleanExpenseCategory)
+        : (party ? party.name : (isReceipt ? 'عميل نقدي' : 'مورد عام'));
       const operatorName = db.currentUser?.name || 'مدير النظام';
 
       let voucherPayload: Voucher;
@@ -168,13 +227,15 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
         voucherPayload = {
           ...editingVoucher,
           date: voucherDate,
-          partyId: partyId || undefined,
+          paymentCategory: isReceipt ? undefined : (isExpensePayment ? 'expense' : 'supplier'),
+          expenseCategory: isExpensePayment ? cleanExpenseCategory : undefined,
+          partyId: isExpensePayment ? undefined : (partyId || undefined),
           partyName,
           amount: cleanAmt,
           paymentMethod,
-          description: description.trim(),
-          invoiceId: linkedInvoiceId || undefined,
-          referenceNumber: selectedLinkedInvoice ? selectedLinkedInvoice.number : undefined,
+          description: description.trim() || (isExpensePayment ? cleanExpenseCategory : ''),
+          invoiceId: isExpensePayment ? undefined : (linkedInvoiceId || undefined),
+          referenceNumber: (!isExpensePayment && selectedLinkedInvoice) ? selectedLinkedInvoice.number : undefined,
           updatedAt: new Date().toISOString(),
           updatedBy: operatorName
         };
@@ -194,14 +255,16 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
           id: vId,
           number: vNumber,
           type,
+          paymentCategory: isReceipt ? undefined : (isExpensePayment ? 'expense' : 'supplier'),
+          expenseCategory: isExpensePayment ? cleanExpenseCategory : undefined,
           date: voucherDate,
-          partyId: partyId || undefined,
+          partyId: isExpensePayment ? undefined : (partyId || undefined),
           partyName,
           amount: cleanAmt,
           paymentMethod,
-          description: description.trim(),
-          invoiceId: linkedInvoiceId || undefined,
-          referenceNumber: selectedLinkedInvoice ? selectedLinkedInvoice.number : undefined,
+          description: description.trim() || (isExpensePayment ? cleanExpenseCategory : ''),
+          invoiceId: isExpensePayment ? undefined : (linkedInvoiceId || undefined),
+          referenceNumber: (!isExpensePayment && selectedLinkedInvoice) ? selectedLinkedInvoice.number : undefined,
           isManualInstallment: true,
           isAutoFromInvoice: false,
           branchId: targetBranchId,
@@ -319,10 +382,12 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
         <div>
           <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
             {isReceipt ? <Receipt className="w-6 h-6" /> : <CreditCard className="w-6 h-6" />}
-            <span>إدارة {isReceipt ? 'سندات القبض (تحصيلات العملاء)' : 'سندات الصرف (مدفوعات الموردين)'}</span>
+            <span>إدارة {isReceipt ? 'سندات القبض (تحصيلات العملاء)' : 'سندات الصرف (المصروفات ومدفوعات الموردين)'}</span>
           </h1>
           <p className="text-xs text-slate-500 font-medium mt-0.5">
-            إثبات حركات النقدية والشيكات والتحويلات مع الربط التلقائي بدفتر الأستاذ ورصيد الجهة
+            {isReceipt
+              ? 'إثبات حركات النقدية والشيكات والتحويلات مع الربط التلقائي بدفتر الأستاذ ورصيد الجهة'
+              : 'إثبات صرف المصروفات (إيجارات، كهرباء، رواتب، صيانة، نقل...) ومدفوعات الموردين مع الترحيل التلقائي للخزينة والأستاذ'}
           </p>
         </div>
 
@@ -347,13 +412,32 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
             <span>طباعة وتصدير جماعي PDF</span>
           </button>
 
-          <button
-            onClick={handleOpenNewModal}
-            className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>{isReceipt ? 'سند قبض جديد (+)' : 'سند صرف جديد (-)'}</span>
-          </button>
+          {!isReceipt ? (
+            <>
+              <button
+                onClick={() => handleOpenNewModal('expense')}
+                className="px-4 py-2 bg-rose-700 hover:bg-rose-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>صرف مصروفات / إيجار</span>
+              </button>
+              <button
+                onClick={() => handleOpenNewModal('supplier')}
+                className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>سند صرف لمورد (-)</span>
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => handleOpenNewModal('supplier')}
+              className="px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>سند قبض جديد (+)</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -381,6 +465,38 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
               كافة الفروع
             </button>
           </div>
+
+          {!isReceipt && (
+            <div className="inline-flex flex-wrap rounded-lg border border-slate-300 bg-white p-0.5 shadow-2xs">
+              <button
+                type="button"
+                onClick={() => setPaymentFilter('all')}
+                className={`px-2.5 py-1 rounded-md font-bold text-xs transition-all ${
+                  paymentFilter === 'all' ? 'bg-slate-900 text-white shadow-xs' : 'text-slate-600 hover:text-black'
+                }`}
+              >
+                الكل
+              </button>
+              <button
+                type="button"
+                onClick={() => setPaymentFilter('expense')}
+                className={`px-2.5 py-1 rounded-md font-bold text-xs transition-all ${
+                  paymentFilter === 'expense' ? 'bg-rose-700 text-white shadow-xs' : 'text-slate-600 hover:text-black'
+                }`}
+              >
+                مصروفات وإيجارات
+              </button>
+              <button
+                type="button"
+                onClick={() => setPaymentFilter('supplier')}
+                className={`px-2.5 py-1 rounded-md font-bold text-xs transition-all ${
+                  paymentFilter === 'supplier' ? 'bg-slate-900 text-white shadow-xs' : 'text-slate-600 hover:text-black'
+                }`}
+              >
+                سداد موردين
+              </button>
+            </div>
+          )}
         </div>
         <div className="text-[11px] text-slate-500 font-medium">
           يتم تسجيل أي سند جديد تلقائياً بحساب فرع: <span className="font-bold text-slate-900">{currentBranch.name}</span>
@@ -388,15 +504,31 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
       </div>
 
       {/* KPI */}
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4">
+      <div className={`grid grid-cols-2 ${!isReceipt ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-3 sm:gap-4`}>
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
           <span className="text-xs font-bold text-slate-600 block mb-1">
-            إجمالي {isReceipt ? 'المقبوضات' : 'المدفوعات'}
+            إجمالي {isReceipt ? 'المقبوضات' : 'المدفوعات المعروضة'}
           </span>
           <span className={`text-lg sm:text-xl font-black font-mono ${isReceipt ? 'text-emerald-700' : 'text-rose-700'}`}>
             {formatMoney(totalAmount, db.settings.currency)}
           </span>
         </div>
+        {!isReceipt && (
+          <>
+            <div className="bg-white p-4 rounded-xl border border-amber-200 shadow-2xs">
+              <span className="text-xs font-bold text-slate-600 block mb-1">مصروفات وإيجارات ونثريات</span>
+              <span className="text-lg sm:text-xl font-black font-mono text-amber-700">
+                {formatMoney(totalExpenseVouchers, db.settings.currency)}
+              </span>
+            </div>
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-xs font-bold text-slate-600 block mb-1">مدفوعات الموردين</span>
+              <span className="text-lg sm:text-xl font-black font-mono text-rose-700">
+                {formatMoney(totalSupplierVouchers, db.settings.currency)}
+              </span>
+            </div>
+          </>
+        )}
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
           <span className="text-xs font-bold text-slate-600 block mb-1">
             عدد السندات المسجلة
@@ -413,7 +545,7 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
           <FileText className="w-10 h-10 text-slate-300 mx-auto mb-2" />
           <div className="text-sm font-bold text-slate-700">لا توجد سندات مسجلة حالياً</div>
           <button
-            onClick={handleOpenNewModal}
+            onClick={() => handleOpenNewModal(!isReceipt ? 'expense' : 'supplier')}
             className="mt-3 px-4 py-2 bg-black hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
           >
             <Plus className="w-4 h-4" />
@@ -444,17 +576,21 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                   className={`px-2.5 py-0.5 rounded-full text-[10px] font-black border ${
                     isReceipt
                       ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
-                      : 'bg-rose-50 text-rose-800 border-rose-300'
+                      : v.paymentCategory === 'expense'
+                        ? 'bg-amber-50 text-amber-800 border-amber-300'
+                        : 'bg-rose-50 text-rose-800 border-rose-300'
                   }`}
                 >
-                  {isReceipt ? 'سند قبض وارد' : 'سند صرف صادر'}
+                  {isReceipt ? 'سند قبض وارد' : v.paymentCategory === 'expense' ? 'سند صرف مصروفات' : 'سند صرف صادر'}
                 </span>
               </div>
 
               {/* Card Body */}
               <div className="py-2.5 space-y-2 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-500 font-medium">{isReceipt ? 'العميل:' : 'المورد:'}</span>
+                  <span className="text-slate-500 font-medium">
+                    {isReceipt ? 'العميل:' : v.paymentCategory === 'expense' ? 'بند المصروف:' : 'المورد:'}
+                  </span>
                   <span className="font-bold text-slate-900 truncate max-w-[180px]">{v.partyName}</span>
                 </div>
 
@@ -594,57 +730,141 @@ export const VouchersView: React.FC<VouchersViewProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                  الطرف ({isReceipt ? 'العميل' : 'المورد'})
-                </label>
-                <select
-                  value={partyId}
-                  onChange={e => {
-                    setPartyId(e.target.value);
-                    setLinkedInvoiceId('');
-                  }}
-                  className="w-full min-w-0 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-medium"
-                >
-                  <option value="">{isReceipt ? 'عميل نقدي عام' : 'مورد عام'}</option>
-                  {(isReceipt ? db.customers : db.suppliers).map(p => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
+              {!isReceipt && (
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">نوع سند الصرف</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPaymentCategory('expense');
+                        setLinkedInvoiceId('');
+                      }}
+                      className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                        paymentCategory === 'expense'
+                          ? 'bg-rose-700 text-white border-rose-700 shadow-xs'
+                          : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      مصروفات وإيجارات ونثريات
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPaymentCategory('supplier');
+                      }}
+                      className={`py-2 px-2.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                        paymentCategory === 'supplier'
+                          ? 'bg-black text-white border-black shadow-xs'
+                          : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      سداد لمورد (حساب / فاتورة)
+                    </button>
+                  </div>
+                </div>
+              )}
 
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                  ربط بفاتورة مستحقة / جزئية (اختياري لسداد الأقساط)
-                </label>
-                <select
-                  value={linkedInvoiceId}
-                  onChange={e => {
-                    const invId = e.target.value;
-                    setLinkedInvoiceId(invId);
-                    const target = linkableInvoices.find(i => i.id === invId);
-                    if (target && !editingVoucher && (amount <= 0 || amount > target.remaining)) {
-                      setAmount(Number(target.remaining) || 0);
-                    }
-                  }}
-                  className="w-full min-w-0 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-medium"
-                >
-                  <option value="">— سند عام على حساب الطرف (غير مربوط بفاتورة محددة) —</option>
-                  {linkableInvoices.map(inv => (
-                    <option key={inv.id} value={inv.id}>
-                      فاتورة #{inv.number} ({inv.date}) — متبقي: {formatMoney(inv.remaining, db.settings.currency)} من {formatMoney(inv.total, db.settings.currency)}
-                    </option>
-                  ))}
-                </select>
-                {selectedLinkedInvoice && (
-                  <div className="mt-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">
-                    إجمالي الفاتورة #{selectedLinkedInvoice.number}: {formatMoney(selectedLinkedInvoice.total, db.settings.currency)} • المتبقي قبل هذا السند: {formatMoney(
-                      Math.max(0, selectedLinkedInvoice.total - db.vouchers.filter(v => v.id !== editingVoucher?.id && isVoucherLinkedToInvoice(v, selectedLinkedInvoice)).reduce((s, v) => s + (Number(v.amount) || 0), 0)),
-                      db.settings.currency
+              {!isReceipt && paymentCategory === 'expense' ? (
+                <>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      بند المصروف (اختر أو اكتب) *
+                    </label>
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {EXPENSE_PAYMENT_CATEGORIES.map(cat => (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => setExpenseCategory(cat)}
+                          className={`px-2 py-1 rounded-md text-[10.5px] font-bold border transition-all cursor-pointer ${
+                            expenseCategory === cat
+                              ? 'bg-rose-50 text-rose-800 border-rose-400'
+                              : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          {cat}
+                        </button>
+                      ))}
+                    </div>
+                    <input
+                      type="text"
+                      required
+                      value={expenseCategory}
+                      onChange={e => setExpenseCategory(e.target.value)}
+                      placeholder="إيجار المحل، كهرباء، رواتب، نقل، صيانة..."
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-bold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      اسم المستفيد / الجهة المستلمة (اختياري)
+                    </label>
+                    <input
+                      type="text"
+                      value={payeeName}
+                      onChange={e => setPayeeName(e.target.value)}
+                      placeholder="مثال: صاحب العقار، شركة الكهرباء، العامل..."
+                      className="w-full px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      الطرف ({isReceipt ? 'العميل' : 'المورد'})
+                    </label>
+                    <select
+                      value={partyId}
+                      onChange={e => {
+                        setPartyId(e.target.value);
+                        setLinkedInvoiceId('');
+                      }}
+                      className="w-full min-w-0 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-medium"
+                    >
+                      <option value="">{isReceipt ? 'عميل نقدي عام' : 'مورد عام'}</option>
+                      {(isReceipt ? db.customers : db.suppliers).map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      ربط بفاتورة مستحقة / جزئية (اختياري لسداد الأقساط)
+                    </label>
+                    <select
+                      value={linkedInvoiceId}
+                      onChange={e => {
+                        const invId = e.target.value;
+                        setLinkedInvoiceId(invId);
+                        const target = linkableInvoices.find(i => i.id === invId);
+                        if (target && !editingVoucher && (amount <= 0 || amount > target.remaining)) {
+                          setAmount(Number(target.remaining) || 0);
+                        }
+                      }}
+                      className="w-full min-w-0 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-medium"
+                    >
+                      <option value="">— سند عام على حساب الطرف (غير مربوط بفاتورة محددة) —</option>
+                      {linkableInvoices.map(inv => (
+                        <option key={inv.id} value={inv.id}>
+                          فاتورة #{inv.number} ({inv.date}) — متبقي: {formatMoney(inv.remaining, db.settings.currency)} من {formatMoney(inv.total, db.settings.currency)}
+                        </option>
+                      ))}
+                    </select>
+                    {selectedLinkedInvoice && (
+                      <div className="mt-1 text-[10px] font-bold text-blue-700 bg-blue-50 px-2 py-1 rounded border border-blue-200">
+                        إجمالي الفاتورة #{selectedLinkedInvoice.number}: {formatMoney(selectedLinkedInvoice.total, db.settings.currency)} • المتبقي قبل هذا السند: {formatMoney(
+                          Math.max(0, selectedLinkedInvoice.total - db.vouchers.filter(v => v.id !== editingVoucher?.id && isVoucherLinkedToInvoice(v, selectedLinkedInvoice)).reduce((s, v) => s + (Number(v.amount) || 0), 0)),
+                          db.settings.currency
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
-              </div>
+                </>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
