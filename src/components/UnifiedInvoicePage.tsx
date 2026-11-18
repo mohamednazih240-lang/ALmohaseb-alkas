@@ -43,7 +43,8 @@ import {
   Party,
   TreasuryEntry,
   StockMovement,
-  Quote
+  Quote,
+  SellingPriceHistoryEntry
 } from '../types/accounting';
 import { InvoiceAuditLogModal } from './InvoiceAuditLogModal';
 import {
@@ -2465,17 +2466,62 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         const accurateQty = Number(prodMovements.reduce((sum, sm) => sum + (Number(sm.qtyChange) || 0), 0).toFixed(4));
         movementPayload.balanceAfter = accurateQty;
 
-        // Purchase posts update buyPrice (catalog default), NEVER touching selling prices or past batches!
-        // Sale posts update qty ONLY, NEVER overwriting official catalog sellPrice/wholesalePrice!
+        // Purchase posts update buyPrice (catalog default).
+        // Sale posts update qty AND persist the latest sold selling price (retail or wholesale) on the sold item.
         const isPurchase = mode === 'purchase';
+        const isSaleMode = mode === 'sale' || mode === 'wholesale';
+        const isWholesalePricing = mode === 'wholesale' || priceType === 'wholesale';
+        const soldUnitPrice = roundMoney(Number(item.unitPrice) || 0);
         const bpCurrent = getProductForBranch(prod, invoiceBranchId);
+        const operatorName = currentUserName || db.currentUser?.name || 'مستخدم';
+
+        const shouldUpdateSellPrice = isSaleMode && !isWholesalePricing && priceType !== 'buy' && soldUnitPrice > 0;
+        const shouldUpdateWholesalePrice = isSaleMode && isWholesalePricing && soldUnitPrice > 0;
+        const nextSellPrice = shouldUpdateSellPrice ? soldUnitPrice : bpCurrent.sellPrice;
+        const nextWholesalePrice = shouldUpdateWholesalePrice ? soldUnitPrice : bpCurrent.wholesalePrice;
+        const sellingPriceChanged =
+          (shouldUpdateSellPrice && Math.abs(soldUnitPrice - (Number(bpCurrent.sellPrice) || 0)) >= 0.001) ||
+          (shouldUpdateWholesalePrice && Math.abs(soldUnitPrice - (Number(bpCurrent.wholesalePrice) || 0)) >= 0.001);
+
         const updatedProd = updateProductBranchData(prod, invoiceBranchId, {
           currentQty: accurateQty,
-          buyPrice: (isPurchase && Number(item.unitPrice) > 0) ? Number(item.unitPrice) : bpCurrent.buyPrice
+          buyPrice: (isPurchase && Number(item.unitPrice) > 0) ? Number(item.unitPrice) : bpCurrent.buyPrice,
+          sellPrice: nextSellPrice,
+          wholesalePrice: nextWholesalePrice,
+          ...((shouldUpdateSellPrice || shouldUpdateWholesalePrice)
+            ? {
+                sellingPriceUpdatedAt: nowIso,
+                sellingPriceUpdatedBy: operatorName
+              }
+            : {})
         });
 
         if (isPurchase && Number(item.unitPrice) > 0) {
           updatedProd.buyPrice = Number(item.unitPrice);
+          updatedProd.updatedAt = nowIso;
+        }
+
+        if (shouldUpdateSellPrice || shouldUpdateWholesalePrice) {
+          updatedProd.sellingPriceUpdatedAt = nowIso;
+          updatedProd.sellingPriceUpdatedBy = operatorName;
+          updatedProd.updatedAt = nowIso;
+          if (sellingPriceChanged) {
+            const historyEntry: SellingPriceHistoryEntry = {
+              id: generateId('sph'),
+              date: nowIso,
+              oldSellPrice: Number(bpCurrent.sellPrice) || 0,
+              newSellPrice: nextSellPrice,
+              oldWholesalePrice: Number(bpCurrent.wholesalePrice) || 0,
+              newWholesalePrice: nextWholesalePrice,
+              updatedBy: operatorName,
+              branchId: invoiceBranchId,
+              note: `تحديث تلقائي من فاتورة بيع رقم ${savedInvoice.number}`
+            };
+            updatedProd.sellingPriceHistory = [
+              ...(prod.sellingPriceHistory || []),
+              historyEntry
+            ];
+          }
         }
 
         const pIdx = updated.products.findIndex(p => p.id === prod.id);
@@ -3631,11 +3677,11 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 <tr className="bg-slate-100 text-slate-800 font-bold border-b border-slate-300 sticky top-0 z-10">
                   <th className="py-1 px-0.5 border-l border-slate-300 w-5">م</th>
                   <th className="py-1 px-1 border-l border-slate-300 text-right">الصنف</th>
-                  <th className="hidden sm:table-cell py-1 px-1 border-l border-slate-300 text-right w-[18%]">الوصف</th>
-                  <th className="py-1 px-0.5 border-l border-slate-300 w-10 sm:w-12">الكمية</th>
-                  <th className="py-1 px-0.5 border-l border-slate-300 w-12 sm:w-14">السعر</th>
-                  <th className="py-1 px-0.5 border-l border-slate-300 w-14 sm:w-16">الإجمالي</th>
-                  <th className="py-1 px-0.5 w-11 sm:w-12">إجراء</th>
+                  <th className="py-1 px-1 border-l border-slate-300 text-right w-[20%] sm:w-[18%]">البيان</th>
+                  <th className="py-1 px-0.5 border-l border-slate-300 w-9 sm:w-12">الكمية</th>
+                  <th className="py-1 px-0.5 border-l border-slate-300 w-11 sm:w-14">السعر</th>
+                  <th className="py-1 px-0.5 border-l border-slate-300 w-12 sm:w-16">الإجمالي</th>
+                  <th className="py-1 px-0.5 w-10 sm:w-12">إجراء</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
@@ -3656,12 +3702,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       <td className="py-1 px-0.5 border-l border-slate-200 font-mono">{idx + 1}</td>
                       <td className="py-1 px-1 border-l border-slate-200 text-right font-bold text-slate-900 group-hover:text-blue-700 min-w-0">
                         <div className="truncate">{item.productName}</div>
-                        {item.spec && (
-                          <div className="sm:hidden text-[7.5px] font-normal text-slate-500 truncate">{item.spec}</div>
-                        )}
                       </td>
-                      <td className="hidden sm:table-cell py-1 px-1 border-l border-slate-200 text-right text-slate-500 truncate max-w-[120px]">
-                        {item.spec || '—'}
+                      <td className="py-1 px-1 border-l border-slate-200 text-right text-slate-600 truncate min-w-0">
+                        {item.spec || item.notes || '—'}
                       </td>
                       <td className="py-1 px-0.5 border-l border-slate-200 font-mono font-bold text-slate-950">
                         {item.qty}
