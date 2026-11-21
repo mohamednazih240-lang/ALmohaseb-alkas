@@ -105,7 +105,7 @@ export const InvoicePriceValidationModal: React.FC<InvoicePriceValidationModalPr
               </h2>
               <p className="text-xs text-white/85 mt-1 font-medium">
                 {isBelowCost
-                  ? 'تم رصد أصناف يتم بيعها بسعر يقل عن آخر سعر شراء مسجل لها، مما قد يسبب خسارة تجارية.'
+                  ? 'تم رصد أصناف سعر بيعها أقل من آخر سعر شراء موثق لها، مما قد يسبب خسارة تجارية.'
                   : 'تم رصد اختلاف بين أسعار الشراء المدخلة بالفاتورة الحالية وآخر أسعار شراء موثقة ومرحلة.'}
               </p>
             </div>
@@ -187,7 +187,7 @@ export const InvoicePriceValidationModal: React.FC<InvoicePriceValidationModalPr
                     {/* Breakdown Grid */}
                     <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-center text-xs pt-1">
                       <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
-                        <span className="text-[10px] text-slate-500 block">آخر سعر شراء</span>
+                        <span className="text-[10px] text-slate-500 block">سعر الشراء الموثق</span>
                         <span className="font-bold font-mono text-slate-900">{formatMoney(item.verifiedPurchasePrice, currency)}</span>
                       </div>
                       <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">

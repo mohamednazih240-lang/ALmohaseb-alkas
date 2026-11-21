@@ -14,7 +14,10 @@ import {
   Check,
   Loader2,
   Scale,
-  FileText
+  FileText,
+  Wallet,
+  Calendar,
+  PieChart
 } from 'lucide-react';
 import {
   AccountingDB
@@ -57,8 +60,15 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
   }, [activeBranchId]);
 
   const [activeReportTab, setActiveReportTab] = useState<
-    'income' | 'trial_balance' | 'statement' | 'sales' | 'purchases' | 'inventory' | 'receivables' | 'payables'
+    'income' | 'trial_balance' | 'statement' | 'sales' | 'purchases' | 'inventory' | 'receivables' | 'payables' | 'expenses_analysis'
   >('income');
+
+  // Expenses analytical report date range & filter state
+  const todayIsoDate = new Date().toISOString().slice(0, 10);
+  const currentMonthStartIso = `${todayIsoDate.slice(0, 7)}-01`;
+  const [expFromDate, setExpFromDate] = useState<string>(currentMonthStartIso);
+  const [expToDate, setExpToDate] = useState<string>(todayIsoDate);
+  const [expCategoryFilter, setExpCategoryFilter] = useState<string>('all');
 
   // Account Statement selector state
   const [statementPartyType, setStatementPartyType] = useState<'customer' | 'supplier'>('customer');
@@ -292,6 +302,102 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
     return { rows, totalDebit, totalCredit, netBalance };
   }, [db, selectedStatementParty, statementPartyType, selectedBranchId, branchParam]);
+
+  // Analytical Expenses Report by Category & Date Range (combines db.expenses + expense payment vouchers, zero double-count)
+  const expensesAnalysisData = useMemo(() => {
+    const rawEntries: {
+      id: string;
+      date: string;
+      category: string;
+      description: string;
+      method: string;
+      amount: number;
+      source: 'expense_ledger' | 'payment_voucher';
+      serial: string;
+    }[] = [];
+
+    const normalizeExpCat = (raw?: string) => {
+      const clean = (raw || '').trim();
+      if (!clean) return 'مصروفات متنوعة / أخرى';
+      if (clean === 'عام' || clean === 'مصروفات عمومية' || clean === 'عمومية') return 'المصروفات العمومية';
+      if (clean === 'إيجار' || clean === 'إيجارات' || clean === 'ايجار' || clean === 'ايجارات') return 'إيجار المحل / المقر';
+      return clean;
+    };
+
+    (db.expenses || [])
+      .filter(e => isTargetBranch(e.branchId))
+      .forEach(e => {
+        const d = (e.date || '').slice(0, 10);
+        if (expFromDate && d < expFromDate) return;
+        if (expToDate && d > expToDate) return;
+        const cat = normalizeExpCat(e.category);
+        rawEntries.push({
+          id: e.id,
+          date: d || '—',
+          category: cat,
+          description: e.description || cat,
+          method: e.method || 'نقدي',
+          amount: Number(e.amount) || 0,
+          source: 'expense_ledger',
+          serial: `EXP-${e.id.slice(-4)}`
+        });
+      });
+
+    (db.vouchers || [])
+      .filter(v => v.type === 'payment' && v.paymentCategory === 'expense' && isTargetBranch(v.branchId))
+      .forEach(v => {
+        const d = (v.date || '').slice(0, 10);
+        if (expFromDate && d < expFromDate) return;
+        if (expToDate && d > expToDate) return;
+        const cat = normalizeExpCat(v.expenseCategory || v.partyName);
+        rawEntries.push({
+          id: v.id,
+          date: d || '—',
+          category: cat,
+          description: v.description || cat,
+          method: v.paymentMethod || 'نقدي',
+          amount: Number(v.amount) || 0,
+          source: 'payment_voucher',
+          serial: v.number || `V-${v.id.slice(-4)}`
+        });
+      });
+
+    rawEntries.sort((a, b) => (b.date > a.date ? 1 : b.date < a.date ? -1 : 0));
+
+    const totalAmount = rawEntries.reduce((s, r) => s + r.amount, 0);
+    const catMap = new Map<string, { category: string; count: number; total: number }>();
+
+    rawEntries.forEach(r => {
+      const existing = catMap.get(r.category);
+      if (existing) {
+        existing.count += 1;
+        existing.total += r.amount;
+      } else {
+        catMap.set(r.category, { category: r.category, count: 1, total: r.amount });
+      }
+    });
+
+    const categories = Array.from(catMap.values())
+      .map(c => ({
+        ...c,
+        total: Number(c.total.toFixed(2)),
+        sharePct: totalAmount > 0 ? (c.total / totalAmount) * 100 : 0
+      }))
+      .sort((a, b) => b.total - a.total);
+
+    const visibleEntries =
+      expCategoryFilter === 'all'
+        ? rawEntries
+        : rawEntries.filter(r => r.category === expCategoryFilter);
+
+    return {
+      totalAmount: Number(totalAmount.toFixed(2)),
+      totalCount: rawEntries.length,
+      categories,
+      entries: rawEntries,
+      visibleEntries
+    };
+  }, [db.expenses, db.vouchers, selectedBranchId, expFromDate, expToDate, expCategoryFilter]);
 
   // Generate structured report blocks for UniversalPrintModal
   const generateReportBlocks = (): { title: string; docs: MovementPrintBlock[] } => {
@@ -566,6 +672,47 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
       return { title: `تقرير عملاء - ${branchLabel}`, docs: [doc] };
     }
 
+    if (activeReportTab === 'expenses_analysis') {
+      const periodText = expFromDate && expToDate
+        ? `من ${expFromDate} إلى ${expToDate}`
+        : expFromDate
+          ? `من ${expFromDate}`
+          : expToDate
+            ? `حتى ${expToDate}`
+            : 'كامل الفترة';
+      const doc: MovementPrintBlock = {
+        title: `تقرير تحليل المصروفات حسب البند - ${branchLabel}`,
+        serialNo: `#EXP-AN-${today}`,
+        date: today,
+        partyLabel: 'الفترة الزمنية',
+        partyName: `${periodText} (${expensesAnalysisData.totalCount} حركة)`,
+        badge: 'تحليل المصروفات',
+        tableHeaders: [
+          { label: 'بند المصروف', width: '40%', align: 'right' },
+          { label: 'عدد السندات/القيود', width: '20%', align: 'center' },
+          { label: 'النسبة من الإجمالي', width: '18%', align: 'center' },
+          { label: 'إجمالي المصروف', width: '22%', align: 'center' }
+        ],
+        tableRows: expensesAnalysisData.categories.map((c, idx) => ({
+          cols: [
+            c.category,
+            String(c.count),
+            `${c.sharePct.toFixed(1)}%`,
+            formatMoney(c.total, curr)
+          ],
+          isBold: idx === 0,
+          highlight: idx === 0
+        })),
+        summaryLines: [
+          { label: 'عدد بنود المصروفات النشطة', value: `${expensesAnalysisData.categories.length} بند` },
+          { label: 'إجمالي حركات الصرف في الفترة', value: `${expensesAnalysisData.totalCount} عملية` },
+          { label: 'الإجمالي العام للمصروفات', value: formatMoney(expensesAnalysisData.totalAmount, curr), isTotal: true, highlight: true }
+        ],
+        footerNotes: `تقرير تحليل المصروفات الموزعة حسب البند (${periodText}) — ${branchLabel}`
+      };
+      return { title: `تحليل المصروفات بالبند - ${branchLabel}`, docs: [doc] };
+    }
+
     // Default payables
     const doc: MovementPrintBlock = {
       title: `تقرير مستحقات الموردين (ذمم دائنة) - ${branchLabel}`,
@@ -747,6 +894,63 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
           footerNotes: 'هذا الكشف صادر إلكترونياً ويعتبر مطابقاً لحسابات المنشأة وفقاً للمستندات المعتمدة.',
           filename: `كشف_حساب_${party.name.replace(/\s+/g, '_')}_${today}.pdf`
         };
+      } else if (activeReportTab === 'expenses_analysis') {
+        const periodText = expFromDate && expToDate
+          ? `من ${expFromDate} إلى ${expToDate}`
+          : expFromDate
+            ? `من ${expFromDate}`
+            : expToDate
+              ? `حتى ${expToDate}`
+              : 'كافة الفترات';
+        config = {
+          title: `تقرير تحليل المصروفات حسب البند`,
+          subtitle: `توزيع الإيجارات والمصروفات العمومية والتشغيلية (${periodText}) — ${branchLabel}`,
+          serialNo: `EXP-${today}`,
+          date: today,
+          branchName: branchLabel,
+          badge: 'تحليل المصروفات',
+          settings: db.settings,
+          kpis: [
+            { label: 'إجمالي المصروفات في الفترة', value: formatMoney(expensesAnalysisData.totalAmount, curr), tone: 'negative' },
+            { label: 'عدد البنود النشطة', value: `${expensesAnalysisData.categories.length} بند`, tone: 'info' },
+            { label: 'عدد السندات والقيود', value: `${expensesAnalysisData.totalCount} حركة`, tone: 'neutral' },
+            {
+              label: 'أعلى بند صرفاً',
+              value: expensesAnalysisData.categories[0]?.category || 'لا يوجد',
+              tone: 'neutral'
+            }
+          ],
+          columns: [
+            { header: 'بند المصروف', width: '40%', align: 'right' },
+            { header: 'عدد الحركات', width: '18%', align: 'center', isNumeric: true },
+            { header: 'النسبة %', width: '18%', align: 'center', isNumeric: true },
+            { header: 'الإجمالي', width: '24%', align: 'center', isNumeric: true }
+          ],
+          rows: expensesAnalysisData.categories.map((c, idx) => ({
+            cells: [
+              c.category,
+              String(c.count),
+              `${c.sharePct.toFixed(1)}%`,
+              formatMoney(c.total, curr)
+            ],
+            isBold: idx === 0,
+            highlight: idx === 0
+          })),
+          totalsRow: {
+            cells: [
+              'الإجمالي العام للمصروفات',
+              String(expensesAnalysisData.totalCount),
+              '100%',
+              formatMoney(expensesAnalysisData.totalAmount, curr)
+            ]
+          },
+          summaryLines: [
+            { label: 'الفترة الزمنية للتقرير', value: periodText },
+            { label: 'إجمالي المصروفات التشغيلية والإيجارات', value: formatMoney(expensesAnalysisData.totalAmount, curr), isTotal: true, highlight: true }
+          ],
+          footerNotes: `يشمل هذا التحليل قيود دفتر المصروفات وسندات الصرف المصنفة كمصروفات تشغيلية دون تكرار.`,
+          filename: `تحليل_المصروفات_${today}.pdf`
+        };
       } else {
         const { title, docs } = generateReportBlocks();
         if (!docs.length) return;
@@ -892,6 +1096,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
       <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-200 pb-2">
         {[
           { id: 'income', label: 'قائمة الدخل والأرباح', icon: DollarSign },
+          { id: 'expenses_analysis', label: 'تحليل المصروفات حسب البند', icon: Wallet },
           { id: 'trial_balance', label: 'ميزان المراجعة', icon: Scale },
           { id: 'statement', label: 'كشف حساب عميل / مورد', icon: FileText },
           { id: 'sales', label: 'تقرير المبيعات والتحصيلات', icon: TrendingUp },
@@ -1422,6 +1627,244 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* 7. EXPENSES ANALYSIS REPORT (تقرير تحليل المصروفات حسب البند خلال فترة زمنية) */}
+      {activeReportTab === 'expenses_analysis' && (
+        <div className="space-y-4">
+          {/* Date Range & Quick Presets Bar */}
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="flex items-center gap-1.5 text-xs font-black text-slate-800">
+                <Calendar className="w-4 h-4 text-rose-600" />
+                <span>الفترة الزمنية:</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="text-slate-600 font-bold">من:</span>
+                <input
+                  type="date"
+                  value={expFromDate}
+                  onChange={e => setExpFromDate(e.target.value)}
+                  className="bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-mono font-bold text-slate-900 outline-none focus:border-slate-900"
+                />
+              </div>
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="text-slate-600 font-bold">إلى:</span>
+                <input
+                  type="date"
+                  value={expToDate}
+                  onChange={e => setExpToDate(e.target.value)}
+                  className="bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-mono font-bold text-slate-900 outline-none focus:border-slate-900"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                {
+                  label: 'اليوم',
+                  from: todayIsoDate,
+                  to: todayIsoDate
+                },
+                {
+                  label: 'هذا الشهر',
+                  from: currentMonthStartIso,
+                  to: todayIsoDate
+                },
+                {
+                  label: 'الشهر الماضي',
+                  from: (() => {
+                    const d = new Date();
+                    d.setDate(1);
+                    d.setMonth(d.getMonth() - 1);
+                    return d.toISOString().slice(0, 10);
+                  })(),
+                  to: (() => {
+                    const d = new Date();
+                    d.setDate(0);
+                    return d.toISOString().slice(0, 10);
+                  })()
+                },
+                {
+                  label: 'كامل الفترة',
+                  from: '',
+                  to: ''
+                }
+              ].map(preset => {
+                const isSelected = expFromDate === preset.from && expToDate === preset.to;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => {
+                      setExpFromDate(preset.from);
+                      setExpToDate(preset.to);
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer border ${
+                      isSelected
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* KPI Summary Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="bg-white p-4 rounded-xl border border-rose-200 shadow-2xs">
+              <span className="text-xs font-bold text-slate-500 block">إجمالي المصروفات في الفترة</span>
+              <span className="text-xl font-black font-mono text-rose-700 mt-1 block">
+                {formatMoney(expensesAnalysisData.totalAmount, db.settings.currency)}
+              </span>
+            </div>
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-2xs">
+              <span className="text-xs font-bold text-slate-500 block">عدد البنود والحركات المسجلة</span>
+              <span className="text-xl font-black font-mono text-slate-900 mt-1 block">
+                {expensesAnalysisData.categories.length} بند <span className="text-xs font-bold text-slate-500">({expensesAnalysisData.totalCount} عملية)</span>
+              </span>
+            </div>
+            <div className="bg-slate-900 text-white p-4 rounded-xl shadow-2xs">
+              <span className="text-xs font-bold text-slate-300 block">أعلى بند صرفاً</span>
+              {expensesAnalysisData.categories[0] ? (
+                <div className="mt-1 flex items-baseline justify-between gap-2">
+                  <span className="text-sm font-black text-amber-300 truncate">
+                    {expensesAnalysisData.categories[0].category}
+                  </span>
+                  <span className="text-sm font-black font-mono text-white shrink-0">
+                    {formatMoney(expensesAnalysisData.categories[0].total, db.settings.currency)}
+                  </span>
+                </div>
+              ) : (
+                <span className="text-sm font-bold text-slate-400 mt-1 block">لا توجد مصروفات بالفترة</span>
+              )}
+            </div>
+          </div>
+
+          {/* Category Breakdown Table + Share Bars */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-xs sm:text-sm font-black text-slate-900 flex items-center gap-1.5">
+                <PieChart className="w-4 h-4 text-rose-600" />
+                <span>توزيع إجمالي المصروفات حسب البند</span>
+              </h3>
+              {expCategoryFilter !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => setExpCategoryFilter('all')}
+                  className="text-[11px] font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-2.5 py-1 rounded-lg cursor-pointer"
+                >
+                  عرض جميع البنود ({expensesAnalysisData.categories.length})
+                </button>
+              )}
+            </div>
+
+            {expensesAnalysisData.categories.length === 0 ? (
+              <div className="p-8 text-center text-slate-400 font-bold text-xs">
+                لا توجد مصروفات أو سندات صرف مصروف مسجلة في هذه الفترة الزمنية
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-xs">
+                  <thead>
+                    <tr className="bg-slate-900 text-white font-bold">
+                      <th className="py-2.5 px-3">بند المصروف</th>
+                      <th className="py-2.5 px-3 text-center">عدد الحركات</th>
+                      <th className="py-2.5 px-3">الوزن النسبي</th>
+                      <th className="py-2.5 px-3 text-center">الإجمالي</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {expensesAnalysisData.categories.map(cat => {
+                      const isFocused = expCategoryFilter === cat.category;
+                      return (
+                        <tr
+                          key={cat.category}
+                          onClick={() => setExpCategoryFilter(prev => (prev === cat.category ? 'all' : cat.category))}
+                          className={`cursor-pointer transition-colors ${isFocused ? 'bg-rose-50/90' : 'hover:bg-slate-50'}`}
+                          title="اضغط لتصفية الحركات التفصيلية أدناه حسب هذا البند"
+                        >
+                          <td className="py-2.5 px-3 font-black text-slate-900">{cat.category}</td>
+                          <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700">{cat.count}</td>
+                          <td className="py-2.5 px-3 min-w-[160px]">
+                            <div className="flex items-center gap-2">
+                              <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                                <div
+                                  className="h-full bg-rose-600 rounded-full transition-all"
+                                  style={{ width: `${Math.min(100, Math.max(2, cat.sharePct))}%` }}
+                                />
+                              </div>
+                              <span className="font-mono font-bold text-[11px] text-slate-700 w-12 text-left">
+                                {cat.sharePct.toFixed(1)}%
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-center font-mono font-black text-rose-700">
+                            {formatMoney(cat.total, db.settings.currency)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-slate-100 border-t-2 border-slate-300 font-black text-slate-950">
+                      <td className="py-2.5 px-3">الإجمالي العام للمصروفات</td>
+                      <td className="py-2.5 px-3 text-center font-mono">{expensesAnalysisData.totalCount}</td>
+                      <td className="py-2.5 px-3 font-mono text-slate-700">100.0%</td>
+                      <td className="py-2.5 px-3 text-center font-mono text-rose-800">
+                        {formatMoney(expensesAnalysisData.totalAmount, db.settings.currency)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Itemized Ledger Table for Selected Period / Category */}
+          {expensesAnalysisData.visibleEntries.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-2xs overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                <span className="text-xs font-black text-slate-800">
+                  تفصيل الحركات {expCategoryFilter !== 'all' ? `— بند: ${expCategoryFilter}` : ''} ({expensesAnalysisData.visibleEntries.length})
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-xs">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200">
+                      <th className="py-2 px-3 text-center">التاريخ</th>
+                      <th className="py-2 px-3 text-center">المرجع</th>
+                      <th className="py-2 px-3">البند</th>
+                      <th className="py-2 px-3">البيان والتفاصيل</th>
+                      <th className="py-2 px-3 text-center">وسيلة الصرف</th>
+                      <th className="py-2 px-3 text-center">المبلغ</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {expensesAnalysisData.visibleEntries.map(entry => (
+                      <tr key={`${entry.source}-${entry.id}`} className="hover:bg-slate-50">
+                        <td className="py-2 px-3 text-center font-mono text-slate-600">{entry.date}</td>
+                        <td className="py-2 px-3 text-center font-mono text-[11px] font-bold text-slate-700">
+                          {entry.serial}
+                        </td>
+                        <td className="py-2 px-3 font-bold text-slate-900">{entry.category}</td>
+                        <td className="py-2 px-3 text-slate-700">{entry.description}</td>
+                        <td className="py-2 px-3 text-center text-slate-700">{entry.method}</td>
+                        <td className="py-2 px-3 text-center font-mono font-bold text-rose-700">
+                          {formatMoney(entry.amount, db.settings.currency)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
       </div>

@@ -80,6 +80,60 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   const lastInitKeyRef = useRef<string>('');
   const { isSubmitting, runWithLock } = useSubmitLock();
 
+  // Track mobile visualViewport above virtual keyboard so all ProductModal fields remain accessible
+  const [mobileVv, setMobileVv] = useState<{ top: number; height: number } | null>(() => {
+    if (typeof window === 'undefined' || window.innerWidth >= 640) return null;
+    const vv = window.visualViewport;
+    return vv ? { top: Math.max(0, Math.round(vv.offsetTop)), height: Math.max(220, Math.round(vv.height)) } : null;
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !isOpen) return;
+    const updateVv = () => {
+      if (window.innerWidth >= 640) {
+        setMobileVv(null);
+        return;
+      }
+      const vv = window.visualViewport;
+      if (vv) {
+        setMobileVv({
+          top: Math.max(0, Math.round(vv.offsetTop)),
+          height: Math.max(220, Math.round(vv.height))
+        });
+      } else {
+        setMobileVv({ top: 0, height: window.innerHeight });
+      }
+    };
+    updateVv();
+    window.addEventListener('resize', updateVv);
+    window.visualViewport?.addEventListener('resize', updateVv);
+    window.visualViewport?.addEventListener('scroll', updateVv);
+    return () => {
+      window.removeEventListener('resize', updateVv);
+      window.visualViewport?.removeEventListener('resize', updateVv);
+      window.visualViewport?.removeEventListener('scroll', updateVv);
+    };
+  }, [isOpen]);
+
+  const mobileOverlayStyle: React.CSSProperties | undefined = mobileVv
+    ? {
+        top: `${mobileVv.top}px`,
+        right: 0,
+        left: 0,
+        bottom: 'auto',
+        height: `${mobileVv.height}px`
+      }
+    : undefined;
+
+  const isCompactKeyboard = Boolean(mobileVv && mobileVv.height < 500);
+  const handleInputFocusEnsureVisible = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+    const el = e.currentTarget;
+    setTimeout(() => {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, 120);
+  };
+
   // Sync selected branch if activeBranchId changes
   useEffect(() => {
     if (activeBranchId) {
@@ -433,36 +487,43 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-start sm:items-center justify-center p-2 pt-3 sm:p-3 overflow-y-auto overflow-x-hidden">
-      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90dvh] my-auto flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+    <div
+      style={mobileOverlayStyle}
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-2xs flex items-start sm:items-center justify-center p-1 sm:p-3 overflow-hidden"
+    >
+      <div className="bg-white rounded-2xl w-full max-w-lg max-h-full sm:max-h-[90dvh] sm:my-auto flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150 mobile-modal-card">
         {/* Header */}
-        <div className="flex items-center justify-between p-3.5 sm:p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl gap-2 shrink-0">
+        <div className="flex items-center justify-between px-3 py-2 sm:p-4 border-b border-slate-200 bg-slate-50 rounded-t-2xl gap-2 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <div className="p-1.5 bg-blue-600 text-white rounded-lg shadow-2xs shrink-0">
-              <Package className="w-5 h-5" />
+            <div className="p-1 sm:p-1.5 bg-blue-600 text-white rounded-lg shadow-2xs shrink-0">
+              <Package className="w-4 h-4 sm:w-5 sm:h-5" />
             </div>
             <div className="min-w-0">
-              <h2 className="text-sm sm:text-base font-black text-slate-900 truncate">
+              <h2 className="text-xs sm:text-base font-black text-slate-900 truncate">
                 {product ? 'تعديل بيانات الصنف والتسعير' : 'إضافة صنف جديد للنظام'}
               </h2>
-              <span className="text-[11px] text-slate-500 font-medium block truncate">
-                {!product ? 'إدخال مستمر وسريع بدون مغادرة النافذة' : 'تحديث أسعار وتكاليف الصنف'}
-              </span>
+              {!isCompactKeyboard && (
+                <span className="text-[11px] text-slate-500 font-medium block truncate">
+                  {!product ? 'إدخال مستمر وسريع بدون مغادرة النافذة' : 'تحديث أسعار وتكاليف الصنف'}
+                </span>
+              )}
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 hover:bg-slate-200 text-slate-500 hover:text-slate-900 rounded-lg transition-colors cursor-pointer shrink-0"
+            className="p-1 sm:p-1.5 hover:bg-slate-200 text-slate-500 hover:text-slate-900 rounded-lg transition-colors cursor-pointer shrink-0"
             title="إغلاق"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4 sm:w-5 sm:h-5" />
           </button>
         </div>
 
-        <form onSubmit={e => handleSave(e, false)} className="p-3.5 sm:p-4 pb-28 sm:pb-4 space-y-3.5 overflow-y-auto overscroll-contain overflow-x-hidden flex-1 min-h-0 min-w-0 mobile-modal-body">
+        <form onSubmit={e => handleSave(e, false)} className="flex flex-col flex-1 min-h-0 overflow-hidden">
+          <div className="p-2.5 sm:p-4 space-y-2 sm:space-y-3 overflow-y-auto overscroll-contain overflow-x-hidden flex-1 min-h-0 min-w-0 mobile-modal-body mobile-modal-body-pinned">
           {/* Continuous addition success banner */}
           {continuousNotification && (
-            <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between gap-2 text-xs text-emerald-900 animate-in fade-in duration-200">
+            <div className="p-2 sm:p-3 bg-emerald-50 border border-emerald-300 rounded-xl flex items-center justify-between gap-2 text-xs text-emerald-900 animate-in fade-in duration-200">
               <div className="flex items-center gap-2 font-bold min-w-0">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                 <span className="break-words">{continuousNotification}</span>
@@ -478,16 +539,16 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           )}
 
           {/* Branch Specificity Selector & Notice */}
-          <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2 w-full min-w-0">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 w-full min-w-0">
-              <label className="text-xs font-black text-blue-900 flex items-center gap-1.5 shrink-0">
-                <Building2 className="w-4 h-4 text-blue-600 shrink-0" />
-                <span>الفرع المستهدف للتسعير والمخزون:</span>
+          <div className={`bg-blue-50/70 border border-blue-200 rounded-xl w-full min-w-0 ${isCompactKeyboard ? 'p-1.5 space-y-1' : 'p-2.5 sm:p-3 space-y-1.5'}`}>
+            <div className="flex items-center justify-between gap-2 w-full min-w-0">
+              <label className="text-[11px] sm:text-xs font-black text-blue-900 flex items-center gap-1 shrink-0">
+                <Building2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                <span>الفرع:</span>
               </label>
               <select
                 value={selectedBranchId}
                 onChange={e => setSelectedBranchId(e.target.value)}
-                className="w-full sm:w-auto sm:max-w-[230px] min-w-0 bg-white border border-blue-300 text-blue-900 font-bold text-xs rounded-lg px-2.5 py-1.5 outline-none shadow-2xs truncate"
+                className="flex-1 sm:max-w-[230px] min-w-0 bg-white border border-blue-300 text-blue-900 font-bold text-xs rounded-lg px-2 py-1 outline-none shadow-2xs truncate"
               >
                 {branches.map(b => (
                   <option key={b.id} value={b.id}>
@@ -496,57 +557,63 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                 ))}
               </select>
             </div>
-            <div className="flex items-start gap-1.5 text-[10.5px] text-blue-800">
-              <Info className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
-              <span className="break-words">
-                الأصناف موحدة في كل الفروع، لكن <strong>الأعداد والأسعار مستقلة تماماً</strong> وتدخل حسب هذا الفرع ولا تؤثر على أي فرع آخر.
-              </span>
-            </div>
+            {!isCompactKeyboard && (
+              <div className="flex items-start gap-1.5 text-[10px] sm:text-[10.5px] text-blue-800">
+                <Info className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
+                <span className="break-words">
+                  الأصناف موحدة في كل الفروع، لكن <strong>الأعداد والأسعار مستقلة تماماً</strong> حسب هذا الفرع.
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Product Name */}
           <div>
-            <label className="block text-[11px] font-bold text-slate-700 mb-1">اسم الصنف الكامل *</label>
+            <label className="block text-[10.5px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1">اسم الصنف الكامل *</label>
             <input
               ref={nameInputRef}
               type="text"
               required
               value={name}
+              onFocus={handleInputFocusEnsureVisible}
               onChange={e => setName(e.target.value)}
               placeholder="مثال: شاشة سامسونج 27 بوصة"
-              className="w-full min-w-0 px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold focus:bg-white focus:border-blue-500 outline-none transition-colors"
+              className="w-full min-w-0 px-2.5 py-1.5 sm:py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold focus:bg-white focus:border-blue-500 outline-none transition-colors"
             />
           </div>
 
           {/* Code, Barcode, Unit */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-3 gap-1.5 sm:gap-2.5">
             <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">كود الصنف</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1">كود الصنف</label>
               <input
                 type="text"
                 required
                 value={code}
+                onFocus={handleInputFocusEnsureVisible}
                 onChange={e => setCode(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
+                className="w-full px-1.5 sm:px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
             <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">الباركود</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1">الباركود</label>
               <input
                 type="text"
                 value={barcode}
+                onFocus={handleInputFocusEnsureVisible}
                 onChange={e => setBarcode(e.target.value)}
                 placeholder="622..."
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-center focus:bg-white focus:border-blue-500 outline-none"
+                className="w-full px-1.5 sm:px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
             <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">الوحدة</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1">الوحدة</label>
               <input
                 type="text"
                 value={unit}
+                onFocus={handleInputFocusEnsureVisible}
                 onChange={e => setUnit(e.target.value)}
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-center focus:bg-white focus:border-blue-500 outline-none"
+                className="w-full px-1.5 sm:px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
           </div>
@@ -743,63 +810,63 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             )}
 
             {/* Price Inputs Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div className="grid grid-cols-3 gap-1.5 sm:gap-2.5">
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر الشراء / التكلفة</label>
+                <label className="block text-[10px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1">سعر الشراء</label>
                 <input
                   type="number"
                   min="0"
                   step="any"
                   value={buyPrice === 0 ? '' : buyPrice}
                   placeholder="0.00"
-                  onFocus={e => e.target.select()}
+                  onFocus={handleInputFocusEnsureVisible}
                   onChange={e => setBuyPrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
+                  className="w-full px-1.5 sm:px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر البيع قطاعي (اتركه فارغاً)</label>
+                <label className="block text-[10px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1">بيع قطاعي</label>
                 <input
                   type="number"
                   min="0"
                   step="any"
                   value={sellPrice === 0 ? '' : sellPrice}
-                  placeholder="فارغ"
-                  onFocus={e => e.target.select()}
+                  placeholder="0.00"
+                  onFocus={handleInputFocusEnsureVisible}
                   onChange={e => setSellPrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center text-emerald-700 focus:bg-white focus:border-blue-500 outline-none"
+                  className="w-full px-1.5 sm:px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center text-emerald-700 focus:bg-white focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1">سعر الجملة (اتركه فارغاً)</label>
+                <label className="block text-[10px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1">سعر الجملة</label>
                 <input
                   type="number"
                   min="0"
                   step="any"
                   value={wholesalePrice === 0 ? '' : wholesalePrice}
-                  placeholder="فارغ"
-                  onFocus={e => e.target.select()}
+                  placeholder="0.00"
+                  onFocus={handleInputFocusEnsureVisible}
                   onChange={e => setWholesalePrice(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
-                  className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
+                  className="w-full px-1.5 sm:px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
                 />
               </div>
             </div>
           </div>
 
           {/* Stock Quantities */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+          <div className="grid grid-cols-2 gap-2 sm:gap-3 pt-1">
             <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                رصيد المخزون بـ ({currentBranch.name})
+              <label className="block text-[10px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1 truncate">
+                رصيد المخزون ({currentBranch.name})
               </label>
               <input
                 type="number"
                 step="any"
                 value={initialQty === 0 ? '' : initialQty}
                 placeholder="0"
-                onFocus={e => e.target.select()}
+                onFocus={handleInputFocusEnsureVisible}
                 onChange={e => setInitialQty(e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)}
-                className={`w-full px-2.5 py-1.5 bg-slate-50 border rounded-lg text-xs font-mono font-black text-center focus:bg-white focus:border-blue-500 outline-none ${
+                className={`w-full px-2 py-1.5 bg-slate-50 border rounded-lg text-xs font-mono font-black text-center focus:bg-white focus:border-blue-500 outline-none ${
                   initialQty < 0
                     ? 'border-red-400 text-red-600 bg-red-50/50'
                     : 'border-slate-200 text-blue-700'
@@ -807,15 +874,15 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               />
             </div>
             <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">الحد الأدنى للطلب بالمخزن (قارب على النفاد)</label>
+              <label className="block text-[10px] sm:text-[11px] font-bold text-slate-700 mb-0.5 sm:mb-1 truncate">الحد الأدنى للطلب</label>
               <input
                 type="number"
                 min="0"
                 value={minStock === 0 || minStock === 1 ? '' : minStock}
                 placeholder="1"
-                onFocus={e => e.target.select()}
+                onFocus={handleInputFocusEnsureVisible}
                 onChange={e => setMinStock(e.target.value === '' ? 1 : parseInt(e.target.value) || 0)}
-                className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
+                className="w-full px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono font-bold text-center focus:bg-white focus:border-blue-500 outline-none"
               />
             </div>
           </div>
@@ -848,25 +915,26 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               </div>
             </div>
           )}
+          </div>
 
-          {/* Modal Actions */}
-          <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+          {/* Sticky Pinned Modal Actions (Always visible above keyboard) */}
+          <div className="px-2.5 py-2 sm:px-4 sm:py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between gap-2 shrink-0">
             <button
               type="button"
               onClick={onClose}
-              className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+              className="px-3 py-1.5 sm:py-2 bg-white hover:bg-slate-200 border border-slate-300 text-slate-700 rounded-lg text-xs font-bold transition-colors cursor-pointer shrink-0"
             >
               إلغاء
             </button>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5 sm:gap-2">
               {!product ? (
                 <>
                   <button
                     type="button"
                     disabled={isSubmitting}
                     onClick={e => handleSave(e, true)}
-                    className="px-3.5 py-2 bg-slate-200 hover:bg-slate-300 disabled:opacity-50 text-slate-800 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                    className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 bg-slate-200 hover:bg-slate-300 disabled:opacity-50 text-slate-800 rounded-lg text-[11px] sm:text-xs font-bold transition-colors cursor-pointer"
                     title="حفظ هذا الصنف والخروج من النافذة"
                   >
                     حفظ وإغلاق
@@ -874,19 +942,19 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                   <button
                     type="submit"
                     disabled={isSubmitting}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
+                    className="px-3 sm:px-4 py-1.5 sm:py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-[11px] sm:text-xs font-bold transition-colors shadow-xs flex items-center gap-1 cursor-pointer"
                   >
-                    <Check className="w-4 h-4 shrink-0" />
-                    <span>{isSubmitting ? 'جارٍ الحفظ...' : 'حفظ وتفريغ لإدخال صنف جديد'}</span>
+                    <Check className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+                    <span>{isSubmitting ? 'جارٍ الحفظ...' : (isCompactKeyboard ? 'حفظ وتفريغ' : 'حفظ وتفريغ لصنف جديد')}</span>
                   </button>
                 </>
               ) : (
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="px-5 py-2 bg-slate-900 hover:bg-black disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                  className="px-4 sm:px-5 py-1.5 sm:py-2 bg-slate-900 hover:bg-black disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
                 >
-                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ تعديل بيانات الصنف'}
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ التعديلات'}
                 </button>
               )}
             </div>

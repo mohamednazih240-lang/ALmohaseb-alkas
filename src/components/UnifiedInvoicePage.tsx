@@ -444,6 +444,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [rapidItemTax, setRapidItemTax] = useState<string>('');
   const [rapidItemTaxType, setRapidItemTaxType] = useState<'fixed' | 'percent'>('fixed');
   const [rapidItemTotal, setRapidItemTotal] = useState<string>('');
+  const [showRapidDiscTax, setShowRapidDiscTax] = useState<boolean>(false);
 
   // Enter-key navigation field refs
   const rapidNameRef = useRef<HTMLInputElement>(null);
@@ -540,6 +541,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     : undefined;
 
   const isInlineKeyboardActive = Boolean(mobileVv && !hasAnyOpenSubmodal && mobileVv.height < 470);
+  const isModalKeyboardCompact = Boolean(mobileVv && mobileVv.height < 500);
+
+  const ensureFieldVisibleOnFocus = (el: HTMLElement | null) => {
+    if (!el) return;
+    setTimeout(() => {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, 110);
+  };
 
   const closeTopmostSubmodal = () => {
     if (showRapidItemModal) {
@@ -973,6 +982,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setRapidItemTax('');
     setRapidItemTaxType('fixed');
     setRapidItemTotal('');
+    setShowRapidDiscTax(false);
     setShowRapidDropdown(false);
     setShowRapidItemModal(true);
     setTimeout(() => rapidNameRef.current?.focus(), 100);
@@ -991,6 +1001,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setRapidItemTax(it.taxRate ? String(it.taxRate) : '');
     setRapidItemTaxType('fixed');
     setRapidItemTotal(it.total ? String(it.total.toFixed(2)) : '');
+    setShowRapidDiscTax(Boolean(it.discount || it.taxRate));
     setShowRapidDropdown(false);
     setShowRapidItemModal(true);
     setTimeout(() => rapidNameRef.current?.focus(), 100);
@@ -1775,13 +1786,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (!approvalNote && (mode === 'sale' || mode === 'wholesale')) {
       const belowCost: BelowCostItem[] = [];
       invoiceItems.forEach(it => {
-        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName);
+        const pInfo = getLatestVerifiedPurchaseInfo(db, it.productId, it.productName, editingInvoice?.id);
         const sellPrice = Number(it.unitPrice) || 0;
+        const qty = Number(it.qty) || 0;
         if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined) {
           if (sellPrice < pInfo.price) {
-            const lossPerUnit = pInfo.price - sellPrice;
-            const qty = Number(it.qty) || 0;
-            const totalLoss = lossPerUnit * qty;
+            const lossPerUnit = roundMoney(pInfo.price - sellPrice);
+            const totalLoss = roundMoney(lossPerUnit * qty);
             const lossPercentage = pInfo.price > 0 ? (lossPerUnit / pInfo.price) * 100 : 0;
             belowCost.push({
               productId: it.productId,
@@ -1809,7 +1820,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             verifiedPurchasePrice: 0,
             currentSellingPrice: sellPrice,
             lossPerUnit: 0,
-            qty: Number(it.qty) || 0,
+            qty,
             totalLoss: 0,
             lossPercentage: 0,
             hasVerifiedPurchase: false
@@ -4618,76 +4629,80 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </div>
 
               {/* Modal Content */}
-              <div className="p-2.5 sm:p-4 space-y-2.5 overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body mobile-modal-body-pinned">
+              <div className="p-2 sm:p-4 space-y-2 sm:space-y-2.5 overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body mobile-modal-body-pinned">
                 {/* Product Info Bar */}
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3">
+                <div className={`bg-slate-50 border border-slate-200 rounded-lg ${isModalKeyboardCompact ? 'p-2' : 'p-2.5 sm:p-3'}`}>
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <h4 className="text-base font-bold text-slate-900 leading-snug">
+                    <div className="min-w-0">
+                      <h4 className="text-sm sm:text-base font-bold text-slate-900 leading-snug truncate">
                         {selectedCardProduct.name}
                       </h4>
-                      <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[10px] text-slate-600">
-                        <span className="bg-white px-2 py-0.5 rounded border border-slate-200 font-mono font-bold text-blue-700">
-                          كود: {selectedCardProduct.code}
-                        </span>
-                        {selectedCardProduct.barcode && (
-                          <span className="bg-white px-2 py-0.5 rounded border border-slate-200 font-mono text-slate-700">
-                            باركود: {selectedCardProduct.barcode}
+                      {!isModalKeyboardCompact && (
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[10px] text-slate-600">
+                          <span className="bg-white px-2 py-0.5 rounded border border-slate-200 font-mono font-bold text-blue-700">
+                            كود: {selectedCardProduct.code}
                           </span>
-                        )}
-                        <span className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700">
-                          المجموعة: {selectedCardProduct.category || 'عامة'}
-                        </span>
-                        <span className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700">
-                          الوحدة: {selectedCardProduct.unit || 'قطعة'}
-                        </span>
-                      </div>
+                          {selectedCardProduct.barcode && (
+                            <span className="bg-white px-2 py-0.5 rounded border border-slate-200 font-mono text-slate-700">
+                              باركود: {selectedCardProduct.barcode}
+                            </span>
+                          )}
+                          <span className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700">
+                            المجموعة: {selectedCardProduct.category || 'عامة'}
+                          </span>
+                          <span className="bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700">
+                            الوحدة: {selectedCardProduct.unit || 'قطعة'}
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Stock badge */}
                     <div className="text-left shrink-0">
-                      <div className={`px-2.5 py-1 rounded-md text-[10px] font-bold border ${
+                      <div className={`px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-md text-[10px] font-bold border ${
                         liveCardStock <= 0
                           ? 'bg-amber-50 text-amber-800 border-amber-300'
                           : 'bg-emerald-50 text-emerald-700 border-emerald-300'
                       }`}>
-                        <span className="block text-[8px] text-slate-500 font-normal">الرصيد المتبقي بالمخزن</span>
+                        {!isModalKeyboardCompact && <span className="block text-[8px] text-slate-500 font-normal">المتبقي بالمخزن</span>}
                         <span className="font-mono text-xs">{liveCardStock}</span> {selectedCardProduct.unit || 'قطعة'}
                       </div>
                       {existingRow && (
-                        <div className="mt-1 text-[8.5px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-center">
-                          مدرج حالياً: {existingRow.qty}
+                        <div className="mt-0.5 text-[8.5px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-center">
+                          مدرج: {existingRow.qty}
                         </div>
                       )}
                     </div>
                   </div>
 
                   {isNegativeStock && (
-                    <div className="mt-2 text-[10px] bg-amber-50 text-amber-900 p-2 rounded-md border border-amber-300 flex items-center gap-1.5 font-bold">
+                    <div className="mt-1.5 text-[9.5px] bg-amber-50 text-amber-900 p-1.5 rounded-md border border-amber-300 flex items-center gap-1.5 font-bold">
                       <AlertCircle className="w-3.5 h-3.5 shrink-0 text-amber-600" />
-                      <span>رصيد الصنف نفذ ({liveCardStock}) — سيتم إضافته والبيع بالسالب عادي لحين شرائه وتسويته تلقائياً.</span>
+                      <span>رصيد الصنف نفذ ({liveCardStock}) — سيتم البيع بالسالب لحين شرائه.</span>
                     </div>
                   )}
                 </div>
 
                 {/* Preset System Prices quick clickable pills */}
                 <div>
-                  <div className="text-[10px] font-bold text-slate-600 mb-1 flex items-center justify-between">
-                    <span>الأسعار المسجلة (مثبت على السعر المختار لحين تعديله):</span>
-                    <span className="text-[9px] text-slate-500 font-mono">السعر الحالي: {itemCardPrice || 0} {db.settings.currency}</span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
+                  {!isModalKeyboardCompact && (
+                    <div className="text-[10px] font-bold text-slate-600 mb-1 flex items-center justify-between">
+                      <span>الأسعار المسجلة (مثبت على السعر المختار لحين تعديله):</span>
+                      <span className="text-[9px] text-slate-500 font-mono">الحالي: {itemCardPrice || 0} {db.settings.currency}</span>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-3 gap-1.5 sm:gap-2">
                     <button
                       type="button"
                       onClick={() => setItemCardPrice(String(branchProd.sellPrice))}
-                      className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
+                      className={`p-1.5 sm:p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
                         Math.abs(priceNum - branchProd.sellPrice) < 0.001
                           ? 'bg-emerald-50 border-emerald-500 ring-2 ring-emerald-500/20 shadow-xs'
                           : 'bg-white border-slate-200 hover:bg-slate-50'
                       }`}
                     >
-                      <span className="text-[9px] text-slate-500 font-semibold">سعر البيع (نقدي)</span>
-                      <span className="font-mono font-bold text-xs text-emerald-700">
+                      <span className="text-[8.5px] sm:text-[9px] text-slate-500 font-semibold">سعر البيع</span>
+                      <span className="font-mono font-bold text-[11px] sm:text-xs text-emerald-700">
                         {branchProd.sellPrice.toFixed(2)} <small className="text-[8px] font-normal">{db.settings.currency}</small>
                       </span>
                     </button>
@@ -4695,14 +4710,14 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     <button
                       type="button"
                       onClick={() => setItemCardPrice(String(branchProd.wholesalePrice))}
-                      className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
+                      className={`p-1.5 sm:p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
                         Math.abs(priceNum - branchProd.wholesalePrice) < 0.001
                           ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20 shadow-xs'
                           : 'bg-white border-slate-200 hover:bg-slate-50'
                       }`}
                     >
-                      <span className="text-[9px] text-slate-500 font-semibold">سعر الجملة</span>
-                      <span className="font-mono font-bold text-xs text-amber-700">
+                      <span className="text-[8.5px] sm:text-[9px] text-slate-500 font-semibold">سعر الجملة</span>
+                      <span className="font-mono font-bold text-[11px] sm:text-xs text-amber-700">
                         {branchProd.wholesalePrice.toFixed(2)} <small className="text-[8px] font-normal">{db.settings.currency}</small>
                       </span>
                     </button>
@@ -4710,32 +4725,32 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     <button
                       type="button"
                       onClick={() => setItemCardPrice(String(lastBuyInfo.price))}
-                      className={`p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
+                      className={`p-1.5 sm:p-2 rounded-lg border text-right transition-all flex flex-col gap-0.5 cursor-pointer ${
                         Math.abs(priceNum - lastBuyInfo.price) < 0.001
                           ? 'bg-blue-50 border-blue-500 ring-2 ring-blue-500/20 shadow-xs'
                           : 'bg-white border-slate-200 hover:bg-slate-50'
                       }`}
                     >
-                      <span className="text-[9px] text-slate-500 font-semibold flex items-center justify-between gap-1">
-                        <span>آخر سعر شراء</span>
+                      <span className="text-[8.5px] sm:text-[9px] text-slate-500 font-semibold flex items-center justify-between gap-1">
+                        <span>آخر شراء</span>
                         {lastBuyInfo.invoiceNumber && (
                           <span className="text-[7.5px] font-mono text-blue-600">#{lastBuyInfo.invoiceNumber}</span>
                         )}
                       </span>
-                      <span className="font-mono font-bold text-xs text-blue-700">
+                      <span className="font-mono font-bold text-[11px] sm:text-xs text-blue-700">
                         {lastBuyInfo.price.toFixed(2)} <small className="text-[8px] font-normal">{db.settings.currency}</small>
                       </span>
                     </button>
                   </div>
                 </div>
 
-                {/* Primary Inputs: Quantity & Price */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                {/* Primary Inputs: Quantity & Price (Always side-by-side 2 columns so both stay visible above keyboard) */}
+                <div className="grid grid-cols-2 gap-2 sm:gap-3 pt-0.5">
                   {/* Field 1: Quantity */}
-                  <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-300 flex flex-col gap-1.5">
-                    <label className="text-xs font-bold text-slate-800 flex items-center justify-between">
-                      <span>الكمية أو العدد للصنف *</span>
-                      <span className="text-[10px] text-slate-500 font-normal">({selectedCardProduct.unit || 'قطعة'})</span>
+                  <div className="bg-slate-50 p-2 sm:p-2.5 rounded-lg border border-slate-300 flex flex-col gap-1">
+                    <label className="text-[11px] sm:text-xs font-bold text-slate-800 flex items-center justify-between">
+                      <span>الكمية *</span>
+                      <span className="text-[9.5px] text-slate-500 font-normal">({selectedCardProduct.unit || 'قطعة'})</span>
                     </label>
 
                     <div className="flex items-center gap-1">
@@ -4745,7 +4760,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           const current = parseFloat(itemCardQty) || 0;
                           setItemCardQty(String(Math.max(1, current - 1)));
                         }}
-                        className="w-8 h-8 rounded bg-slate-200 hover:bg-slate-300 font-bold text-slate-700 flex items-center justify-center shrink-0 text-sm cursor-pointer"
+                        className="w-7 h-7 sm:w-8 sm:h-8 rounded bg-slate-200 hover:bg-slate-300 font-bold text-slate-700 flex items-center justify-center shrink-0 text-sm cursor-pointer"
                         title="نقصان 1"
                       >
                         <Minus className="w-3.5 h-3.5" />
@@ -4757,7 +4772,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         min="0.01"
                         step="any"
                         value={itemCardQty}
-                        onFocus={e => e.target.select()}
+                        onFocus={e => {
+                          e.target.select();
+                          ensureFieldVisibleOnFocus(e.currentTarget);
+                        }}
                         onChange={e => setItemCardQty(e.target.value)}
                         onKeyDown={e => {
                           if (e.key === 'Enter') {
@@ -4765,8 +4783,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                             confirmAddItemFromCard(false);
                           }
                         }}
-                        className="w-full text-center font-mono font-bold text-base h-8 rounded border border-slate-300 bg-white text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
-                        placeholder="أدخل الكمية..."
+                        className="w-full text-center font-mono font-bold text-sm sm:text-base h-7 sm:h-8 rounded border border-slate-300 bg-white text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                        placeholder="الكمية..."
                       />
 
                       <button
@@ -4775,7 +4793,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                           const current = parseFloat(itemCardQty) || 0;
                           setItemCardQty(String(current + 1));
                         }}
-                        className="w-8 h-8 rounded bg-slate-200 hover:bg-slate-300 font-bold text-slate-700 flex items-center justify-center shrink-0 text-sm cursor-pointer"
+                        className="w-7 h-7 sm:w-8 sm:h-8 rounded bg-slate-200 hover:bg-slate-300 font-bold text-slate-700 flex items-center justify-center shrink-0 text-sm cursor-pointer"
                         title="زيادة 1"
                       >
                         <Plus className="w-3.5 h-3.5" />
@@ -4783,44 +4801,44 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     </div>
 
                     {/* Quick quantity chips */}
-                    <div className="flex items-center justify-between gap-1 pt-0.5">
-                      {[1, 2, 5, 10, 20, 50].map(n => (
-                        <button
-                          key={n}
-                          type="button"
-                          onClick={() => setItemCardQty(String(n))}
-                          className={`flex-1 py-0.5 rounded text-[9px] font-bold border transition-colors cursor-pointer ${
-                            parseFloat(itemCardQty) === n
-                              ? 'bg-blue-600 text-white border-blue-600'
-                              : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
-                          }`}
-                        >
-                          {n}
-                        </button>
-                      ))}
-                    </div>
+                    {!isModalKeyboardCompact && (
+                      <div className="flex items-center justify-between gap-1 pt-0.5">
+                        {[1, 2, 5, 10, 20, 50].map(n => (
+                          <button
+                            key={n}
+                            type="button"
+                            onClick={() => setItemCardQty(String(n))}
+                            className={`flex-1 py-0.5 rounded text-[9px] font-bold border transition-colors cursor-pointer ${
+                              parseFloat(itemCardQty) === n
+                                ? 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            {n}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Field 2: Price */}
-                  <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-300 flex flex-col gap-1.5">
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs font-bold text-slate-800">
-                        سعر الصنف (الوحدة) *
+                  <div className="bg-slate-50 p-2 sm:p-2.5 rounded-lg border border-slate-300 flex flex-col gap-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <label className="text-[11px] sm:text-xs font-bold text-slate-800 truncate">
+                        السعر ({db.settings.currency}) *
                       </label>
                       {itemCardPrice.trim() !== '' && isPriceModified ? (
-                        <span className="text-[8.5px] font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded flex items-center gap-1">
-                          <Edit3 className="w-2.5 h-2.5" />
-                          <span>سعر يدوي معدل</span>
+                        <span className="text-[8px] font-bold text-amber-800 bg-amber-100 px-1 py-0.5 rounded shrink-0">
+                          معدل
                         </span>
                       ) : (
                         <button
                           type="button"
                           onClick={() => setItemCardPrice(String(itemCardDefaultPrice))}
-                          className="text-[8.5px] font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 px-1.5 py-0.5 rounded flex items-center gap-1 cursor-pointer"
+                          className="text-[8px] font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 px-1 py-0.5 rounded shrink-0 cursor-pointer"
                           title="اضغط لتأكيد السعر المسجل"
                         >
-                          <CheckCircle2 className="w-2.5 h-2.5" />
-                          <span>السعر مضبوط ({itemCardDefaultPrice.toFixed(2)})</span>
+                          مثبت
                         </button>
                       )}
                     </div>
@@ -4831,7 +4849,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         min="0"
                         step="any"
                         value={itemCardPrice}
-                        onFocus={e => e.target.select()}
+                        onFocus={e => {
+                          e.target.select();
+                          ensureFieldVisibleOnFocus(e.currentTarget);
+                        }}
                         onChange={e => setItemCardPrice(e.target.value)}
                         onKeyDown={e => {
                           if (e.key === 'Enter') {
@@ -4839,81 +4860,79 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                             confirmAddItemFromCard(false);
                           }
                         }}
-                        className={`w-full text-center font-mono font-bold text-base h-8 rounded border bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 ${
+                        className={`w-full text-center font-mono font-bold text-sm sm:text-base h-7 sm:h-8 rounded border bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 ${
                           itemCardPrice.trim() !== '' && isPriceModified ? 'border-amber-400 text-amber-800' : 'border-slate-300 text-emerald-700'
                         }`}
-                        placeholder="أدخل السعر يدوياً..."
+                        placeholder="السعر..."
                       />
-                      <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 font-bold pointer-events-none">
-                        {db.settings.currency}
-                      </span>
                     </div>
 
-                    <div className="text-[8.5px] text-slate-500 text-center flex items-center justify-center gap-1">
-                      {itemCardPrice.trim() !== '' ? (
-                        isPriceModified ? (
-                          <span>السعر الأصلي: <strong>{itemCardDefaultPrice.toFixed(2)}</strong> (اضغط لاستعادته: <button type="button" onClick={() => setItemCardPrice(String(itemCardDefaultPrice))} className="text-blue-600 underline font-bold cursor-pointer">استعادة</button>)</span>
+                    {!isModalKeyboardCompact && (
+                      <div className="text-[8.5px] text-slate-500 text-center flex items-center justify-center gap-1">
+                        {itemCardPrice.trim() !== '' ? (
+                          isPriceModified ? (
+                            <span>الأصلي: <strong>{itemCardDefaultPrice.toFixed(2)}</strong> (<button type="button" onClick={() => setItemCardPrice(String(itemCardDefaultPrice))} className="text-blue-600 underline font-bold cursor-pointer">استعادة</button>)</span>
+                          ) : (
+                            <span className="text-emerald-700 font-semibold">✓ يطابق السعر المسجل</span>
+                          )
                         ) : (
-                          <span className="text-emerald-700 font-semibold">✓ السعر المدخل يطابق السعر المسجل</span>
-                        )
-                      ) : (
-                        <span className="text-slate-600">
-                          الخانة خالية. يمكنك إدخال السعر يدوياً أو سيتم اعتماد السعر المضبوط تلقائياً: <strong>{itemCardDefaultPrice.toFixed(2)} {db.settings.currency}</strong>
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Live Warning for Below Cost or Unverified Cost in Sales */}
-                    {(mode === 'sale' || mode === 'wholesale') && (() => {
-                      const pInfo = getLatestVerifiedPurchaseInfo(db, selectedCardProduct.id, selectedCardProduct.name);
-                      const currentPrice = parseFloat(itemCardPrice) || itemCardDefaultPrice;
-                      if (!pInfo.hasVerifiedPurchase) {
-                        return (
-                          <div className="bg-slate-100 border border-slate-300 rounded p-1.5 text-[9.5px] text-slate-700 font-bold flex items-center justify-between">
-                            <span>ℹ️ تكلفة الشراء غير محددة</span>
-                            <span className="text-[8.5px] text-slate-500">لم تُسجّل فواتير شراء سابقة</span>
-                          </div>
-                        );
-                      }
-                      if (pInfo.price !== undefined && currentPrice < pInfo.price) {
-                        const loss = pInfo.price - currentPrice;
-                        return (
-                          <div className="bg-rose-50 border border-rose-300 rounded p-1.5 text-[9.5px] text-rose-800 font-bold flex items-center justify-between">
-                            <span>⚠️ تنبيه بيع بأقل من التكلفة المعتمدة ({pInfo.price.toFixed(2)} {db.settings.currency})</span>
-                            <span className="font-mono text-rose-700">خسارة متوقعة: -{loss.toFixed(2)}</span>
-                          </div>
-                        );
-                      }
-                      return null;
-                    })()}
-
-                    {/* Live Warning for Purchase Price Change in Purchases */}
-                    {mode === 'purchase' && (() => {
-                      const pInfo = getLatestVerifiedPurchaseInfo(db, selectedCardProduct.id, selectedCardProduct.name, editingInvoice?.id);
-                      const currentPrice = parseFloat(itemCardPrice) || itemCardDefaultPrice;
-                      if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined && Math.abs(currentPrice - pInfo.price) > 0.001) {
-                        const diff = currentPrice - pInfo.price;
-                        const isIncrease = diff > 0;
-                        return (
-                          <div className={`border rounded p-1.5 text-[9.5px] font-bold flex items-center justify-between ${isIncrease ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-emerald-50 border-emerald-300 text-emerald-900'}`}>
-                            <span>{isIncrease ? '🔺 سعر الشراء أعلى من السابق' : '🔻 سعر الشراء أقل من السابق'} (السابق: {pInfo.price.toFixed(2)} {db.settings.currency})</span>
-                            <span className="font-mono">{isIncrease ? `+${diff.toFixed(2)}` : diff.toFixed(2)}</span>
-                          </div>
-                        );
-                      }
-                      return null;
-                    })()}
+                          <span className="text-slate-600">الافتراضي: <strong>{itemCardDefaultPrice.toFixed(2)}</strong></span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* Optional Spec / Note */}
-                <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200">
-                  <label className="text-[10px] font-bold text-slate-700 block mb-1">
-                    ملاحظات أو مواصفات خاصة للصنف (اختياري)
+                {/* Live Warning for Below Cost Selling in Sales */}
+                {(mode === 'sale' || mode === 'wholesale') && (() => {
+                  const pInfo = getLatestVerifiedPurchaseInfo(db, selectedCardProduct.id, selectedCardProduct.name, editingInvoice?.id);
+                  const currentPrice = parseFloat(itemCardPrice) || itemCardDefaultPrice;
+                  if (!pInfo.hasVerifiedPurchase) {
+                    return (
+                      <div className="bg-slate-100 border border-slate-300 rounded p-1.5 text-[9.5px] text-slate-700 font-bold flex items-center justify-between">
+                        <span>ℹ️ تكلفة الشراء غير محددة</span>
+                        <span className="text-[8.5px] text-slate-500">لم تُسجّل فواتير شراء سابقة</span>
+                      </div>
+                    );
+                  }
+                  if (pInfo.price !== undefined && currentPrice < pInfo.price) {
+                    const loss = roundMoney(pInfo.price - currentPrice);
+                    return (
+                      <div className="bg-rose-50 border border-rose-300 rounded p-1.5 text-[9.5px] text-rose-800 font-bold flex items-center justify-between gap-2">
+                        <span>⚠️ أقل من سعر الشراء الموثق ({pInfo.price.toFixed(2)} {db.settings.currency})</span>
+                        <span className="font-mono text-rose-700 shrink-0">-{loss.toFixed(2)}</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* Live Warning for Purchase Price Change in Purchases */}
+                {mode === 'purchase' && (() => {
+                  const pInfo = getLatestVerifiedPurchaseInfo(db, selectedCardProduct.id, selectedCardProduct.name, editingInvoice?.id);
+                  const currentPrice = parseFloat(itemCardPrice) || itemCardDefaultPrice;
+                  if (pInfo.hasVerifiedPurchase && pInfo.price !== undefined && Math.abs(currentPrice - pInfo.price) > 0.001) {
+                    const diff = currentPrice - pInfo.price;
+                    const isIncrease = diff > 0;
+                    return (
+                      <div className={`border rounded p-1.5 text-[9.5px] font-bold flex items-center justify-between ${isIncrease ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-emerald-50 border-emerald-300 text-emerald-900'}`}>
+                        <span>{isIncrease ? '🔺 سعر الشراء أعلى من السابق' : '🔻 سعر الشراء أقل من السابق'} (السابق: {pInfo.price.toFixed(2)} {db.settings.currency})</span>
+                        <span className="font-mono">{isIncrease ? `+${diff.toFixed(2)}` : diff.toFixed(2)}</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+
+                {/* Optional Spec / Note + Live Total inline on mobile */}
+                <div className="bg-slate-50 p-2 sm:p-2.5 rounded-lg border border-slate-200">
+                  <label className="text-[10px] font-bold text-slate-700 block mb-0.5 sm:mb-1">
+                    البيان / مواصفات خاصة (اختياري)
                   </label>
                   <input
                     type="text"
                     value={itemCardSpec}
+                    onFocus={e => ensureFieldVisibleOnFocus(e.currentTarget)}
                     onChange={e => setItemCardSpec(e.target.value)}
                     onKeyDown={e => {
                       if (e.key === 'Enter') {
@@ -4921,23 +4940,18 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         confirmAddItemFromCard(false);
                       }
                     }}
-                    placeholder="مثال: مقاس خاص، لون، رقم شحنة، تاريخ انتهاء..."
+                    placeholder="مثال: مقاس خاص، لون، رقم شحنة..."
                     className="w-full px-2.5 py-1 text-xs border border-slate-300 rounded bg-white text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-blue-500"
                   />
                 </div>
 
                 {/* Real-time Total Display Box */}
-                <div className="bg-gradient-to-r from-slate-900 to-blue-950 text-white rounded-lg p-3 flex items-center justify-between shadow-inner">
+                <div className={`bg-gradient-to-r from-slate-900 to-blue-950 text-white rounded-lg flex items-center justify-between shadow-inner ${isModalKeyboardCompact ? 'px-2.5 py-1.5' : 'p-2.5 sm:p-3'}`}>
                   <div>
-                    <span className="text-[10px] text-slate-300 block">إجمالي هذا الصنف (الكمية × السعر):</span>
-                    <div className="flex items-center gap-1 text-[11px] text-blue-200 mt-0.5 font-mono">
-                      <span>{qtyNum}</span>
-                      <span>×</span>
-                      <span>{priceNum.toFixed(2)}</span>
-                    </div>
+                    <span className="text-[9.5px] sm:text-[10px] text-slate-300 block">إجمالي الصنف ({qtyNum} × {priceNum.toFixed(2)}):</span>
                   </div>
-                  <div className="text-left font-mono">
-                    <span className="text-xl font-extrabold text-emerald-400 block leading-tight">
+                  <div className="text-left font-mono flex items-baseline gap-1">
+                    <span className="text-base sm:text-xl font-extrabold text-emerald-400 leading-tight">
                       {lineTotal.toFixed(2)}
                     </span>
                     <span className="text-[10px] text-slate-300">{db.settings.currency}</span>
@@ -4946,32 +4960,32 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </div>
 
               {/* Action Buttons Footer */}
-              <div className="bg-slate-100 border-t border-slate-200 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="bg-slate-100 border-t border-slate-200 px-2.5 py-1.5 sm:px-3.5 sm:py-2 flex items-center justify-between gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => {
                     setShowItemCardModal(false);
                     setSelectedCardProduct(null);
                   }}
-                  className="px-3 py-1.5 bg-white hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                  className="px-2.5 sm:px-3 py-1.5 bg-white hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-lg text-[11px] sm:text-xs font-bold transition-colors cursor-pointer shrink-0"
                 >
-                  إلغاء (Esc)
+                  إلغاء
                 </button>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 sm:gap-2">
                   <button
                     type="button"
                     onClick={() => confirmAddItemFromCard(false)}
-                    className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors flex items-center gap-1.5 cursor-pointer"
+                    className="px-2.5 sm:px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] sm:text-xs font-bold shadow-sm transition-colors flex items-center gap-1 cursor-pointer"
                   >
-                    <Check className="w-4 h-4" />
-                    <span>✓ إضافة ومتابعة تصفح الدليل (Enter)</span>
+                    <Check className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+                    <span>{isModalKeyboardCompact ? 'إضافة ومتابعة' : '✓ إضافة ومتابعة الدليل'}</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => confirmAddItemFromCard(true)}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors flex items-center gap-1 cursor-pointer"
+                    className="px-2.5 sm:px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[11px] sm:text-xs font-bold shadow-sm transition-colors flex items-center gap-1 cursor-pointer"
                   >
                     <span>✓ إضافة وإنهاء</span>
                   </button>
@@ -5194,12 +5208,19 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             }}
           >
             {/* Modal Header */}
-            <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#273754] bg-[#0b1120]/95 shrink-0">
+            <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-[#273754] bg-[#0b1120]/95 shrink-0">
               <h3 className="text-xs sm:text-sm font-bold flex items-center gap-1.5 text-white">
-                <Boxes className="w-4 h-4 text-blue-400" />
+                <Boxes className="w-4 h-4 text-blue-400 shrink-0" />
                 <span>
-                  {rapidEditingIndex !== null ? 'كارت تعديل بيانات الصنف' : 'كارت إضافة صنف سريع (Enter)'}
+                  {rapidEditingIndex !== null ? 'تعديل بيانات الصنف' : 'كارت الصنف السريع'}
                 </span>
+                {rapidMatchedProduct && liveOriginalRemaining !== null && (
+                  <span className={`font-mono text-[9px] font-black px-1.5 py-0.5 rounded ${
+                    liveOriginalRemaining <= 0 ? 'bg-amber-600/90 text-white' : 'bg-emerald-600/85 text-white'
+                  }`}>
+                    المتبقي: {liveOriginalRemaining}
+                  </span>
+                )}
               </h3>
               <button
                 type="button"
@@ -5215,16 +5236,18 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </button>
             </div>
 
-            {/* Pinned Product Search Bar & Live Stock Banner (NEVER scrolls out of sight when mobile keyboard is open!) */}
-            <div className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 bg-[#111a2e] border-b border-[#273754] shrink-0 relative z-30" onClick={e => e.stopPropagation()}>
-              <div className="flex flex-col gap-1 relative">
+            {/* Unified Scrollable Form Body (All fields live inside so NOTHING gets squeezed out when mobile keyboard is open!) */}
+            <div
+              className="p-2 sm:p-3 space-y-1.5 sm:space-y-2 text-xs overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body mobile-modal-body-pinned"
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Product Search & Dropdown */}
+              <div className="flex flex-col gap-0.5 relative z-30">
                 <label className="text-[9.5px] sm:text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between gap-1">
-                  <span>اسم الصنف (بحث بدليل الأصناف أو جديد) *</span>
-                  {rapidMatchedProduct && liveOriginalRemaining !== null && (
-                    <span className={`font-mono text-[9px] font-black px-1.5 py-0.2 rounded ${
-                      liveOriginalRemaining <= 0 ? 'bg-amber-600/90 text-white' : 'bg-emerald-600/85 text-white'
-                    }`}>
-                      المتبقي: {liveOriginalRemaining} {rapidMatchedProduct.unit || 'قطعة'}
+                  <span>اسم الصنف *</span>
+                  {alreadyInDraftQty > 0 && liveNetAfterDraft !== null && (
+                    <span className="font-mono text-[9px] text-amber-300 font-bold">
+                      مدرج: {alreadyInDraftQty} | صافي: {liveNetAfterDraft}
                     </span>
                   )}
                 </label>
@@ -5234,7 +5257,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="text"
                     value={rapidItemName}
                     placeholder="ابحث باسم الصنف أو الكود..."
-                    onFocus={() => {
+                    onFocus={e => {
+                      ensureFieldVisibleOnFocus(e.currentTarget);
                       if (!suppressRapidFocusRef.current && rapidItemName.trim().length > 0) {
                         setShowRapidDropdown(true);
                       }
@@ -5250,7 +5274,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       if (e.key === 'Enter') setShowRapidDropdown(false);
                       handleRapidKeyDown(e, rapidDescRef);
                     }}
-                    className="w-full bg-[#1a263d] border border-[#273754] text-white pl-8 pr-2.5 py-1.5 rounded-md text-xs outline-none focus:border-blue-500 font-bold"
+                    className="w-full bg-[#1a263d] border border-[#273754] text-white pl-7 pr-2.5 py-1 sm:py-1.5 rounded-md text-xs outline-none focus:border-blue-500 font-bold"
                     autoFocus
                   />
                   {rapidItemName ? (
@@ -5309,10 +5333,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                                 <span>كود: {cand.code}</span>
                                 <span className={candStock <= 0 ? 'text-amber-300 font-bold' : 'text-emerald-400 font-bold'}>
                                   المتبقي: {candStock} {cand.unit || 'قطعة'}
-                                  {candStock <= 0 && (mode === 'sale' || mode === 'wholesale') ? ' (بيع بالسالب)' : ''}
                                 </span>
-                                <span className="text-sky-300 font-bold bg-sky-950/70 px-1.5 py-0.2 rounded border border-sky-700/50">
-                                  آخر شراء: {lastBuy.price.toFixed(2)} {db.settings.currency}
+                                <span className="text-sky-300 font-bold bg-sky-950/70 px-1 py-0.2 rounded border border-sky-700/50">
+                                  آخر شراء: {lastBuy.price.toFixed(2)}
                                 </span>
                               </div>
                             </div>
@@ -5329,54 +5352,36 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   </div>
                 )}
 
-                {/* Compact Matched Product Last Purchase & Draft Info Chip Row */}
+                {/* Compact Matched Product Last Purchase Hint */}
                 {rapidMatchedProduct && liveOriginalRemaining !== null && (() => {
                   const matchedLastBuy = getLastPurchaseInfo(rapidMatchedProduct);
                   const isBuyLockedMode = mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy';
                   return (
-                    <div className="flex flex-wrap items-center justify-between gap-1 pt-0.5 text-[9.5px]">
-                      <div className="flex flex-wrap items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (matchedLastBuy.price > 0) {
-                              setRapidItemPrice(String(matchedLastBuy.price));
-                              calculateRapidItemTotal('forward', { overridePrice: String(matchedLastBuy.price) });
-                            }
-                          }}
-                          title="اضغط لتثبيت السعر على آخر سعر شراء"
-                          className="font-mono text-[9.5px] font-bold text-sky-200 bg-sky-900/70 hover:bg-sky-800/80 px-1.5 py-0.5 rounded border border-sky-500/50 cursor-pointer flex items-center gap-1"
-                        >
-                          <span>آخر شراء: {matchedLastBuy.price.toFixed(2)} {db.settings.currency}</span>
-                          {matchedLastBuy.invoiceNumber && (
-                            <span className="text-[8px] text-sky-300/90">(ف#{matchedLastBuy.invoiceNumber})</span>
-                          )}
-                          {isBuyLockedMode && (
-                            <span className="text-[8px] text-emerald-300 font-sans">• مثبت</span>
-                          )}
-                        </button>
-                        <span className="font-mono text-[9px] text-blue-300 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-700/50">
+                    <div className="flex flex-wrap items-center gap-1 pt-0.5 text-[9px]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (matchedLastBuy.price > 0) {
+                            setRapidItemPrice(String(matchedLastBuy.price));
+                            calculateRapidItemTotal('forward', { overridePrice: String(matchedLastBuy.price) });
+                          }
+                        }}
+                        title="اضغط لتثبيت السعر على آخر سعر شراء"
+                        className="font-mono font-bold text-sky-200 bg-sky-900/70 hover:bg-sky-800/80 px-1.5 py-0.5 rounded border border-sky-500/50 cursor-pointer flex items-center gap-1"
+                      >
+                        <span>آخر شراء: {matchedLastBuy.price.toFixed(2)}</span>
+                        {isBuyLockedMode && <span className="text-emerald-300 font-sans">• مثبت</span>}
+                      </button>
+                      {!isModalKeyboardCompact && (
+                        <span className="font-mono text-blue-300 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-700/50">
                           كود: {rapidMatchedProduct.code}
-                        </span>
-                        {liveOriginalRemaining <= 0 && (mode === 'sale' || mode === 'wholesale') && (
-                          <span className="text-[8.5px] font-bold text-amber-200 bg-amber-900/60 px-1.5 py-0.5 rounded border border-amber-500/40">
-                            بيع بالسالب
-                          </span>
-                        )}
-                      </div>
-                      {alreadyInDraftQty > 0 && liveNetAfterDraft !== null && (
-                        <span className="font-mono text-[9px] text-amber-300 font-bold">
-                          مدرج: {alreadyInDraftQty} | صافي: {liveNetAfterDraft}
                         </span>
                       )}
                     </div>
                   );
                 })()}
               </div>
-            </div>
 
-            {/* Modal Scrollable Form Content (Compact on Mobile so Qty, Price, Discount, Tax & Total stay clear and unclipped) */}
-            <div className="p-2 sm:p-3 space-y-1.5 sm:space-y-2 text-xs overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body mobile-modal-body-pinned">
               {/* Item Description / Spec */}
               <div className="flex flex-col gap-0.5">
                 <label className="text-[9.5px] text-[#94a3b8] font-semibold">
@@ -5387,6 +5392,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   type="text"
                   value={rapidItemDesc}
                   placeholder="بيان / مواصفة / وصف الصنف..."
+                  onFocus={e => ensureFieldVisibleOnFocus(e.currentTarget)}
                   onChange={e => setRapidItemDesc(e.target.value)}
                   onKeyDown={e => handleRapidKeyDown(e, rapidQtyRef)}
                   className="bg-[#1a263d] border border-[#273754] text-white px-2.5 py-1 sm:py-1.5 rounded-md text-xs outline-none focus:border-blue-500"
@@ -5397,14 +5403,17 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
                 <div className="flex flex-col gap-0.5">
                   <label className="text-[9.5px] sm:text-[10px] text-[#94a3b8] font-semibold">
-                    الكمية (العدد) *
+                    الكمية *
                   </label>
                   <input
                     ref={rapidQtyRef}
                     type="text"
                     value={rapidItemQty}
                     placeholder="العدد..."
-                    onFocus={e => e.target.select()}
+                    onFocus={e => {
+                      e.target.select();
+                      ensureFieldVisibleOnFocus(e.currentTarget);
+                    }}
                     onChange={e => {
                       const converted = toWesternNumerals(e.target.value);
                       setRapidItemQty(converted);
@@ -5417,7 +5426,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
                 <div className="flex flex-col gap-0.5">
                   <label className="text-[9.5px] sm:text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between gap-1">
-                    <span>السعر (للقطعة) *</span>
+                    <span>السعر *</span>
                     {(mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy') && (
                       <span className="text-[8px] text-sky-400 font-bold">مثبت</span>
                     )}
@@ -5427,165 +5436,194 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                     type="text"
                     value={rapidItemPrice}
                     placeholder="السعر..."
-                    onFocus={e => e.target.select()}
+                    onFocus={e => {
+                      e.target.select();
+                      ensureFieldVisibleOnFocus(e.currentTarget);
+                    }}
                     onChange={e => {
                       const converted = toWesternNumerals(e.target.value);
                       setRapidItemPrice(converted);
                       calculateRapidItemTotal('forward', { overridePrice: converted });
                     }}
-                    onKeyDown={e => handleRapidKeyDown(e, rapidDiscRef)}
+                    onKeyDown={e => handleRapidKeyDown(e, showRapidDiscTax || !isModalKeyboardCompact ? rapidDiscRef : rapidTotalRef)}
                     className="bg-[#1a263d] border border-[#273754] text-white px-2 py-1 sm:py-1.5 rounded-md text-xs text-center font-mono font-bold outline-none focus:border-blue-500 text-emerald-400"
                   />
                 </div>
               </div>
 
-              {/* Discount & Tax Grid - Clean Touch-Friendly Responsive Design */}
-              <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
-                {/* Item Discount */}
-                <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-1.5 sm:p-2 flex flex-col gap-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-slate-200 font-bold">
-                      الخصم
-                    </span>
-                    <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRapidItemDiscountType('fixed');
-                          calculateRapidItemTotal('forward', { overrideDiscType: 'fixed' });
+              {/* Compact Toggle for Discount & Tax when mobile keyboard is active (so Qty, Price, Total, Name & Desc stay visible together!) */}
+              {isModalKeyboardCompact && !showRapidDiscTax && !rapidItemDiscount && !rapidItemTax ? (
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowRapidDiscTax(true)}
+                    className="text-[10px] font-bold text-slate-300 bg-[#0f172a] hover:bg-[#1e293b] border border-[#273754] px-2 py-1 rounded-md cursor-pointer"
+                  >
+                    + خصم / ضريبة للصنف
+                  </button>
+                  <div className="flex items-center gap-1.5 flex-1">
+                    <span className="text-[10px] font-bold text-blue-300 shrink-0">الإجمالي:</span>
+                    <input
+                      ref={rapidTotalRef}
+                      type="text"
+                      value={rapidItemTotal}
+                      placeholder="الإجمالي..."
+                      onFocus={e => {
+                        e.target.select();
+                        ensureFieldVisibleOnFocus(e.currentTarget);
+                      }}
+                      onChange={e => {
+                        const converted = toWesternNumerals(e.target.value);
+                        setRapidItemTotal(converted);
+                        calculateRapidItemTotal('backward', { overrideTotal: converted });
+                      }}
+                      onKeyDown={e => handleRapidKeyDown(e, 'save')}
+                      className="w-full bg-[#1a263d] border border-blue-500 text-blue-300 px-2 py-1 rounded-md text-xs font-mono font-black outline-none text-center"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* Discount & Tax Grid */}
+                  <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
+                    <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-1.5 sm:p-2 flex flex-col gap-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-slate-200 font-bold">الخصم</span>
+                        <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRapidItemDiscountType('fixed');
+                              calculateRapidItemTotal('forward', { overrideDiscType: 'fixed' });
+                            }}
+                            className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
+                              rapidItemDiscountType === 'fixed' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            ج.م
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRapidItemDiscountType('percent');
+                              calculateRapidItemTotal('forward', { overrideDiscType: 'percent' });
+                            }}
+                            className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
+                              rapidItemDiscountType === 'percent' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            %
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        ref={rapidDiscRef}
+                        type="text"
+                        value={rapidItemDiscount}
+                        placeholder={rapidItemDiscountType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
+                        onFocus={e => {
+                          e.target.select();
+                          ensureFieldVisibleOnFocus(e.currentTarget);
                         }}
-                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
-                          rapidItemDiscountType === 'fixed'
-                            ? 'bg-blue-600 text-white shadow-xs'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                        title="خصم بمبلغ ثابت (ج.م)"
-                      >
-                        ج.م
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRapidItemDiscountType('percent');
-                          calculateRapidItemTotal('forward', { overrideDiscType: 'percent' });
+                        onChange={e => {
+                          const converted = toWesternNumerals(e.target.value);
+                          setRapidItemDiscount(converted);
+                          calculateRapidItemTotal('forward', { overrideDisc: converted });
                         }}
-                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
-                          rapidItemDiscountType === 'percent'
-                            ? 'bg-blue-600 text-white shadow-xs'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                        title="خصم بنسبة مئوية (%)"
-                      >
-                        %
-                      </button>
+                        onKeyDown={e => handleRapidKeyDown(e, rapidTaxRef)}
+                        className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
+                      />
+                    </div>
+
+                    <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-1.5 sm:p-2 flex flex-col gap-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-slate-200 font-bold">الضريبة</span>
+                        <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRapidItemTaxType('fixed');
+                              calculateRapidItemTotal('forward', { overrideTaxType: 'fixed' });
+                            }}
+                            className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
+                              rapidItemTaxType === 'fixed' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            ج.م
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setRapidItemTaxType('percent');
+                              calculateRapidItemTotal('forward', { overrideTaxType: 'percent' });
+                            }}
+                            className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
+                              rapidItemTaxType === 'percent' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                            }`}
+                          >
+                            %
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        ref={rapidTaxRef}
+                        type="text"
+                        value={rapidItemTax}
+                        placeholder={rapidItemTaxType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
+                        onFocus={e => {
+                          e.target.select();
+                          ensureFieldVisibleOnFocus(e.currentTarget);
+                        }}
+                        onChange={e => {
+                          const converted = toWesternNumerals(e.target.value);
+                          setRapidItemTax(converted);
+                          calculateRapidItemTotal('forward', { overrideTax: converted });
+                        }}
+                        onKeyDown={e => handleRapidKeyDown(e, rapidTotalRef)}
+                        className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
+                      />
                     </div>
                   </div>
-                  <input
-                    ref={rapidDiscRef}
-                    type="text"
-                    value={rapidItemDiscount}
-                    placeholder={rapidItemDiscountType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
-                    onFocus={e => e.target.select()}
-                    onChange={e => {
-                      const converted = toWesternNumerals(e.target.value);
-                      setRapidItemDiscount(converted);
-                      calculateRapidItemTotal('forward', { overrideDisc: converted });
-                    }}
-                    onKeyDown={e => handleRapidKeyDown(e, rapidTaxRef)}
-                    className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
-                  />
-                </div>
 
-                {/* Item Tax */}
-                <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-1.5 sm:p-2 flex flex-col gap-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-slate-200 font-bold">
-                      الضريبة
-                    </span>
-                    <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRapidItemTaxType('fixed');
-                          calculateRapidItemTotal('forward', { overrideTaxType: 'fixed' });
-                        }}
-                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
-                          rapidItemTaxType === 'fixed'
-                            ? 'bg-blue-600 text-white shadow-xs'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                        title="ضريبة بمبلغ ثابت (ج.م)"
-                      >
-                        ج.م
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRapidItemTaxType('percent');
-                          calculateRapidItemTotal('forward', { overrideTaxType: 'percent' });
-                        }}
-                        className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
-                          rapidItemTaxType === 'percent'
-                            ? 'bg-blue-600 text-white shadow-xs'
-                            : 'text-slate-400 hover:text-white'
-                        }`}
-                        title="ضريبة بنسبة مئوية (%)"
-                      >
-                        %
-                      </button>
-                    </div>
+                  {/* Editable Item Total (Backward Calculation) */}
+                  <div className="p-1.5 sm:p-2 rounded-lg bg-blue-950/40 border border-blue-500/50 flex flex-col gap-0.5">
+                    <label className="text-[10px] font-bold text-blue-300 flex items-center justify-between gap-1">
+                      <span className="truncate">إجمالي الصنف (يعدل السعر تلقائياً)</span>
+                      <span className="text-[8.5px] text-[#94a3b8] font-normal shrink-0">عكسي</span>
+                    </label>
+                    <input
+                      ref={rapidTotalRef}
+                      type="text"
+                      value={rapidItemTotal}
+                      placeholder="إجمالي الصنف..."
+                      onFocus={e => {
+                        e.target.select();
+                        ensureFieldVisibleOnFocus(e.currentTarget);
+                      }}
+                      onChange={e => {
+                        const converted = toWesternNumerals(e.target.value);
+                        setRapidItemTotal(converted);
+                        calculateRapidItemTotal('backward', { overrideTotal: converted });
+                      }}
+                      onKeyDown={e => handleRapidKeyDown(e, 'save')}
+                      className="bg-[#1a263d] border border-blue-500 text-blue-300 px-2.5 py-1 sm:py-1.5 rounded-md text-sm font-mono font-black outline-none text-center"
+                    />
                   </div>
-                  <input
-                    ref={rapidTaxRef}
-                    type="text"
-                    value={rapidItemTax}
-                    placeholder={rapidItemTaxType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
-                    onFocus={e => e.target.select()}
-                    onChange={e => {
-                      const converted = toWesternNumerals(e.target.value);
-                      setRapidItemTax(converted);
-                      calculateRapidItemTotal('forward', { overrideTax: converted });
-                    }}
-                    onKeyDown={e => handleRapidKeyDown(e, rapidTotalRef)}
-                    className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
-                  />
-                </div>
-              </div>
-
-              {/* Editable Item Total (Backward Calculation) */}
-              <div className="p-2 rounded-lg bg-blue-950/40 border border-blue-500/50 flex flex-col gap-1">
-                <label className="text-[10px] font-bold text-blue-300 flex items-center justify-between gap-1">
-                  <span className="truncate">إجمالي الصنف (يعدل السعر تلقائياً)</span>
-                  <span className="text-[8.5px] text-[#94a3b8] font-normal shrink-0">عكسي</span>
-                </label>
-                <input
-                  ref={rapidTotalRef}
-                  type="text"
-                  value={rapidItemTotal}
-                  placeholder="إجمالي الصنف..."
-                  onFocus={e => e.target.select()}
-                  onChange={e => {
-                    const converted = toWesternNumerals(e.target.value);
-                    setRapidItemTotal(converted);
-                    calculateRapidItemTotal('backward', { overrideTotal: converted });
-                  }}
-                  onKeyDown={e => handleRapidKeyDown(e, 'save')}
-                  className="bg-[#1a263d] border border-blue-500 text-blue-300 px-2.5 py-1 sm:py-1.5 rounded-md text-sm font-mono font-black outline-none text-center"
-                />
-              </div>
+                </>
+              )}
             </div>
 
             {/* Sticky Pinned Modal Action Footer */}
-            <div className="px-3 py-1.5 sm:px-3.5 sm:py-2 bg-[#0b1120]/95 border-t border-[#273754] shrink-0">
+            <div className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 bg-[#0b1120]/95 border-t border-[#273754] shrink-0">
               <button
                 type="button"
                 disabled={isModalSubmitting}
                 onClick={saveRapidItemToInvoice}
-                className="w-full py-2 sm:py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 active:scale-[0.99] text-white rounded-lg font-bold text-xs shadow transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                className="w-full py-1.5 sm:py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 active:scale-[0.99] text-white rounded-lg font-bold text-xs shadow transition-all cursor-pointer flex items-center justify-center gap-1.5"
               >
                 <Check className="w-4 h-4" />
                 <span>
