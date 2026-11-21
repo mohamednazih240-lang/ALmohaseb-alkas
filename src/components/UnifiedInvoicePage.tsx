@@ -422,6 +422,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [itemCardQty, setItemCardQty] = useState<string>('');
   const [itemCardPrice, setItemCardPrice] = useState<string>('');
   const [itemCardDefaultPrice, setItemCardDefaultPrice] = useState<number>(0);
+  const [itemCardDiscount, setItemCardDiscount] = useState<string>('');
+  const [itemCardDiscountType, setItemCardDiscountType] = useState<'fixed' | 'percent'>('fixed');
+  const [itemCardTax, setItemCardTax] = useState<string>('');
+  const [itemCardTaxType, setItemCardTaxType] = useState<'fixed' | 'percent'>('fixed');
   const [itemCardSpec, setItemCardSpec] = useState<string>('');
   const [showItemCardModal, setShowItemCardModal] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -444,7 +448,6 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [rapidItemTax, setRapidItemTax] = useState<string>('');
   const [rapidItemTaxType, setRapidItemTaxType] = useState<'fixed' | 'percent'>('fixed');
   const [rapidItemTotal, setRapidItemTotal] = useState<string>('');
-  const [showRapidDiscTax, setShowRapidDiscTax] = useState<boolean>(false);
 
   // Enter-key navigation field refs
   const rapidNameRef = useRef<HTMLInputElement>(null);
@@ -982,7 +985,6 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setRapidItemTax('');
     setRapidItemTaxType('fixed');
     setRapidItemTotal('');
-    setShowRapidDiscTax(false);
     setShowRapidDropdown(false);
     setShowRapidItemModal(true);
     setTimeout(() => rapidNameRef.current?.focus(), 100);
@@ -1001,7 +1003,6 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setRapidItemTax(it.taxRate ? String(it.taxRate) : '');
     setRapidItemTaxType('fixed');
     setRapidItemTotal(it.total ? String(it.total.toFixed(2)) : '');
-    setShowRapidDiscTax(Boolean(it.discount || it.taxRate));
     setShowRapidDropdown(false);
     setShowRapidItemModal(true);
     setTimeout(() => rapidNameRef.current?.focus(), 100);
@@ -1063,8 +1064,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       const qty = roundQty(parseNum(rapidItemQty));
       const price = roundMoney(parseNum(rapidItemPrice));
       const total = roundMoney(parseNum(rapidItemTotal));
-      const discount = roundMoney(parseNum(rapidItemDiscount));
-      const tax = roundMoney(parseNum(rapidItemTax));
+      const rawDiscount = parseNum(rapidItemDiscount);
+      const rawTax = parseNum(rapidItemTax);
 
       if (!name) {
         await appAlert('يرجى إدخال اسم الصنف');
@@ -1076,10 +1077,18 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         rapidQtyRef.current?.focus();
         return;
       }
-      if (!isFiniteNonNegative(price) || !isFiniteNonNegative(discount) || !isFiniteNonNegative(tax)) {
+      if (!isFiniteNonNegative(price) || !isFiniteNonNegative(rawDiscount) || !isFiniteNonNegative(rawTax)) {
         await appAlert('القيم الرقمية للسعر أو الخصم أو الضريبة غير صالحة (لا يُسمح بقيم سالبة).');
         return;
       }
+
+      const baseTotal = roundMoney(qty * price);
+      const discount = roundMoney(
+        rapidItemDiscountType === 'percent' ? (baseTotal * rawDiscount) / 100 : rawDiscount
+      );
+      const tax = roundMoney(
+        rapidItemTaxType === 'percent' ? (baseTotal * rawTax) / 100 : rawTax
+      );
 
       const isStrictCatalogMode = mode === 'sale' || mode === 'wholesale' || mode === 'sale_return' || mode === 'quote';
       const matchRes = matchProductStrictly(db, { name });
@@ -1124,7 +1133,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         }
       }
 
-      const calculatedTotal = total > 0 ? total : roundMoney(Math.max(0, roundMoney(qty * price) - discount + tax));
+      const computedNetTotal = roundMoney(Math.max(0, baseTotal - discount + tax));
+      const calculatedTotal = total > 0 ? total : computedNetTotal;
       const fifoLedger = buildProductFifoLedger(db, invoiceBranchId, editingInvoice?.id);
       const fifoSim = fifoLedger.simulateSaleFifoCost(matched.id, name, qty);
       const resolvedSaleCost = (fifoSim.hasVerifiedCost && fifoSim.effectiveUnitCost !== undefined)
@@ -1174,12 +1184,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             const copy = [...prev];
             const newQty = roundQty(copy[existingIdx].qty + qty);
             const finalPrice = price > 0 ? price : copy[existingIdx].unitPrice;
+            const mergedDiscount = roundMoney((copy[existingIdx].discount || 0) + discount);
+            const mergedTax = roundMoney((copy[existingIdx].taxRate || 0) + tax);
             copy[existingIdx] = {
               ...copy[existingIdx],
               qty: newQty,
               unitPrice: finalPrice,
+              discount: mergedDiscount,
+              taxRate: mergedTax,
               spec: rapidItemDesc.trim() || copy[existingIdx].spec,
-              total: roundMoney(Math.max(0, roundMoney(newQty * finalPrice) - (copy[existingIdx].discount || 0) + (copy[existingIdx].taxRate || 0)))
+              total: roundMoney(Math.max(0, roundMoney(newQty * finalPrice) - mergedDiscount + mergedTax))
             };
             showToast(
               isNegativeSale
@@ -1343,6 +1357,10 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     setItemCardQty('1');
     setItemCardPrice(defPrice > 0 ? String(defPrice) : '');
     setItemCardDefaultPrice(defPrice);
+    setItemCardDiscount('');
+    setItemCardDiscountType('fixed');
+    setItemCardTax('');
+    setItemCardTaxType('fixed');
     setItemCardSpec('');
     setShowItemCardModal(true);
   };
@@ -1352,6 +1370,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (!selectedCardProduct) return;
     const qty = parseFloat(itemCardQty);
     const unitPrice = itemCardPrice.trim() !== '' ? parseFloat(itemCardPrice) : itemCardDefaultPrice;
+    const rawDisc = parseFloat(itemCardDiscount) || 0;
+    const rawTax = parseFloat(itemCardTax) || 0;
 
     if (isNaN(qty) || qty <= 0) {
       await appAlert('يرجى إدخال الكمية أو العدد للصنف');
@@ -1361,6 +1381,19 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       await appAlert('يرجى إدخال سعر الصنف');
       return;
     }
+    if (rawDisc < 0 || rawTax < 0) {
+      await appAlert('لا يُسمح بقيم سالبة للخصم أو الضريبة');
+      return;
+    }
+
+    const baseTotal = roundMoney(qty * unitPrice);
+    const itemDiscount = roundMoney(
+      itemCardDiscountType === 'percent' ? (baseTotal * rawDisc) / 100 : rawDisc
+    );
+    const itemTax = roundMoney(
+      itemCardTaxType === 'percent' ? (baseTotal * rawTax) / 100 : rawTax
+    );
+    const itemTotal = roundMoney(Math.max(0, baseTotal - itemDiscount + itemTax));
 
     const liveStock = getTrueRemainingStock(selectedCardProduct);
     const isNegativeSale = (mode === 'sale' || mode === 'wholesale') && (liveStock - qty) < 0;
@@ -1374,12 +1407,16 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         const copy = [...prev];
         const newQty = copy[existingIdx].qty + qty;
         const effectivePrice = unitPrice > 0 ? unitPrice : copy[existingIdx].unitPrice;
+        const mergedDiscount = roundMoney((copy[existingIdx].discount || 0) + itemDiscount);
+        const mergedTax = roundMoney((copy[existingIdx].taxRate || 0) + itemTax);
         copy[existingIdx] = {
           ...copy[existingIdx],
           qty: newQty,
           unitPrice: effectivePrice,
+          discount: mergedDiscount,
+          taxRate: mergedTax,
           spec: itemCardSpec.trim() || copy[existingIdx].spec,
-          total: (newQty * effectivePrice) - (copy[existingIdx].discount || 0)
+          total: roundMoney(Math.max(0, roundMoney(newQty * effectivePrice) - mergedDiscount + mergedTax))
         };
         showToast(
           isNegativeSale
@@ -1404,9 +1441,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           costPrice: mode === 'purchase' ? unitPrice : resolvedSaleCost,
           hasVerifiedCost: mode === 'purchase' ? unitPrice > 0 : fifoSim.hasFullVerifiedCost,
           uncoveredQty: mode === 'purchase' ? 0 : fifoSim.uncoveredQty,
-          discount: 0,
-          taxRate: 0,
-          total: qty * unitPrice
+          discount: itemDiscount,
+          taxRate: itemTax,
+          total: itemTotal
         };
         return [...prev, newItem];
       }
@@ -4545,8 +4582,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         </div>
       )}
 
-      {/* Toast Notification (compact non-blocking top banner above modals) */}
-      {toastMessage && (
+      {/* Toast Notification (renders inline inside open item cards so it never covers input fields) */}
+      {toastMessage && !showRapidItemModal && !showItemCardModal && (
         <div
           role="status"
           aria-live="polite"
@@ -4573,7 +4610,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         const lastBuyInfo = getLastPurchaseInfo(selectedCardProduct);
         const qtyNum = parseFloat(itemCardQty) || 0;
         const priceNum = parseFloat(itemCardPrice) || 0;
-        const lineTotal = Math.max(0, qtyNum * priceNum);
+        const baseLineTotal = roundMoney(qtyNum * priceNum);
+        const rawCardDisc = parseFloat(itemCardDiscount) || 0;
+        const cardDiscVal = roundMoney(itemCardDiscountType === 'percent' ? (baseLineTotal * rawCardDisc) / 100 : rawCardDisc);
+        const rawCardTax = parseFloat(itemCardTax) || 0;
+        const cardTaxVal = roundMoney(itemCardTaxType === 'percent' ? (baseLineTotal * rawCardTax) / 100 : rawCardTax);
+        const lineTotal = roundMoney(Math.max(0, baseLineTotal - cardDiscVal + cardTaxVal));
         const isPriceModified = Math.abs(priceNum - itemCardDefaultPrice) >= 0.01;
         const isNegativeStock = (mode === 'sale' || mode === 'wholesale') && liveCardStock < qtyNum;
 
@@ -4924,9 +4966,104 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                   return null;
                 })()}
 
+                {/* Discount & Tax Fields (Always visible in Item Card) */}
+                <div className="grid grid-cols-2 gap-2 sm:gap-3">
+                  {/* Discount */}
+                  <div className="bg-slate-50 p-1.5 sm:p-2 rounded-lg border border-slate-300 flex flex-col gap-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <label className="text-[10.5px] sm:text-xs font-bold text-slate-800">الخصم</label>
+                      <div className="inline-flex rounded border border-slate-300 p-0.5 bg-white shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setItemCardDiscountType('fixed')}
+                          className={`px-1.5 py-0.2 text-[8.5px] font-bold rounded cursor-pointer ${
+                            itemCardDiscountType === 'fixed' ? 'bg-blue-600 text-white' : 'text-slate-600'
+                          }`}
+                        >
+                          ج.م
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setItemCardDiscountType('percent')}
+                          className={`px-1.5 py-0.2 text-[8.5px] font-bold rounded cursor-pointer ${
+                            itemCardDiscountType === 'percent' ? 'bg-blue-600 text-white' : 'text-slate-600'
+                          }`}
+                        >
+                          %
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={itemCardDiscount}
+                      onFocus={e => {
+                        e.target.select();
+                        ensureFieldVisibleOnFocus(e.currentTarget);
+                      }}
+                      onChange={e => setItemCardDiscount(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          confirmAddItemFromCard(false);
+                        }
+                      }}
+                      placeholder={itemCardDiscountType === 'percent' ? 'النسبة %' : 'قيمة الخصم'}
+                      className="w-full text-center font-mono font-bold text-xs sm:text-sm h-7 rounded border border-slate-300 bg-white text-rose-700 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  {/* Tax */}
+                  <div className="bg-slate-50 p-1.5 sm:p-2 rounded-lg border border-slate-300 flex flex-col gap-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <label className="text-[10.5px] sm:text-xs font-bold text-slate-800">الضريبة</label>
+                      <div className="inline-flex rounded border border-slate-300 p-0.5 bg-white shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setItemCardTaxType('fixed')}
+                          className={`px-1.5 py-0.2 text-[8.5px] font-bold rounded cursor-pointer ${
+                            itemCardTaxType === 'fixed' ? 'bg-blue-600 text-white' : 'text-slate-600'
+                          }`}
+                        >
+                          ج.م
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setItemCardTaxType('percent')}
+                          className={`px-1.5 py-0.2 text-[8.5px] font-bold rounded cursor-pointer ${
+                            itemCardTaxType === 'percent' ? 'bg-blue-600 text-white' : 'text-slate-600'
+                          }`}
+                        >
+                          %
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={itemCardTax}
+                      onFocus={e => {
+                        e.target.select();
+                        ensureFieldVisibleOnFocus(e.currentTarget);
+                      }}
+                      onChange={e => setItemCardTax(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          confirmAddItemFromCard(false);
+                        }
+                      }}
+                      placeholder={itemCardTaxType === 'percent' ? 'النسبة %' : 'قيمة الضريبة'}
+                      className="w-full text-center font-mono font-bold text-xs sm:text-sm h-7 rounded border border-slate-300 bg-white text-blue-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
                 {/* Optional Spec / Note + Live Total inline on mobile */}
-                <div className="bg-slate-50 p-2 sm:p-2.5 rounded-lg border border-slate-200">
-                  <label className="text-[10px] font-bold text-slate-700 block mb-0.5 sm:mb-1">
+                <div className="bg-slate-50 p-1.5 sm:p-2 rounded-lg border border-slate-200">
+                  <label className="text-[9.5px] sm:text-[10px] font-bold text-slate-700 block mb-0.5">
                     البيان / مواصفات خاصة (اختياري)
                   </label>
                   <input
@@ -4948,7 +5085,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 {/* Real-time Total Display Box */}
                 <div className={`bg-gradient-to-r from-slate-900 to-blue-950 text-white rounded-lg flex items-center justify-between shadow-inner ${isModalKeyboardCompact ? 'px-2.5 py-1.5' : 'p-2.5 sm:p-3'}`}>
                   <div>
-                    <span className="text-[9.5px] sm:text-[10px] text-slate-300 block">إجمالي الصنف ({qtyNum} × {priceNum.toFixed(2)}):</span>
+                    <span className="text-[9.5px] sm:text-[10px] text-slate-300 block">
+                      صافي الصنف ({qtyNum} × {priceNum.toFixed(2)}{cardDiscVal > 0 ? ` - ${cardDiscVal.toFixed(2)}` : ''}{cardTaxVal > 0 ? ` + ${cardTaxVal.toFixed(2)}` : ''}):
+                    </span>
                   </div>
                   <div className="text-left font-mono flex items-baseline gap-1">
                     <span className="text-base sm:text-xl font-extrabold text-emerald-400 leading-tight">
@@ -5236,14 +5375,31 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               </button>
             </div>
 
-            {/* Unified Scrollable Form Body (All fields live inside so NOTHING gets squeezed out when mobile keyboard is open!) */}
+            {/* Non-overlapping Inline Toast Bar inside Rapid Item Card */}
+            {toastMessage && (
+              <div className="px-2.5 py-1 bg-emerald-950/95 border-b border-emerald-500/40 text-emerald-200 text-[10px] font-bold flex items-center justify-between gap-2 shrink-0">
+                <span className="flex items-center gap-1.5 truncate">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span className="truncate">{toastMessage}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setToastMessage(null)}
+                  className="text-emerald-300 hover:text-white shrink-0 cursor-pointer"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
+            {/* Unified Scrollable Form Body (All fields always visible simultaneously — zero hidden toggles!) */}
             <div
-              className="p-2 sm:p-3 space-y-1.5 sm:space-y-2 text-xs overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body mobile-modal-body-pinned"
+              className="p-2 sm:p-3 space-y-1 sm:space-y-2 text-xs overflow-y-auto overscroll-contain flex-1 min-h-0 mobile-modal-body mobile-modal-body-pinned"
               onClick={e => e.stopPropagation()}
             >
               {/* Product Search & Dropdown */}
               <div className="flex flex-col gap-0.5 relative z-30">
-                <label className="text-[9.5px] sm:text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between gap-1">
+                <label className="text-[9px] sm:text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between gap-1">
                   <span>اسم الصنف *</span>
                   {alreadyInDraftQty > 0 && liveNetAfterDraft !== null && (
                     <span className="font-mono text-[9px] text-amber-300 font-bold">
@@ -5372,11 +5528,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                         <span>آخر شراء: {matchedLastBuy.price.toFixed(2)}</span>
                         {isBuyLockedMode && <span className="text-emerald-300 font-sans">• مثبت</span>}
                       </button>
-                      {!isModalKeyboardCompact && (
-                        <span className="font-mono text-blue-300 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-700/50">
-                          كود: {rapidMatchedProduct.code}
-                        </span>
-                      )}
+                      <span className="font-mono text-blue-300 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-700/50">
+                        كود: {rapidMatchedProduct.code}
+                      </span>
                     </div>
                   );
                 })()}
@@ -5384,7 +5538,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
               {/* Item Description / Spec */}
               <div className="flex flex-col gap-0.5">
-                <label className="text-[9.5px] text-[#94a3b8] font-semibold">
+                <label className="text-[9px] sm:text-[10px] text-[#94a3b8] font-semibold">
                   بيان الصنف (وصف اختياري)
                 </label>
                 <input
@@ -5402,7 +5556,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
               {/* Qty & Price Grid */}
               <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
                 <div className="flex flex-col gap-0.5">
-                  <label className="text-[9.5px] sm:text-[10px] text-[#94a3b8] font-semibold">
+                  <label className="text-[9px] sm:text-[10px] text-[#94a3b8] font-semibold">
                     الكمية *
                   </label>
                   <input
@@ -5425,7 +5579,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                 </div>
 
                 <div className="flex flex-col gap-0.5">
-                  <label className="text-[9.5px] sm:text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between gap-1">
+                  <label className="text-[9px] sm:text-[10px] text-[#94a3b8] font-semibold flex items-center justify-between gap-1">
                     <span>السعر *</span>
                     {(mode === 'purchase' || mode === 'purchase_return' || priceType === 'buy') && (
                       <span className="text-[8px] text-sky-400 font-bold">مثبت</span>
@@ -5445,176 +5599,141 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       setRapidItemPrice(converted);
                       calculateRapidItemTotal('forward', { overridePrice: converted });
                     }}
-                    onKeyDown={e => handleRapidKeyDown(e, showRapidDiscTax || !isModalKeyboardCompact ? rapidDiscRef : rapidTotalRef)}
+                    onKeyDown={e => handleRapidKeyDown(e, rapidDiscRef)}
                     className="bg-[#1a263d] border border-[#273754] text-white px-2 py-1 sm:py-1.5 rounded-md text-xs text-center font-mono font-bold outline-none focus:border-blue-500 text-emerald-400"
                   />
                 </div>
               </div>
 
-              {/* Compact Toggle for Discount & Tax when mobile keyboard is active (so Qty, Price, Total, Name & Desc stay visible together!) */}
-              {isModalKeyboardCompact && !showRapidDiscTax && !rapidItemDiscount && !rapidItemTax ? (
-                <div className="flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowRapidDiscTax(true)}
-                    className="text-[10px] font-bold text-slate-300 bg-[#0f172a] hover:bg-[#1e293b] border border-[#273754] px-2 py-1 rounded-md cursor-pointer"
-                  >
-                    + خصم / ضريبة للصنف
-                  </button>
-                  <div className="flex items-center gap-1.5 flex-1">
-                    <span className="text-[10px] font-bold text-blue-300 shrink-0">الإجمالي:</span>
-                    <input
-                      ref={rapidTotalRef}
-                      type="text"
-                      value={rapidItemTotal}
-                      placeholder="الإجمالي..."
-                      onFocus={e => {
-                        e.target.select();
-                        ensureFieldVisibleOnFocus(e.currentTarget);
-                      }}
-                      onChange={e => {
-                        const converted = toWesternNumerals(e.target.value);
-                        setRapidItemTotal(converted);
-                        calculateRapidItemTotal('backward', { overrideTotal: converted });
-                      }}
-                      onKeyDown={e => handleRapidKeyDown(e, 'save')}
-                      className="w-full bg-[#1a263d] border border-blue-500 text-blue-300 px-2 py-1 rounded-md text-xs font-mono font-black outline-none text-center"
-                    />
+              {/* Discount & Tax Grid (ALWAYS VISIBLE) */}
+              <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
+                <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-1 sm:p-2 flex flex-col gap-0.5 sm:gap-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9.5px] sm:text-[10px] text-slate-200 font-bold">الخصم</span>
+                    <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRapidItemDiscountType('fixed');
+                          calculateRapidItemTotal('forward', { overrideDiscType: 'fixed' });
+                        }}
+                        className={`px-1.5 py-0.5 text-[8.5px] font-bold rounded transition-colors cursor-pointer ${
+                          rapidItemDiscountType === 'fixed' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        ج.م
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRapidItemDiscountType('percent');
+                          calculateRapidItemTotal('forward', { overrideDiscType: 'percent' });
+                        }}
+                        className={`px-1.5 py-0.5 text-[8.5px] font-bold rounded transition-colors cursor-pointer ${
+                          rapidItemDiscountType === 'percent' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        %
+                      </button>
+                    </div>
                   </div>
+                  <input
+                    ref={rapidDiscRef}
+                    type="text"
+                    value={rapidItemDiscount}
+                    placeholder={rapidItemDiscountType === 'percent' ? 'النسبة %' : 'قيمة الخصم'}
+                    onFocus={e => {
+                      e.target.select();
+                      ensureFieldVisibleOnFocus(e.currentTarget);
+                    }}
+                    onChange={e => {
+                      const converted = toWesternNumerals(e.target.value);
+                      setRapidItemDiscount(converted);
+                      calculateRapidItemTotal('forward', { overrideDisc: converted });
+                    }}
+                    onKeyDown={e => handleRapidKeyDown(e, rapidTaxRef)}
+                    className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
+                  />
                 </div>
-              ) : (
-                <>
-                  {/* Discount & Tax Grid */}
-                  <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
-                    <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-1.5 sm:p-2 flex flex-col gap-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-slate-200 font-bold">الخصم</span>
-                        <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setRapidItemDiscountType('fixed');
-                              calculateRapidItemTotal('forward', { overrideDiscType: 'fixed' });
-                            }}
-                            className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
-                              rapidItemDiscountType === 'fixed' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            ج.م
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setRapidItemDiscountType('percent');
-                              calculateRapidItemTotal('forward', { overrideDiscType: 'percent' });
-                            }}
-                            className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
-                              rapidItemDiscountType === 'percent' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            %
-                          </button>
-                        </div>
-                      </div>
-                      <input
-                        ref={rapidDiscRef}
-                        type="text"
-                        value={rapidItemDiscount}
-                        placeholder={rapidItemDiscountType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
-                        onFocus={e => {
-                          e.target.select();
-                          ensureFieldVisibleOnFocus(e.currentTarget);
-                        }}
-                        onChange={e => {
-                          const converted = toWesternNumerals(e.target.value);
-                          setRapidItemDiscount(converted);
-                          calculateRapidItemTotal('forward', { overrideDisc: converted });
-                        }}
-                        onKeyDown={e => handleRapidKeyDown(e, rapidTaxRef)}
-                        className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
-                      />
-                    </div>
 
-                    <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-1.5 sm:p-2 flex flex-col gap-1">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-slate-200 font-bold">الضريبة</span>
-                        <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setRapidItemTaxType('fixed');
-                              calculateRapidItemTotal('forward', { overrideTaxType: 'fixed' });
-                            }}
-                            className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
-                              rapidItemTaxType === 'fixed' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            ج.م
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setRapidItemTaxType('percent');
-                              calculateRapidItemTotal('forward', { overrideTaxType: 'percent' });
-                            }}
-                            className={`px-1.5 py-0.5 text-[9px] font-bold rounded transition-colors ${
-                              rapidItemTaxType === 'percent' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            %
-                          </button>
-                        </div>
-                      </div>
-                      <input
-                        ref={rapidTaxRef}
-                        type="text"
-                        value={rapidItemTax}
-                        placeholder={rapidItemTaxType === 'percent' ? 'النسبة %' : 'المبلغ ج.م'}
-                        onFocus={e => {
-                          e.target.select();
-                          ensureFieldVisibleOnFocus(e.currentTarget);
+                <div className="bg-[#0f172a] border border-[#273754] rounded-lg p-1 sm:p-2 flex flex-col gap-0.5 sm:gap-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[9.5px] sm:text-[10px] text-slate-200 font-bold">الضريبة</span>
+                    <div className="inline-flex rounded border border-[#334155] p-0.5 bg-[#0b1120] shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRapidItemTaxType('fixed');
+                          calculateRapidItemTotal('forward', { overrideTaxType: 'fixed' });
                         }}
-                        onChange={e => {
-                          const converted = toWesternNumerals(e.target.value);
-                          setRapidItemTax(converted);
-                          calculateRapidItemTotal('forward', { overrideTax: converted });
+                        className={`px-1.5 py-0.5 text-[8.5px] font-bold rounded transition-colors cursor-pointer ${
+                          rapidItemTaxType === 'fixed' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        ج.م
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRapidItemTaxType('percent');
+                          calculateRapidItemTotal('forward', { overrideTaxType: 'percent' });
                         }}
-                        onKeyDown={e => handleRapidKeyDown(e, rapidTotalRef)}
-                        className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
-                      />
+                        className={`px-1.5 py-0.5 text-[8.5px] font-bold rounded transition-colors cursor-pointer ${
+                          rapidItemTaxType === 'percent' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        %
+                      </button>
                     </div>
                   </div>
+                  <input
+                    ref={rapidTaxRef}
+                    type="text"
+                    value={rapidItemTax}
+                    placeholder={rapidItemTaxType === 'percent' ? 'النسبة %' : 'قيمة الضريبة'}
+                    onFocus={e => {
+                      e.target.select();
+                      ensureFieldVisibleOnFocus(e.currentTarget);
+                    }}
+                    onChange={e => {
+                      const converted = toWesternNumerals(e.target.value);
+                      setRapidItemTax(converted);
+                      calculateRapidItemTotal('forward', { overrideTax: converted });
+                    }}
+                    onKeyDown={e => handleRapidKeyDown(e, rapidTotalRef)}
+                    className="w-full bg-[#1a263d] border border-[#273754] focus:border-blue-500 text-white px-2 py-1 rounded text-xs font-mono font-bold outline-none text-center"
+                  />
+                </div>
+              </div>
 
-                  {/* Editable Item Total (Backward Calculation) */}
-                  <div className="p-1.5 sm:p-2 rounded-lg bg-blue-950/40 border border-blue-500/50 flex flex-col gap-0.5">
-                    <label className="text-[10px] font-bold text-blue-300 flex items-center justify-between gap-1">
-                      <span className="truncate">إجمالي الصنف (يعدل السعر تلقائياً)</span>
-                      <span className="text-[8.5px] text-[#94a3b8] font-normal shrink-0">عكسي</span>
-                    </label>
-                    <input
-                      ref={rapidTotalRef}
-                      type="text"
-                      value={rapidItemTotal}
-                      placeholder="إجمالي الصنف..."
-                      onFocus={e => {
-                        e.target.select();
-                        ensureFieldVisibleOnFocus(e.currentTarget);
-                      }}
-                      onChange={e => {
-                        const converted = toWesternNumerals(e.target.value);
-                        setRapidItemTotal(converted);
-                        calculateRapidItemTotal('backward', { overrideTotal: converted });
-                      }}
-                      onKeyDown={e => handleRapidKeyDown(e, 'save')}
-                      className="bg-[#1a263d] border border-blue-500 text-blue-300 px-2.5 py-1 sm:py-1.5 rounded-md text-sm font-mono font-black outline-none text-center"
-                    />
-                  </div>
-                </>
-              )}
+              {/* Editable Item Total (Compact horizontal row on mobile, full box on desktop) */}
+              <div className="px-2 py-1 sm:p-2 rounded-lg bg-blue-950/40 border border-blue-500/50 flex items-center justify-between gap-2 sm:flex-col sm:items-stretch sm:gap-0.5">
+                <label className="text-[9.5px] sm:text-[10px] font-bold text-blue-300 flex items-center justify-between gap-1 shrink-0">
+                  <span>إجمالي الصنف</span>
+                  <span className="text-[8.5px] text-[#94a3b8] font-normal">(عكسي)</span>
+                </label>
+                <input
+                  ref={rapidTotalRef}
+                  type="text"
+                  value={rapidItemTotal}
+                  placeholder="الإجمالي..."
+                  onFocus={e => {
+                    e.target.select();
+                    ensureFieldVisibleOnFocus(e.currentTarget);
+                  }}
+                  onChange={e => {
+                    const converted = toWesternNumerals(e.target.value);
+                    setRapidItemTotal(converted);
+                    calculateRapidItemTotal('backward', { overrideTotal: converted });
+                  }}
+                  onKeyDown={e => handleRapidKeyDown(e, 'save')}
+                  className="w-32 sm:w-full bg-[#1a263d] border border-blue-500 text-blue-300 px-2.5 py-1 sm:py-1.5 rounded-md text-xs sm:text-sm font-mono font-black outline-none text-center"
+                />
+              </div>
             </div>
 
             {/* Sticky Pinned Modal Action Footer */}
