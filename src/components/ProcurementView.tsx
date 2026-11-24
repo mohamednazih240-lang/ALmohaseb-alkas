@@ -26,7 +26,7 @@ import {
   Invoice,
   StockMovement
 } from '../types/accounting';
-import { formatMoney, generateId, getTodayDate, logAudit, roundQty, roundMoney } from '../services/accountingStorage';
+import { formatMoney, generateId, getTodayDate, logAudit, roundQty, roundMoney, getNextUniqueGRNNumber } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
 import { useSubmitLock } from '../hooks/useSubmitLock';
@@ -139,8 +139,9 @@ export const ProcurementView: React.FC<ProcurementViewProps> = ({
     if (!selectedPO) return;
     runWithLock(async () => {
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
-      const nextGRNNum = updated.settings.nextGRN || 7001;
-      const grnNumber = `GRN-${nextGRNNum}`;
+      const nextGRNInfo = getNextUniqueGRNNumber(updated);
+      const nextGRNNum = nextGRNInfo.nextSeq;
+      const grnNumber = nextGRNInfo.number;
       const defaultWh = updated.warehouses.find(w => w.isDefault) || updated.warehouses[0];
 
       const grnItems: GoodsReceivedItem[] = selectedPO.items.map(it => ({

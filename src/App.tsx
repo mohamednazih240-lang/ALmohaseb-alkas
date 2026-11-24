@@ -284,7 +284,18 @@ export default function App() {
         nextSaleReturn: merged.settings.nextSaleReturn,
         nextPurchaseReturn: merged.settings.nextPurchaseReturn,
         nextReceipt: merged.settings.nextReceipt,
-        nextPayment: merged.settings.nextPayment
+        nextPayment: merged.settings.nextPayment,
+        nextQuote: merged.settings.nextQuote,
+        nextOrder: merged.settings.nextOrder,
+        nextGRN: merged.settings.nextGRN,
+        nextJournal: merged.settings.nextJournal,
+        nextExpense: merged.settings.nextExpense,
+        nextRevenue: merged.settings.nextRevenue,
+        nextTransfer: merged.settings.nextTransfer,
+        nextAdjustment: merged.settings.nextAdjustment,
+        nextTreasury: merged.settings.nextTreasury,
+        nextFixedAsset: merged.settings.nextFixedAsset,
+        sequencesNormalizedVersion: merged.settings.sequencesNormalizedVersion
       }
     };
   }, [mergeSafeSettings]);
@@ -304,9 +315,7 @@ export default function App() {
           const readyDb = sanitizeCompanyDatabase(idbData);
           initialCompanyCode = normalizeCompanyCode(readyDb.settings.companyCode);
           setDb(prevDb => {
-            const hydrated = mergeLocalAndCloudDb(prevDb, readyDb, prevDb.currentUser);
-            const safeSettings = mergeSafeSettings(prevDb.settings, hydrated.settings);
-            const finalHydrated: AccountingDB = { ...hydrated, settings: safeSettings };
+            const finalHydrated = mergeLocalAndCloudDb(prevDb, readyDb, prevDb.currentUser);
             saveDatabase(finalHydrated);
             return finalHydrated;
           });
@@ -340,7 +349,7 @@ export default function App() {
             const merged = mergeLocalAndCloudDb(prevDb, effectiveCloud, effectiveUser);
             saveDatabase(merged);
 
-            // If local had richer invoice data, local deletions missing from cloud, or a local logo missing from cloud, sync back immediately
+            // If local had richer invoice data, local deletions missing from cloud, unnormalized sequences, or a local logo missing from cloud, sync back immediately
             const hasRicherLocal = merged.invoices.some(inv => {
               const cloudInv = (ensuredCloud.invoices || []).find(ci => ci.id === inv.id);
               return !cloudInv || (inv.items?.length || 0) > (cloudInv.items?.length || 0);
@@ -352,7 +361,8 @@ export default function App() {
             );
             const needsCloudLogoRepair = Boolean(merged.settings.logo && !ensuredCloud.settings?.logo);
             const needsCloudPhantomCleanup = doesCloudNeedCleanupSync(initialCompanyCode, merged);
-            if (hasRicherLocal || hasLocalClosingsMissingFromCloud || hasUnsyncedDeletions || needsCloudLogoRepair || needsCloudPhantomCleanup) {
+            const needsSequenceSync = (cloudDb.settings?.sequencesNormalizedVersion || 0) < 1;
+            if (hasRicherLocal || hasLocalClosingsMissingFromCloud || hasUnsyncedDeletions || needsCloudLogoRepair || needsCloudPhantomCleanup || needsSequenceSync) {
               hasPendingCloudPushRef.current = true;
               void pushDatabaseToCloud(merged, true).then(ok => {
                 if (ok) hasPendingCloudPushRef.current = false;

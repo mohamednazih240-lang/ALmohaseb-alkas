@@ -29,7 +29,8 @@ import {
   roundMoney,
   roundQty,
   isFiniteNonNegative,
-  assertJournalBalanced
+  assertJournalBalanced,
+  getNextUniqueJournalNumber
 } from '../services/accountingStorage';
 import { useSubmitLock } from '../hooks/useSubmitLock';
 import { appAlert } from '../services/appDialog';
@@ -428,9 +429,10 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           const invAcc = updated.accounts.find(a => a.id === 'acc_inv')!;
           const eqAcc = updated.accounts.find(a => a.id === 'acc_equity')!;
 
+          const nextJOpen = getNextUniqueJournalNumber(updated);
           const openingJournal = {
             id: generateId('j'),
-            number: `J-${Date.now().toString().slice(-6)}`,
+            number: nextJOpen.number,
             date: getTodayDate(),
             description: `إثبات رصيد بضاعة أول المدة للصنف ${newProduct.name} بفرع ${branchName}`,
             sourceType: 'manual' as const,
@@ -447,6 +449,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
             return;
           }
           updated.journals.push(openingJournal);
+          updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJOpen.nextSeq + 1);
         }
       }
 

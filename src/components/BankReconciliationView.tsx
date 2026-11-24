@@ -25,7 +25,10 @@ import {
   getMethodAccountId,
   generateId,
   getTodayDate,
-  logAudit
+  logAudit,
+  getNextUniqueVoucherNumber,
+  getNextUniqueJournalNumber,
+  getNextUniqueTreasuryNumber
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -259,15 +262,18 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
       const activeBranchId = updated.currentUser?.branchId || updated.branches?.[0]?.id || 'br_main';
       const activeBranchName = updated.branches?.find(b => b.id === activeMethod)?.name || updated.branches?.[0]?.name || 'الفرع الرئيسي';
       const feeVoucherId = generateId('vch_fee');
-      const feeNumber = `FEE-${Date.now().toString().slice(-4)}`;
+      const feeNumInfo = getNextUniqueVoucherNumber(updated, 'payment');
+      const feeNumber = feeNumInfo.number;
+      updated.settings.nextPayment = Math.max(updated.settings.nextPayment || 1, feeNumInfo.nextSeq + 1);
 
       const methodAccId = getMethodAccountId(activeMethod);
       const methodAcc = updated.accounts.find(a => a.id === methodAccId) || updated.accounts.find(a => a.id === 'acc_bank') || updated.accounts.find(a => a.id === 'acc_cash')!;
       const bankChargesAcc = updated.accounts.find(a => a.id === 'acc_bank_charges') || updated.accounts.find(a => a.id === 'acc_exp')!;
 
+      const feeJInfo = getNextUniqueJournalNumber(updated);
       const jEntry: JournalEntry = {
         id: generateId('jrn_fee'),
-        number: `J-FEE-${Date.now().toString().slice(-5)}`,
+        number: feeJInfo.number,
         date: statementDate,
         description: `مصروف / عمولة بنكية: ${feeDescription.trim()} (${feeNumber})`,
         sourceType: 'expense',
@@ -303,6 +309,8 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
         id: feeVoucherId,
         number: feeNumber,
         type: 'payment',
+        paymentCategory: 'expense',
+        expenseCategory: 'مصاريف وعمولات بنكية',
         date: statementDate,
         partyName: 'مصاريف وعمولات بنكية',
         amount: cleanAmt,
@@ -313,8 +321,10 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
         branchName: activeBranchName
       };
 
+      const feeTrInfo = getNextUniqueTreasuryNumber(updated);
       const trEntry: TreasuryEntry = {
         id: generateId('tr_fee'),
+        number: feeTrInfo.number,
         date: statementDate,
         createdAt: new Date().toISOString(),
         direction: 'out',
@@ -323,6 +333,7 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
         description: `عمولة بنكية ${feeNumber}: ${feeDescription.trim()}`,
         sourceType: 'voucher',
         sourceId: feeVoucherId,
+        refNumber: feeNumber,
         branchId: activeBranchId,
         branchName: activeBranchName
       };
@@ -330,6 +341,8 @@ export const BankReconciliationView: React.FC<BankReconciliationViewProps> = ({ 
       updated.vouchers.push(newFeeVoucher);
       updated.treasury.unshift(trEntry);
       updated.journals.unshift(jEntry);
+      updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, feeTrInfo.nextSeq + 1);
+      updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, feeJInfo.nextSeq + 1);
 
       logAudit(updated, 'تسجيل عمولة بنكية', `${formatMoney(cleanAmt, db.settings.currency)} - ${feeDescription.trim()}`);
       onUpdateDb(updated);

@@ -413,7 +413,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
     const doc: MovementPrintBlock = {
       title: `كشف حساب: ${party.name}`,
-      serialNo: `#STMT-${party.id.slice(0, 8)}`,
+      serialNo: party.code || '1',
       date: new Date().toISOString().slice(0, 10),
       partyLabel: isCustomer ? 'العميل' : 'المورد',
       partyName: party.name,

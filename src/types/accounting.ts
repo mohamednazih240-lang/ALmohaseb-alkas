@@ -352,6 +352,7 @@ export interface Voucher {
 
 export interface TreasuryEntry {
   id: string;
+  number?: string;
   date: string;
   createdAt?: string;
   direction: 'in' | 'out';
@@ -371,6 +372,7 @@ export interface TreasuryEntry {
 
 export interface SimpleRecord {
   id: string;
+  number?: string;
   date: string;
   category: string;
   amount: number;
@@ -389,6 +391,7 @@ export interface SimpleRecord {
 
 export interface StockAdjustment {
   id: string;
+  number?: string;
   date: string;
   productId: string;
   productName: string;
@@ -403,6 +406,7 @@ export interface StockAdjustment {
 
 export interface StockTransfer {
   id: string;
+  number?: string;
   date: string;
   productId: string;
   productName: string;
@@ -693,6 +697,14 @@ export interface AppSettings {
   nextQuote: number;
   nextOrder: number;
   nextGRN?: number;
+  nextJournal?: number;
+  nextExpense?: number;
+  nextRevenue?: number;
+  nextTransfer?: number;
+  nextAdjustment?: number;
+  nextTreasury?: number;
+  nextFixedAsset?: number;
+  sequencesNormalizedVersion?: number;
 }
 
 export interface AccountingDB {

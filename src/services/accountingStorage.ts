@@ -714,7 +714,16 @@ export function defaultSettings(): AppSettings {
     nextReceipt: 1,
     nextPayment: 1,
     nextQuote: 1,
-    nextOrder: 1
+    nextOrder: 1,
+    nextGRN: 1,
+    nextJournal: 1,
+    nextExpense: 1,
+    nextRevenue: 1,
+    nextTransfer: 1,
+    nextAdjustment: 1,
+    nextTreasury: 1,
+    nextFixedAsset: 1,
+    sequencesNormalizedVersion: 1
   };
 }
 
@@ -2237,8 +2246,10 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   }
 
   // التدقيق غير التوليدي: تصحيح الأرصدة وتنظيف التكرارات والسجلات الشبحية فقط دون إنشاء أي حركة أو سند أو صنف جديد لم يسجله المستخدم
+  db = normalizeAllSectionSequences(db);
   db = verifyAndCorrectStockMovements(db).db;
   db = reconcileAndDeduplicateAllFinancialRecords(db).db;
+  db = normalizeAllSectionSequences(db);
 
   return db;
 }
@@ -2261,10 +2272,16 @@ export function wipeAllInvoicesFromSystem(db: AccountingDB): AccountingDB {
   // Reset counters to 1
   updated.settings.nextPurchase = 1;
   updated.settings.nextSale = 1;
+  updated.settings.nextSaleReturn = 1;
+  updated.settings.nextPurchaseReturn = 1;
   updated.settings.nextReceipt = 1;
   updated.settings.nextPayment = 1;
   updated.settings.nextQuote = 1;
   updated.settings.nextOrder = 1;
+  updated.settings.nextGRN = 1;
+  updated.settings.nextJournal = 1;
+  updated.settings.nextTreasury = 1;
+  updated.settings.sequencesNormalizedVersion = 1;
   
   // Recalculate customer and supplier balances
   (updated.customers || []).forEach(c => {
@@ -2325,7 +2342,15 @@ export function cleanAllDemoTransactions(db: AccountingDB): AccountingDB {
       nextPayment: 1,
       nextQuote: 1,
       nextOrder: 1,
-      nextGRN: 1
+      nextGRN: 1,
+      nextJournal: 1,
+      nextExpense: 1,
+      nextRevenue: 1,
+      nextTransfer: 1,
+      nextAdjustment: 1,
+      nextTreasury: 1,
+      nextFixedAsset: 1,
+      sequencesNormalizedVersion: 1
     },
     audit: [
       {
@@ -2368,6 +2393,15 @@ export function wipeEntireSystemToCleanSlate(db: AccountingDB): AccountingDB {
   updated.settings.nextReceipt = 1;
   updated.settings.nextQuote = 1;
   updated.settings.nextOrder = 1;
+  updated.settings.nextGRN = 1;
+  updated.settings.nextJournal = 1;
+  updated.settings.nextExpense = 1;
+  updated.settings.nextRevenue = 1;
+  updated.settings.nextTransfer = 1;
+  updated.settings.nextAdjustment = 1;
+  updated.settings.nextTreasury = 1;
+  updated.settings.nextFixedAsset = 1;
+  updated.settings.sequencesNormalizedVersion = 1;
   updated.cleanGeneration = 5;
 
   logAudit(
@@ -2514,7 +2548,7 @@ export function loadTenantDatabase(tenantId: string): AccountingDB {
 
     // Strictly sanitize by company: users, PINs, branches, and warehouses
     parsed = sanitizeCompanyDatabase(parsed, normalizedTenantId);
-    if (!parsed.settings.nextGRN) parsed.settings.nextGRN = 7001;
+    if (!parsed.settings.nextGRN) parsed.settings.nextGRN = 1;
 
     // Restore lightweight cached logo if localStorage main snapshot lacked it (e.g. quota fallback)
     if (!parsed.settings.logo && !parsed.settings.logoRemovedAt) {
@@ -2973,8 +3007,10 @@ export function executeCashFreezeTransfer(
     branchName: targetBranchName
   });
 
+  const nextTrNum = getNextUniqueTreasuryNumber(updated);
   updated.treasury.unshift({
     id: generateId('tr_frz_cash'),
+    number: nextTrNum.number,
     date: entryDate,
     createdAt: nowIso,
     direction: isFreeze ? 'out' : 'in',
@@ -2988,10 +3024,12 @@ export function executeCashFreezeTransfer(
     branchId: targetBranchId,
     branchName: targetBranchName
   });
+  updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, nextTrNum.nextSeq + 1);
 
+  const nextJNum = getNextUniqueJournalNumber(updated);
   const journal: JournalEntry = {
     id: generateId('jrn_frz'),
-    number: `J-${Date.now().toString().slice(-6)}`,
+    number: nextJNum.number,
     date: entryDate,
     description: isFreeze
       ? `تجميد مبلغ نقدي جانباً (${targetBranchName})${noteSuffix}`
@@ -3012,6 +3050,7 @@ export function executeCashFreezeTransfer(
 
   if (cashAcc.id !== frozenAcc.id) {
     updated.journals.unshift(journal);
+    updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJNum.nextSeq + 1);
   }
 
   logAudit(
@@ -3079,8 +3118,10 @@ export function executeProfitWithdrawalFromDrawer(
   const prwId = generateId('prw');
   const noteSuffix = params.note?.trim() ? ` — ${params.note.trim()}` : '';
 
+  const nextTrPrw = getNextUniqueTreasuryNumber(updated);
   updated.treasury.unshift({
     id: generateId('tr_prw'),
+    number: nextTrPrw.number,
     date: entryDate,
     createdAt: nowIso,
     direction: 'out',
@@ -3092,11 +3133,13 @@ export function executeProfitWithdrawalFromDrawer(
     branchId: targetBranchId,
     branchName: targetBranchName
   });
+  updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, nextTrPrw.nextSeq + 1);
 
   if (drawingsAcc.id !== cashAcc.id) {
+    const nextJPrw = getNextUniqueJournalNumber(updated);
     updated.journals.unshift({
       id: generateId('jrn_prw'),
-      number: `J-${Date.now().toString().slice(-6)}`,
+      number: nextJPrw.number,
       date: entryDate,
       description: `سحب وإخراج أرباح يومية من الدرج (${targetBranchName})${noteSuffix}`,
       sourceType: 'manual',
@@ -3107,6 +3150,7 @@ export function executeProfitWithdrawalFromDrawer(
       ],
       createdAt: nowIso
     });
+    updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJPrw.nextSeq + 1);
   }
 
   logAudit(
@@ -3247,11 +3291,15 @@ export function calculateFinancialSummary(db: AccountingDB, branchId?: string) {
 /**
  * Creates automated double-entry journal entry for an invoice
  */
-export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): JournalEntry {
+export function createInvoiceJournal(db: AccountingDB, invoice: Invoice, existingNumber?: string): JournalEntry {
   const isSale = invoice.type === 'sale';
   const isReturn = invoice.invoiceKind === 'sale_return' || invoice.invoiceKind === 'purchase_return';
   const lines: JournalLine[] = [];
-  const jNum = `J-${Date.now().toString().slice(-6)}`;
+  const nextJInfo = getNextUniqueJournalNumber(db);
+  const jNum = (existingNumber && /^\d+$/.test(String(existingNumber).trim())) ? String(existingNumber).trim() : nextJInfo.number;
+  if (db.settings && (!existingNumber || jNum === nextJInfo.number)) {
+    db.settings.nextJournal = Math.max(db.settings.nextJournal || 1, nextJInfo.nextSeq + 1);
+  }
 
   const totalRounded = roundMoney(Math.max(0, Number(invoice.total) || 0));
   const validNonCreditPayments = (invoice.payments || [])
@@ -3632,9 +3680,13 @@ export function createInvoiceJournal(db: AccountingDB, invoice: Invoice): Journa
 /**
  * Creates double-entry journal for a Voucher (سند قبض أو صرف)
  */
-export function createVoucherJournal(db: AccountingDB, voucher: Voucher): JournalEntry {
+export function createVoucherJournal(db: AccountingDB, voucher: Voucher, existingNumber?: string): JournalEntry {
   const isReceipt = voucher.type === 'receipt';
-  const jNum = `J-${Date.now().toString().slice(-6)}`;
+  const nextJInfo = getNextUniqueJournalNumber(db);
+  const jNum = (existingNumber && /^\d+$/.test(String(existingNumber).trim())) ? String(existingNumber).trim() : nextJInfo.number;
+  if (db.settings && (!existingNumber || jNum === nextJInfo.number)) {
+    db.settings.nextJournal = Math.max(db.settings.nextJournal || 1, nextJInfo.nextSeq + 1);
+  }
   const lines: JournalLine[] = [];
   const amt = roundMoney(Math.max(0, Number(voucher.amount) || 0));
 
@@ -5367,22 +5419,90 @@ export function isDuplicateVoucherNumber(db: AccountingDB, number: string, type?
   );
 }
 
+function parseLeadingPureSeq(raw?: string | number | null): number {
+  const str = String(raw ?? '').trim();
+  if (!str) return 0;
+  const match = str.match(/^(\d+)(?:-\d+)?$/);
+  if (!match) return 0;
+  const n = parseInt(match[1], 10);
+  return isNaN(n) || n <= 0 ? 0 : n;
+}
+
+function getNextPureSequenceFromList(rawValues: (string | number | undefined | null)[]): { number: string; nextSeq: number } {
+  const existingSet = new Set<string>();
+  let maxSeq = 0;
+  rawValues.forEach(val => {
+    const str = String(val ?? '').trim();
+    if (!str) return;
+    existingSet.add(str);
+    const n = parseLeadingPureSeq(str);
+    if (n > maxSeq) maxSeq = n;
+  });
+  let seq = Math.max(1, maxSeq + 1);
+  let candidate = String(seq);
+  while (existingSet.has(candidate)) {
+    seq += 1;
+    candidate = String(seq);
+  }
+  return { number: candidate, nextSeq: seq };
+}
+
+export function getNextUniqueOrderNumber(db: AccountingDB): { number: string; nextSeq: number } {
+  return getNextPureSequenceFromList((db.orders || []).map(o => o.number));
+}
+
+export function getNextUniqueGRNNumber(db: AccountingDB): { number: string; nextSeq: number } {
+  return getNextPureSequenceFromList((db.goodsReceivedNotes || []).map(g => g.number));
+}
+
+export function getNextUniqueJournalNumber(db: AccountingDB): { number: string; nextSeq: number } {
+  return getNextPureSequenceFromList((db.journals || []).map(j => j.number));
+}
+
+export function getNextUniqueSimpleNumber(db: AccountingDB, kind: 'expense' | 'revenue'): { number: string; nextSeq: number } {
+  const list = kind === 'expense' ? (db.expenses || []) : (db.revenues || []);
+  return getNextPureSequenceFromList(list.map(r => r.number));
+}
+
+export function getNextUniqueTransferNumber(db: AccountingDB): { number: string; nextSeq: number } {
+  return getNextPureSequenceFromList((db.transfers || []).map(t => t.number));
+}
+
+export function getNextUniqueAdjustmentNumber(db: AccountingDB): { number: string; nextSeq: number } {
+  return getNextPureSequenceFromList((db.adjustments || []).map(a => a.number));
+}
+
+export function getNextUniqueTreasuryNumber(db: AccountingDB): { number: string; nextSeq: number } {
+  return getNextPureSequenceFromList((db.treasury || []).map(t => t.number));
+}
+
+export function getNextUniqueFixedAssetCode(db: AccountingDB): { number: string; nextSeq: number } {
+  return getNextPureSequenceFromList((db.fixedAssets || []).map(a => a.code));
+}
+
 export function getNextUniqueVoucherNumber(
   db: AccountingDB,
   type: 'receipt' | 'payment'
 ): { number: string; nextSeq: number } {
-  // Independent pure numeric sequence for each voucher type starting from 1
+  // Independent pure numeric sequence starting from 1.
+  // Manual vouchers also start above the highest paired invoice number so invoice #N <-> auto-voucher #N stays reserved 1-to-1.
   const sectionVouchers = (db.vouchers || []).filter(v => v.type === type);
+  const pairedInvoices = (db.invoices || []).filter(inv => {
+    if (!inv || inv.invoiceKind === 'quote') return false;
+    if (type === 'receipt') {
+      return (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale') && inv.invoiceKind !== 'sale_return';
+    }
+    return (inv.type === 'purchase' || inv.invoiceKind === 'purchase') && inv.invoiceKind !== 'purchase_return';
+  });
+
   let maxSeq = 0;
   sectionVouchers.forEach(v => {
-    const raw = String(v.number || '').trim();
-    const digits = raw.replace(/\D/g, '');
-    if (digits) {
-      const n = parseInt(digits, 10);
-      if (!isNaN(n) && n > maxSeq) {
-        maxSeq = n;
-      }
-    }
+    const n = parseLeadingPureSeq(v.number);
+    if (n > maxSeq) maxSeq = n;
+  });
+  pairedInvoices.forEach(inv => {
+    const n = parseLeadingPureSeq(inv.number);
+    if (n > maxSeq) maxSeq = n;
   });
 
   let seq = Math.max(1, maxSeq + 1);
@@ -5576,11 +5696,33 @@ export function syncInvoiceVouchers(
       existingAutoVouchers.find(v => v.id === detId) ||
       (idx === 0 ? existingAutoVouchers.find(v => !expectedIds.has(v.id)) : undefined);
 
-    let voucherNumber = existingForSlot?.number;
-    if (!voucherNumber) {
-      const nextNumInfo = getNextUniqueVoucherNumber(updated, voucherType);
-      voucherNumber = nextNumInfo.number;
-      updated.settings[nextSettingKey] = Math.max(updated.settings[nextSettingKey] || 1, nextNumInfo.nextSeq + 1);
+    // Strict 1-to-1 binding: primary voucher for invoice #N ALWAYS receives number #N (split legs #N-2, #N-3, ...)
+    const baseInvNum = String(invoice.number || '').trim();
+    const expectedVoucherNumber = idx === 0
+      ? baseInvNum
+      : `${baseInvNum}-${idx + 1}`;
+
+    // If an unrelated manual voucher occupies expectedVoucherNumber, relocate the manual voucher to next free sequential number
+    if (expectedVoucherNumber) {
+      updated.vouchers.forEach(other => {
+        if (
+          other &&
+          other.type === voucherType &&
+          String(other.number).trim() === expectedVoucherNumber &&
+          !matchesAutoForThisInvoice(other) &&
+          other.id !== detId
+        ) {
+          const relocated = getNextUniqueVoucherNumber(updated, voucherType);
+          other.number = relocated.number;
+          updated.settings[nextSettingKey] = Math.max(updated.settings[nextSettingKey] || 1, relocated.nextSeq + 1);
+        }
+      });
+    }
+
+    const voucherNumber = expectedVoucherNumber || existingForSlot?.number || getNextUniqueVoucherNumber(updated, voucherType).number;
+    const seqDigits = parseLeadingPureSeq(voucherNumber);
+    if (seqDigits > 0) {
+      updated.settings[nextSettingKey] = Math.max(updated.settings[nextSettingKey] || 1, seqDigits + 1);
     }
 
     const desc = isSale
@@ -5634,6 +5776,378 @@ export function syncInvoiceVouchers(
 }
 
 /**
+ * Normalizes every section across the ERP to independent pure integer sequences (1, 2, 3...)
+ * and guarantees strict 1-to-1 numbering between Invoices (#N) and their linked Vouchers (#N).
+ * Never deletes any invoices, items, vouchers, or financial records.
+ */
+export function normalizeAllSectionSequences(db: AccountingDB): AccountingDB {
+  if (!db || !db.settings) return db;
+
+  const isPureNumericStr = (val?: string | number | null): boolean => /^\d+(?:-\d+)?$/.test(String(val ?? '').trim());
+  const compareChrono = (
+    a: { date?: string; createdAt?: string; number?: string; id?: string },
+    b: { date?: string; createdAt?: string; number?: string; id?: string }
+  ): number => {
+    const da = (a.date || '').localeCompare(b.date || '');
+    if (da !== 0) return da;
+    const ca = (a.createdAt || '').localeCompare(b.createdAt || '');
+    if (ca !== 0) return ca;
+    const na = parseLeadingPureSeq(a.number);
+    const nb = parseLeadingPureSeq(b.number);
+    if (na !== nb && na > 0 && nb > 0) return na - nb;
+    return (a.id || '').localeCompare(b.id || '');
+  };
+
+  const replaceDocNumInText = (text: string | undefined, newNum: string): string | undefined => {
+    if (!text) return text;
+    return text.replace(/(رقم\s*#?\s*)([A-Za-z0-9_-]+)/, `$1${newNum}`);
+  };
+
+  const invById = new Map<string, Invoice>();
+  (db.invoices || []).forEach(inv => {
+    if (inv?.id) invById.set(inv.id, inv);
+  });
+
+  // 1. One-time full chronological 1..N renumbering of all existing historical data
+  if ((db.settings.sequencesNormalizedVersion || 0) < 1) {
+    const salesInvs: Invoice[] = [];
+    const purchaseInvs: Invoice[] = [];
+    const saleReturnInvs: Invoice[] = [];
+    const purchaseReturnInvs: Invoice[] = [];
+
+    (db.invoices || []).forEach(inv => {
+      if (!inv || inv.invoiceKind === 'quote') return;
+      // Preserve special attribution before renumbering legacy #17 purchase invoice if applicable
+      if (String(inv.number).trim() === '17' && !inv.createdBy) {
+        inv.createdBy = 'Ahmed Nazih';
+        inv.createdById = inv.createdById || 'usr_mvnj6i7d_vhlqh';
+      }
+      if (inv.invoiceKind === 'sale_return') {
+        saleReturnInvs.push(inv);
+      } else if (inv.invoiceKind === 'purchase_return') {
+        purchaseReturnInvs.push(inv);
+      } else if (inv.type === 'purchase' || inv.invoiceKind === 'purchase') {
+        purchaseInvs.push(inv);
+      } else {
+        salesInvs.push(inv);
+      }
+    });
+
+    const invIdToNewNum = new Map<string, string>();
+    const oldSaleNumToNew = new Map<string, string>();
+    const renumberInvSection = (list: Invoice[], isSaleSection: boolean) => {
+      list.sort(compareChrono).forEach((inv, idx) => {
+        const oldNum = String(inv.number || '').trim();
+        const newNum = String(idx + 1);
+        inv.number = newNum;
+        invIdToNewNum.set(inv.id, newNum);
+        if (isSaleSection && oldNum && !oldSaleNumToNew.has(oldNum)) {
+          oldSaleNumToNew.set(oldNum, newNum);
+        }
+      });
+    };
+
+    renumberInvSection(salesInvs, true);
+    renumberInvSection(purchaseInvs, false);
+    renumberInvSection(saleReturnInvs, false);
+    renumberInvSection(purchaseReturnInvs, false);
+
+    // Sync db.returns to match renumbered return invoices (and any standalone returns)
+    let standaloneSaleRetSeq = saleReturnInvs.length;
+    let standalonePurchRetSeq = purchaseReturnInvs.length;
+    (db.returns || []).forEach(ret => {
+      if (ret.originalInvoiceId && invIdToNewNum.has(ret.originalInvoiceId)) {
+        const mapped = invIdToNewNum.get(ret.originalInvoiceId)!;
+        ret.number = mapped;
+        ret.originalInvoiceNumber = mapped;
+      } else {
+        const nextR = ret.type === 'sale' ? ++standaloneSaleRetSeq : ++standalonePurchRetSeq;
+        ret.number = String(nextR);
+      }
+    });
+
+    // Sync Quotes
+    (db.quotes || []).sort(compareChrono).forEach((q, idx) => {
+      q.number = String(idx + 1);
+      if (q.convertedInvoiceId && invIdToNewNum.has(q.convertedInvoiceId)) {
+        q.convertedInvoiceNumber = invIdToNewNum.get(q.convertedInvoiceId)!;
+      }
+    });
+
+    // Sync Orders & GRN orderNumber foreign key
+    const orderIdToNewNum = new Map<string, string>();
+    (db.orders || []).sort(compareChrono).forEach((ord, idx) => {
+      const newNum = String(idx + 1);
+      ord.number = newNum;
+      orderIdToNewNum.set(ord.id, newNum);
+    });
+    (db.goodsReceivedNotes || []).sort(compareChrono).forEach((grn, idx) => {
+      grn.number = String(idx + 1);
+      if (grn.orderId && orderIdToNewNum.has(grn.orderId)) {
+        grn.orderNumber = orderIdToNewNum.get(grn.orderId)!;
+      }
+    });
+
+    // Sync StockMovements refNumbers for invoices
+    (db.stockMovements || []).forEach(sm => {
+      if (sm.sourceId && invIdToNewNum.has(sm.sourceId)) {
+        sm.refNumber = invIdToNewNum.get(sm.sourceId)!;
+      }
+    });
+
+    // Sync Treasury refNumber & description for invoices
+    (db.treasury || []).forEach(tr => {
+      const linkedId = tr.invoiceId || (tr.sourceId && invIdToNewNum.has(tr.sourceId) ? tr.sourceId : undefined);
+      if (linkedId && invIdToNewNum.has(linkedId)) {
+        const newNum = invIdToNewNum.get(linkedId)!;
+        tr.refNumber = newNum;
+        tr.description = replaceDocNumInText(tr.description, newNum) || tr.description;
+      }
+    });
+
+    // Sync Journals description for invoices
+    (db.journals || []).forEach(j => {
+      if (j.sourceId && invIdToNewNum.has(j.sourceId)) {
+        const newNum = invIdToNewNum.get(j.sourceId)!;
+        j.description = replaceDocNumInText(j.description, newNum) || j.description;
+      }
+    });
+
+    // Sync sellingPriceHistory notes if they reference renumbered sale invoices
+    (db.products || []).forEach(p => {
+      if (!Array.isArray(p.sellingPriceHistory)) return;
+      p.sellingPriceHistory.forEach(h => {
+        if (h?.note) {
+          const m = h.note.match(/فاتورة بيع رقم\s*([A-Za-z0-9_-]+)/);
+          if (m && oldSaleNumToNew.has(m[1])) {
+            h.note = h.note.replace(m[0], `فاتورة بيع رقم ${oldSaleNumToNew.get(m[1])}`);
+          }
+        }
+      });
+    });
+
+    // Sync Vouchers: auto-linked vouchers get strict 1-to-1 invoice number; manual vouchers sequence after max paired invoice
+    const receiptAuto: Voucher[] = [];
+    const receiptManual: Voucher[] = [];
+    const paymentAuto: Voucher[] = [];
+    const paymentManual: Voucher[] = [];
+    const voucherIdToNewNum = new Map<string, string>();
+
+    (db.vouchers || []).forEach(v => {
+      if (!v) return;
+      if (v.type === 'receipt') {
+        if (isAutoInvoiceVoucher(v) && v.invoiceId && invIdToNewNum.has(v.invoiceId)) receiptAuto.push(v);
+        else receiptManual.push(v);
+      } else {
+        if (isAutoInvoiceVoucher(v) && v.invoiceId && invIdToNewNum.has(v.invoiceId)) paymentAuto.push(v);
+        else paymentManual.push(v);
+      }
+    });
+
+    const assignAutoVouchers = (list: Voucher[]) => {
+      list.forEach(v => {
+        const newInvNum = invIdToNewNum.get(v.invoiceId!)!;
+        const splitMatch = v.id ? v.id.match(/_p(\d+)_/) : null;
+        const pIdx = splitMatch ? parseInt(splitMatch[1], 10) : 0;
+        const newVNum = pIdx > 0 ? `${newInvNum}-${pIdx + 1}` : newInvNum;
+        v.number = newVNum;
+        v.referenceNumber = newInvNum;
+        v.description = replaceDocNumInText(v.description, newInvNum) || v.description;
+        voucherIdToNewNum.set(v.id, newVNum);
+      });
+    };
+    assignAutoVouchers(receiptAuto);
+    assignAutoVouchers(paymentAuto);
+
+    let nextManualReceiptSeq = salesInvs.length;
+    receiptManual.sort(compareChrono).forEach(v => {
+      nextManualReceiptSeq += 1;
+      v.number = String(nextManualReceiptSeq);
+      if (v.invoiceId && invIdToNewNum.has(v.invoiceId)) {
+        v.referenceNumber = invIdToNewNum.get(v.invoiceId)!;
+      }
+      voucherIdToNewNum.set(v.id, v.number);
+    });
+
+    let nextManualPaymentSeq = purchaseInvs.length;
+    paymentManual.sort(compareChrono).forEach(v => {
+      nextManualPaymentSeq += 1;
+      v.number = String(nextManualPaymentSeq);
+      if (v.invoiceId && invIdToNewNum.has(v.invoiceId)) {
+        v.referenceNumber = invIdToNewNum.get(v.invoiceId)!;
+      }
+      voucherIdToNewNum.set(v.id, v.number);
+    });
+
+    // Update treasury & journals for manual vouchers
+    (db.treasury || []).forEach(tr => {
+      if (tr.sourceId && voucherIdToNewNum.has(tr.sourceId)) {
+        const vNum = voucherIdToNewNum.get(tr.sourceId)!;
+        const vObj = (db.vouchers || []).find(v => v.id === tr.sourceId);
+        tr.refNumber = vObj?.referenceNumber || vNum;
+        if (tr.description && /سند (?:قبض|صرف)\s+[A-Za-z0-9_-]+/.test(tr.description)) {
+          tr.description = tr.description.replace(/(سند (?:قبض|صرف)\s+)([A-Za-z0-9_-]+)/, `$1${vNum}`);
+        }
+      }
+    });
+    (db.journals || []).forEach(j => {
+      if (j.sourceId && voucherIdToNewNum.has(j.sourceId)) {
+        const vNum = voucherIdToNewNum.get(j.sourceId)!;
+        j.description = replaceDocNumInText(j.description, vNum) || j.description;
+      }
+    });
+
+    // Expenses & Revenues
+    const expIdToNewNum = new Map<string, string>();
+    (db.expenses || []).sort(compareChrono).forEach((e, idx) => {
+      e.number = String(idx + 1);
+      expIdToNewNum.set(e.id, e.number);
+    });
+    const revIdToNewNum = new Map<string, string>();
+    (db.revenues || []).sort(compareChrono).forEach((r, idx) => {
+      r.number = String(idx + 1);
+      revIdToNewNum.set(r.id, r.number);
+    });
+    (db.treasury || []).forEach(tr => {
+      if (tr.sourceId && expIdToNewNum.has(tr.sourceId)) {
+        tr.refNumber = expIdToNewNum.get(tr.sourceId)!;
+      } else if (tr.sourceId && revIdToNewNum.has(tr.sourceId)) {
+        tr.refNumber = revIdToNewNum.get(tr.sourceId)!;
+      }
+    });
+
+    // Transfers & Adjustments
+    const trfIdToNewNum = new Map<string, string>();
+    (db.transfers || []).sort(compareChrono).forEach((t, idx) => {
+      t.number = String(idx + 1);
+      trfIdToNewNum.set(t.id, t.number);
+    });
+    const adjIdToNewNum = new Map<string, string>();
+    (db.adjustments || []).sort(compareChrono).forEach((a, idx) => {
+      a.number = String(idx + 1);
+      adjIdToNewNum.set(a.id, a.number);
+    });
+    (db.stockMovements || []).forEach(sm => {
+      if (sm.sourceId && trfIdToNewNum.has(sm.sourceId)) {
+        sm.refNumber = trfIdToNewNum.get(sm.sourceId)!;
+      } else if (sm.sourceId && adjIdToNewNum.has(sm.sourceId)) {
+        sm.refNumber = adjIdToNewNum.get(sm.sourceId)!;
+      }
+    });
+
+    // Treasury & Journals & FixedAssets
+    (db.treasury || []).sort(compareChrono).forEach((tr, idx) => {
+      tr.number = String(idx + 1);
+    });
+    (db.journals || []).sort(compareChrono).forEach((j, idx) => {
+      j.number = String(idx + 1);
+    });
+    (db.fixedAssets || [])
+      .sort((a, b) => (a.purchaseDate || '').localeCompare(b.purchaseDate || '') || (a.id || '').localeCompare(b.id || ''))
+      .forEach((a, idx) => {
+        a.code = String(idx + 1);
+      });
+
+    db.settings.sequencesNormalizedVersion = 1;
+  }
+
+  // 2. Always-on lightweight guard: repair any legacy prefixed or missing numbers & enforce auto-voucher <-> invoice #N
+  (db.orders || []).forEach(ord => {
+    if (!isPureNumericStr(ord.number)) {
+      ord.number = getNextUniqueOrderNumber(db).number;
+    }
+  });
+  (db.goodsReceivedNotes || []).forEach(grn => {
+    if (!isPureNumericStr(grn.number)) {
+      grn.number = getNextUniqueGRNNumber(db).number;
+    }
+  });
+  (db.journals || []).forEach(j => {
+    if (!isPureNumericStr(j.number)) {
+      j.number = getNextUniqueJournalNumber(db).number;
+    }
+  });
+  (db.expenses || []).forEach(e => {
+    if (!isPureNumericStr(e.number)) {
+      e.number = getNextUniqueSimpleNumber(db, 'expense').number;
+    }
+  });
+  (db.revenues || []).forEach(r => {
+    if (!isPureNumericStr(r.number)) {
+      r.number = getNextUniqueSimpleNumber(db, 'revenue').number;
+    }
+  });
+  (db.transfers || []).forEach(t => {
+    if (!isPureNumericStr(t.number)) {
+      t.number = getNextUniqueTransferNumber(db).number;
+    }
+  });
+  (db.adjustments || []).forEach(a => {
+    if (!isPureNumericStr(a.number)) {
+      a.number = getNextUniqueAdjustmentNumber(db).number;
+    }
+  });
+  (db.treasury || []).forEach(tr => {
+    if (!isPureNumericStr(tr.number)) {
+      tr.number = getNextUniqueTreasuryNumber(db).number;
+    }
+  });
+
+  // Sync stockMovements refNumber for transfers & adjustments if legacy TRF-/ADJ-
+  const trfMap = new Map((db.transfers || []).map(t => [t.id, t.number]));
+  const adjMap = new Map((db.adjustments || []).map(a => [a.id, a.number]));
+  (db.stockMovements || []).forEach(sm => {
+    if (sm.sourceId && trfMap.has(sm.sourceId) && trfMap.get(sm.sourceId)) {
+      sm.refNumber = trfMap.get(sm.sourceId)!;
+    } else if (sm.sourceId && adjMap.has(sm.sourceId) && adjMap.get(sm.sourceId)) {
+      sm.refNumber = adjMap.get(sm.sourceId)!;
+    }
+  });
+
+  // Enforce auto-voucher <-> invoice #N 1-to-1 binding continuously
+  (db.vouchers || []).forEach(v => {
+    if (!v || !isAutoInvoiceVoucher(v) || !v.invoiceId) return;
+    const inv = invById.get(v.invoiceId);
+    if (!inv || !inv.number) return;
+    const splitMatch = v.id ? v.id.match(/_p(\d+)_/) : null;
+    const pIdx = splitMatch ? parseInt(splitMatch[1], 10) : 0;
+    const expectedNum = pIdx > 0 ? `${String(inv.number).trim()}-${pIdx + 1}` : String(inv.number).trim();
+    if (String(v.number).trim() !== expectedNum) {
+      // Relocate any manual voucher sitting on expectedNum
+      (db.vouchers || []).forEach(other => {
+        if (other && other.id !== v.id && other.type === v.type && !isAutoInvoiceVoucher(other) && String(other.number).trim() === expectedNum) {
+          other.number = getNextUniqueVoucherNumber(db, other.type).number;
+        }
+      });
+      v.number = expectedNum;
+    }
+    if (v.referenceNumber !== inv.number) {
+      v.referenceNumber = inv.number;
+    }
+  });
+
+  // Sync all settings.next* counters cleanly
+  db.settings.nextSale = getNextUniqueInvoiceNumber(db, 'sale').nextSeq;
+  db.settings.nextPurchase = getNextUniqueInvoiceNumber(db, 'purchase').nextSeq;
+  db.settings.nextSaleReturn = getNextUniqueInvoiceNumber(db, 'sale_return').nextSeq;
+  db.settings.nextPurchaseReturn = getNextUniqueInvoiceNumber(db, 'purchase_return').nextSeq;
+  db.settings.nextQuote = getNextUniqueInvoiceNumber(db, 'quote').nextSeq;
+  db.settings.nextOrder = getNextUniqueOrderNumber(db).nextSeq;
+  db.settings.nextGRN = getNextUniqueGRNNumber(db).nextSeq;
+  db.settings.nextReceipt = getNextUniqueVoucherNumber(db, 'receipt').nextSeq;
+  db.settings.nextPayment = getNextUniqueVoucherNumber(db, 'payment').nextSeq;
+  db.settings.nextJournal = getNextUniqueJournalNumber(db).nextSeq;
+  db.settings.nextExpense = getNextUniqueSimpleNumber(db, 'expense').nextSeq;
+  db.settings.nextRevenue = getNextUniqueSimpleNumber(db, 'revenue').nextSeq;
+  db.settings.nextTransfer = getNextUniqueTransferNumber(db).nextSeq;
+  db.settings.nextAdjustment = getNextUniqueAdjustmentNumber(db).nextSeq;
+  db.settings.nextTreasury = getNextUniqueTreasuryNumber(db).nextSeq;
+  db.settings.nextFixedAsset = getNextUniqueFixedAssetCode(db).nextSeq;
+
+  return db;
+}
+
+/**
  * Reconciles all existing Sales & Purchase invoices so every paid/partially paid invoice
  * has its linked Receipt/Payment Voucher and Treasury entry strictly bound by `invoiceId`.
  */
@@ -5681,7 +6195,18 @@ export function mergeDatabasesSafely(
       nextSaleReturn: Math.max(prevDb.settings?.nextSaleReturn || 1, ensuredIncoming.settings?.nextSaleReturn || 1),
       nextPurchaseReturn: Math.max(prevDb.settings?.nextPurchaseReturn || 1, ensuredIncoming.settings?.nextPurchaseReturn || 1),
       nextReceipt: Math.max(prevDb.settings?.nextReceipt || 1, ensuredIncoming.settings?.nextReceipt || 1),
-      nextPayment: Math.max(prevDb.settings?.nextPayment || 1, ensuredIncoming.settings?.nextPayment || 1)
+      nextPayment: Math.max(prevDb.settings?.nextPayment || 1, ensuredIncoming.settings?.nextPayment || 1),
+      nextQuote: Math.max(prevDb.settings?.nextQuote || 1, ensuredIncoming.settings?.nextQuote || 1),
+      nextOrder: Math.max(prevDb.settings?.nextOrder || 1, ensuredIncoming.settings?.nextOrder || 1),
+      nextGRN: Math.max(prevDb.settings?.nextGRN || 1, ensuredIncoming.settings?.nextGRN || 1),
+      nextJournal: Math.max(prevDb.settings?.nextJournal || 1, ensuredIncoming.settings?.nextJournal || 1),
+      nextExpense: Math.max(prevDb.settings?.nextExpense || 1, ensuredIncoming.settings?.nextExpense || 1),
+      nextRevenue: Math.max(prevDb.settings?.nextRevenue || 1, ensuredIncoming.settings?.nextRevenue || 1),
+      nextTransfer: Math.max(prevDb.settings?.nextTransfer || 1, ensuredIncoming.settings?.nextTransfer || 1),
+      nextAdjustment: Math.max(prevDb.settings?.nextAdjustment || 1, ensuredIncoming.settings?.nextAdjustment || 1),
+      nextTreasury: Math.max(prevDb.settings?.nextTreasury || 1, ensuredIncoming.settings?.nextTreasury || 1),
+      nextFixedAsset: Math.max(prevDb.settings?.nextFixedAsset || 1, ensuredIncoming.settings?.nextFixedAsset || 1),
+      sequencesNormalizedVersion: Math.max(prevDb.settings?.sequencesNormalizedVersion || 0, ensuredIncoming.settings?.sequencesNormalizedVersion || 0)
     },
     products: mergedProducts,
     invoices: mergedInvoices,
@@ -5715,6 +6240,8 @@ export function mergeDatabasesSafely(
   const purged = purgeDeletedRecordsFromDb(rawMerged, deletedIdsSet);
   deduplicatePartiesAndRepairReferences(purged);
   reconcileInvoicePartyIntegrity(purged);
-  const stockVerified = verifyAndCorrectStockMovements(purged).db;
-  return reconcileAndDeduplicateAllFinancialRecords(stockVerified).db;
+  const normalized = normalizeAllSectionSequences(purged);
+  const stockVerified = verifyAndCorrectStockMovements(normalized).db;
+  const reconciled = reconcileAndDeduplicateAllFinancialRecords(stockVerified).db;
+  return normalizeAllSectionSequences(reconciled);
 }

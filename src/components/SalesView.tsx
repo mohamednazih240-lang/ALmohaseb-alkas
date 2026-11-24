@@ -178,8 +178,16 @@ export const SalesView: React.FC<SalesViewProps> = ({
         return matchSearch && matchStatus && matchDate;
       })
       .sort((a, b) => {
-        if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
-        if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
+        if (sortBy === 'newest') {
+          const dt = new Date(b.date).getTime() - new Date(a.date).getTime();
+          if (dt !== 0) return dt;
+          return (parseInt(String(b.number).replace(/\D/g, ''), 10) || 0) - (parseInt(String(a.number).replace(/\D/g, ''), 10) || 0);
+        }
+        if (sortBy === 'oldest') {
+          const dt = new Date(a.date).getTime() - new Date(b.date).getTime();
+          if (dt !== 0) return dt;
+          return (parseInt(String(a.number).replace(/\D/g, ''), 10) || 0) - (parseInt(String(b.number).replace(/\D/g, ''), 10) || 0);
+        }
         if (sortBy === 'highest') return b.total - a.total;
         if (sortBy === 'lowest') return a.total - b.total;
         return 0;
@@ -212,8 +220,16 @@ export const SalesView: React.FC<SalesViewProps> = ({
         return matchSearch && matchDate;
       })
       .sort((a, b) => {
-        if (sortBy === 'newest') return new Date(b.date).getTime() - new Date(a.date).getTime();
-        if (sortBy === 'oldest') return new Date(a.date).getTime() - new Date(b.date).getTime();
+        if (sortBy === 'newest') {
+          const dt = new Date(b.date).getTime() - new Date(a.date).getTime();
+          if (dt !== 0) return dt;
+          return (parseInt(String(b.number).replace(/\D/g, ''), 10) || 0) - (parseInt(String(a.number).replace(/\D/g, ''), 10) || 0);
+        }
+        if (sortBy === 'oldest') {
+          const dt = new Date(a.date).getTime() - new Date(b.date).getTime();
+          if (dt !== 0) return dt;
+          return (parseInt(String(a.number).replace(/\D/g, ''), 10) || 0) - (parseInt(String(b.number).replace(/\D/g, ''), 10) || 0);
+        }
         if (sortBy === 'highest') return b.total - a.total;
         if (sortBy === 'lowest') return a.total - b.total;
         return 0;

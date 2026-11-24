@@ -326,7 +326,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
     (db.expenses || [])
       .filter(e => isTargetBranch(e.branchId))
-      .forEach(e => {
+      .forEach((e, eIdx) => {
         const d = (e.date || '').slice(0, 10);
         if (expFromDate && d < expFromDate) return;
         if (expToDate && d > expToDate) return;
@@ -339,13 +339,13 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
           method: e.method || 'نقدي',
           amount: Number(e.amount) || 0,
           source: 'expense_ledger',
-          serial: `EXP-${e.id.slice(-4)}`
+          serial: e.number || String(eIdx + 1)
         });
       });
 
     (db.vouchers || [])
       .filter(v => v.type === 'payment' && v.paymentCategory === 'expense' && isTargetBranch(v.branchId))
-      .forEach(v => {
+      .forEach((v, vIdx) => {
         const d = (v.date || '').slice(0, 10);
         if (expFromDate && d < expFromDate) return;
         if (expToDate && d > expToDate) return;
@@ -358,7 +358,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
           method: v.paymentMethod || 'نقدي',
           amount: Number(v.amount) || 0,
           source: 'payment_voucher',
-          serial: v.number || `V-${v.id.slice(-4)}`
+          serial: v.number || String(vIdx + 1)
         });
       });
 
@@ -409,7 +409,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
         t === 'asset' ? 'أصول' : t === 'liability' ? 'التزامات' : t === 'equity' ? 'حقوق ملكية' : t === 'revenue' ? 'إيرادات' : 'مصروفات';
       const doc: MovementPrintBlock = {
         title: 'ميزان المراجعة بالمجاميع والأرصدة',
-        serialNo: `#TB-${today}`,
+        serialNo: '1',
         date: today,
         partyLabel: 'المنشأة',
         partyName: db.settings.company,
@@ -448,7 +448,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
       const party = selectedStatementParty;
       const doc: MovementPrintBlock = {
         title: party ? `كشف حساب: ${party.name}` : 'كشف حساب تفصيلي',
-        serialNo: `#STMT-${party?.code || today}`,
+        serialNo: party?.code || '1',
         date: today,
         partyLabel: statementPartyType === 'customer' ? 'العميل' : 'المورد',
         partyName: party ? party.name : 'لم يتم اختيار طرف',
@@ -486,7 +486,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
     if (activeReportTab === 'income') {
       const doc: MovementPrintBlock = {
         title: `قائمة الدخل الشاملة - ${branchLabel}`,
-        serialNo: `#INC-${today}`,
+        serialNo: '1',
         date: today,
         partyLabel: 'المنشأة والفرع',
         partyName: `${db.settings.company} - ${branchLabel}`,
@@ -519,7 +519,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
       const doc: MovementPrintBlock = {
         title: `تقرير المبيعات والتحصيلات - ${branchLabel}`,
-        serialNo: `#SAL-${today}`,
+        serialNo: '1',
         date: today,
         partyLabel: 'إجمالي الفواتير',
         partyName: `${filteredSales.length} فاتورة مسجلة (${branchLabel})`,
@@ -559,7 +559,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
       const doc: MovementPrintBlock = {
         title: `تقرير المشتريات والتوريدات - ${branchLabel}`,
-        serialNo: `#PUR-${today}`,
+        serialNo: '1',
         date: today,
         partyLabel: 'إجمالي الفواتير',
         partyName: `${filteredPurchases.length} فاتورة شراء (${branchLabel})`,
@@ -599,7 +599,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
 
       const doc: MovementPrintBlock = {
         title: `تقرير جرد وتقييم المخزون - ${branchLabel}`,
-        serialNo: `#INV-VAL-${today}`,
+        serialNo: '1',
         date: today,
         partyLabel: 'عدد الأصناف',
         partyName: `${branchProducts.length} صنف مسجل (${branchLabel})`,
@@ -638,7 +638,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
     if (activeReportTab === 'receivables') {
       const doc: MovementPrintBlock = {
         title: `تقرير ديون العملاء (ذمم مدينة) - ${branchLabel}`,
-        serialNo: `#REC-${today}`,
+        serialNo: '1',
         date: today,
         partyLabel: 'عدد العملاء',
         partyName: `${db.customers.length} عميل`,
@@ -682,7 +682,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
             : 'كامل الفترة';
       const doc: MovementPrintBlock = {
         title: `تقرير تحليل المصروفات حسب البند - ${branchLabel}`,
-        serialNo: `#EXP-AN-${today}`,
+        serialNo: '1',
         date: today,
         partyLabel: 'الفترة الزمنية',
         partyName: `${periodText} (${expensesAnalysisData.totalCount} حركة)`,
@@ -716,7 +716,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
     // Default payables
     const doc: MovementPrintBlock = {
       title: `تقرير مستحقات الموردين (ذمم دائنة) - ${branchLabel}`,
-      serialNo: `#PAY-${today}`,
+      serialNo: '1',
       date: today,
       partyLabel: 'عدد الموردين',
       partyName: `${db.suppliers.length} مورد`,
@@ -905,7 +905,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ db, activeBranchId, on
         config = {
           title: `تقرير تحليل المصروفات حسب البند`,
           subtitle: `توزيع الإيجارات والمصروفات العمومية والتشغيلية (${periodText}) — ${branchLabel}`,
-          serialNo: `EXP-${today}`,
+          serialNo: '1',
           date: today,
           branchName: branchLabel,
           badge: 'تحليل المصروفات',

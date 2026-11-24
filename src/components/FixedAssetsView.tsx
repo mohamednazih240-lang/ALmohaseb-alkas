@@ -29,7 +29,9 @@ import {
   generateId,
   getTodayDate,
   logAudit,
-  markRecordsDeleted
+  markRecordsDeleted,
+  getNextUniqueFixedAssetCode,
+  getNextUniqueJournalNumber
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -64,7 +66,7 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
 
   const openAddModal = () => {
     setEditingAsset(null);
-    setCode(`AST-${String(db.fixedAssets.length + 1).padStart(3, '0')}`);
+    setCode(getNextUniqueFixedAssetCode(db).number);
     setName('');
     setCategory('أجهزة حاسوب وتكنولوجيا');
     setPurchaseDate(getTodayDate());
@@ -212,7 +214,9 @@ export const FixedAssetsView: React.FC<FixedAssetsViewProps> = ({ db, onUpdateDb
       const today = getTodayDate();
       const nowIso = new Date().toISOString();
       const entryId = generateId('jrn_dep');
-      const entryNumber = `DEP-${ast.code}-${Date.now().toString().slice(-4)}`;
+      const nextJDep = getNextUniqueJournalNumber(updated);
+      const entryNumber = nextJDep.number;
+      updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJDep.nextSeq + 1);
 
       const depExpAcc = updated.accounts.find(a => a.id === 'acc_dep_exp') || {
         id: 'acc_dep_exp', code: '5401', name: 'مصروف إهلاك الأصول الثابتة'

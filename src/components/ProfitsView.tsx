@@ -679,7 +679,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
     const block: MovementPrintBlock = {
       title: 'تقرير أرباح الأصناف التفصيلي',
-      serialNo: `#PROF-${Date.now().toString().slice(-4)}`,
+      serialNo: '1',
       date: today,
       time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
       partyLabel: 'النطاق الزمني',
@@ -877,7 +877,7 @@ export const ProfitsView: React.FC<ProfitsViewProps> = ({
 
     const block: MovementPrintBlock = {
       title: 'تقرير أرباح حركات البيع التفصيلية (حركة بحركة)',
-      serialNo: `#TRX-${Date.now().toString().slice(-4)}`,
+      serialNo: '2',
       date: today,
       time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
       partyLabel: 'النطاق الزمني',

@@ -56,7 +56,10 @@ import {
   isFiniteNonNegative,
   isFinitePositive,
   assertJournalBalanced,
-  markRecordsDeleted
+  markRecordsDeleted,
+  getNextUniqueTransferNumber,
+  getNextUniqueAdjustmentNumber,
+  getNextUniqueJournalNumber
 } from '../services/accountingStorage';
 import { appAlert, appConfirm } from '../services/appDialog';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
@@ -326,9 +329,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       const fromWh = updated.warehouses.find(w => w.id === fromWhId);
       const toWh = updated.warehouses.find(w => w.id === toWhId);
       const tId = generateId('trf');
+      const nextTrfInfo = getNextUniqueTransferNumber(updated);
+      const trfNumber = nextTrfInfo.number;
 
       const transferRecord: StockTransfer = {
         id: tId,
+        number: trfNumber,
         date: getTodayDate(),
         productId: prod.id,
         productName: prod.name,
@@ -339,6 +345,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       };
 
       updated.transfers.unshift(transferRecord);
+      updated.settings.nextTransfer = Math.max(updated.settings.nextTransfer || 1, nextTrfInfo.nextSeq + 1);
 
       const unitCost = roundMoney(fifoLedger.getProductSummary(prod.id, prod.name).latestBuyPrice || 0);
 
@@ -354,7 +361,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         balanceAfter: prod.currentQty,
         unitCost,
         type: 'transfer_out',
-        refNumber: `TRF-${tId.slice(-4)}`,
+        refNumber: trfNumber,
         sourceId: tId
       });
 
@@ -369,11 +376,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         balanceAfter: prod.currentQty,
         unitCost,
         type: 'transfer_in',
-        refNumber: `TRF-${tId.slice(-4)}`,
+        refNumber: trfNumber,
         sourceId: tId
       });
 
-      logAudit(updated, 'تحويل مخزون بين مستودعين', `${prod.name} كمية ${cleanQty} من ${fromWh?.name} إلى ${toWh?.name}`);
+      logAudit(updated, 'تحويل مخزون بين مستودعين', `#${trfNumber}: ${prod.name} كمية ${cleanQty} من ${fromWh?.name} إلى ${toWh?.name}`);
       onUpdateDb(updated);
       setShowTransferModal(false);
     });
@@ -402,12 +409,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       }
 
       const adjId = generateId('adj');
+      const nextAdjInfo = getNextUniqueAdjustmentNumber(updated);
+      const adjNumber = nextAdjInfo.number;
       const fifoProd = fifoLedger.getProductSummary(prod.id, prod.name);
       const unitCost = fifoProd.hasVerifiedPurchase ? roundMoney(fifoProd.latestBuyPrice) : 0;
       const diffValue = roundMoney(Math.abs(diff) * unitCost);
 
       const adjustmentRecord: StockAdjustment = {
         id: adjId,
+        number: adjNumber,
         date: getTodayDate(),
         productId: prod.id,
         productName: prod.name,
@@ -426,6 +436,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       if (pIdx > -1) updated.products[pIdx] = updatedProd;
 
       updated.adjustments.unshift(adjustmentRecord);
+      updated.settings.nextAdjustment = Math.max(updated.settings.nextAdjustment || 1, nextAdjInfo.nextSeq + 1);
 
       // Stock Movement
       updated.stockMovements.unshift({
@@ -439,7 +450,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         balanceAfter: cleanActualQty,
         unitCost,
         type: 'adjustment',
-        refNumber: `ADJ-${adjId.slice(-4)}`,
+        refNumber: adjNumber,
         sourceId: adjId,
         branchId: selectedBranchId,
         branchName: currentBranch.name
@@ -488,11 +499,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           });
         }
 
+        const nextJAdj = getNextUniqueJournalNumber(updated);
         const adjJournal = {
           id: generateId('j'),
-          number: `J-${Date.now().toString().slice(-6)}`,
+          number: nextJAdj.number,
           date: getTodayDate(),
-          description: `قيد تسوية جرد للصنف ${prod.name} (${diff > 0 ? 'زيادة' : 'عجز'} ${Math.abs(diff)} ${prod.unit})`,
+          description: `قيد تسوية جرد رقم ${adjNumber} للصنف ${prod.name} (${diff > 0 ? 'زيادة' : 'عجز'} ${Math.abs(diff)} ${prod.unit})`,
           sourceType: 'adjustment' as const,
           sourceId: adjId,
           lines,
@@ -505,6 +517,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           return;
         }
         updated.journals.unshift(adjJournal);
+        updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJAdj.nextSeq + 1);
       }
 
       // Update physical product edit timestamp
@@ -1490,8 +1503,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 {db.transfers.map(t => (
                   <div key={t.id} className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-2xs space-y-2">
                     <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                      <span className="font-bold text-xs text-slate-900">{t.productName}</span>
-                      <span className="font-mono text-[11px] text-slate-500">{t.date}</span>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-mono font-black text-xs text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200 shrink-0">
+                          #{t.number || '—'}
+                        </span>
+                        <span className="font-bold text-xs text-slate-900 truncate">{t.productName}</span>
+                      </div>
+                      <span className="font-mono text-[11px] text-slate-500 shrink-0">{t.date}</span>
                     </div>
                     <div className="text-xs space-y-1">
                       <div className="flex items-center justify-between text-slate-600">
@@ -1586,7 +1604,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     date: adj.date,
                     time: '12:00',
                     type: 'adjustment',
-                    refNumber: `تسوية-${adj.id.slice(-4)}`,
+                    refNumber: adj.number || '1',
                     partyName: 'تسوية جردية بالمستودع',
                     qty: adj.diffQty,
                     unitPrice: adj.unitCost,

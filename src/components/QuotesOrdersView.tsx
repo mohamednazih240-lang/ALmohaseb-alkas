@@ -27,6 +27,7 @@ import {
   logAudit,
   roundMoney,
   getNextUniqueInvoiceNumber,
+  getNextUniqueOrderNumber,
   markRecordsDeleted,
   PAYMENT_METHODS,
   resolvePartyForRecord
@@ -309,8 +310,9 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       const list = orderType === 'sale' ? updated.customers : updated.suppliers;
       const party = list.find(p => p.id === orderPartyId);
 
-      const oNumber = `ORD-${String(updated.settings.nextOrder).padStart(6, '0')}`;
-      updated.settings.nextOrder += 1;
+      const nextOrderInfo = getNextUniqueOrderNumber(updated);
+      const oNumber = nextOrderInfo.number;
+      updated.settings.nextOrder = Math.max(updated.settings.nextOrder || 1, nextOrderInfo.nextSeq + 1);
 
       const total = roundMoney(orderItems.reduce((s, it) => s + (Number(it.total) || 0), 0));
       const nowIso = new Date().toISOString();

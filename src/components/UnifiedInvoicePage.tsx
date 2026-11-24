@@ -60,6 +60,7 @@ import {
   updateProductBranchData,
   isDuplicateInvoiceNumber,
   getNextUniqueInvoiceNumber,
+  getNextUniqueTreasuryNumber,
   isDuplicateParty,
   getNextUniquePartyCode,
   toWesternNumerals,
@@ -2213,6 +2214,8 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       }
 
     const priorTrCreatedAtMap = new Map<string, string>();
+    const priorTrNumberMap = new Map<string, string>();
+    let priorJournalNumber: string | undefined = undefined;
     const oldRemovedIds: string[] = [];
     // Reverse previous effects if editing
     if (editingInvoice) {
@@ -2274,6 +2277,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           if (tr.id && tr.createdAt && tr.date === invDate) {
             priorTrCreatedAtMap.set(tr.id, tr.createdAt);
           }
+          if (tr.id && tr.number) {
+            priorTrNumberMap.set(tr.id, tr.number);
+          }
           if (tr.id) oldRemovedIds.push(tr.id);
           return false;
         }
@@ -2281,6 +2287,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       });
       updated.journals = updated.journals.filter(j => {
         const matches = j.sourceId === editingInvoice.id || j.id === editingInvoice.journalEntryId;
+        if (matches && !priorJournalNumber && j.number) {
+          priorJournalNumber = j.number;
+        }
         if (matches && j.id) oldRemovedIds.push(j.id);
         return !matches;
       });
@@ -2664,8 +2673,13 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           const deterministicTrId = getDeterministicTreasuryId(mode, invId, pIdx, trDirection);
           createdTrIds.push(deterministicTrId);
           activeChildIds.add(deterministicTrId);
+          const existingPriorTrNum = priorTrNumberMap.get(deterministicTrId);
+          const nextTrSeqInfo = (!existingPriorTrNum || !/^\d+$/.test(String(existingPriorTrNum).trim()))
+            ? getNextUniqueTreasuryNumber(updated)
+            : null;
           const trEntry: TreasuryEntry = {
             id: deterministicTrId,
+            number: nextTrSeqInfo ? nextTrSeqInfo.number : String(existingPriorTrNum).trim(),
             date: savedInvoice.date,
             createdAt: priorTrCreatedAtMap.get(deterministicTrId) || savedInvoice.createdAt || new Date().toISOString(),
             updatedAt: nowIso,
@@ -2686,6 +2700,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
             updated.treasury[existingTrIdx] = trEntry;
           } else {
             updated.treasury.unshift(trEntry);
+          }
+          if (nextTrSeqInfo) {
+            updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, nextTrSeqInfo.nextSeq + 1);
           }
         }
       });
@@ -2718,7 +2735,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           paymentMethod: autoPaidPortion <= 0 ? 'آجل' : savedInvoice.paymentMethod
         }
       : savedInvoice;
-    const journal = createInvoiceJournal(updated, invForJournal);
+    const journal = createInvoiceJournal(updated, invForJournal, priorJournalNumber);
     journal.id = detJournalId;
     journal.sourceId = invId;
     journal.updatedAt = nowIso;

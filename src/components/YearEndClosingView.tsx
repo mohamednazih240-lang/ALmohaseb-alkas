@@ -25,7 +25,8 @@ import {
   assertJournalBalanced,
   generateId,
   getTodayDate,
-  logAudit
+  logAudit,
+  getNextUniqueJournalNumber
 } from '../services/accountingStorage';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { useModalBackHandler } from '../hooks/useModalBackHandler';
@@ -189,7 +190,9 @@ export const YearEndClosingView: React.FC<YearEndClosingViewProps> = ({ db, onUp
       const updated = JSON.parse(JSON.stringify(db)) as AccountingDB;
       const closingDate = selectedPeriod.to;
       const closingEntryId = generateId('jrn_close');
-      const closingNumber = `CLOSE-${selectedPeriod.to.replace(/-/g, '').slice(0, 4)}`;
+      const nextJClose = getNextUniqueJournalNumber(updated);
+      const closingNumber = nextJClose.number;
+      updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJClose.nextSeq + 1);
 
       const lines: JournalLine[] = [];
 

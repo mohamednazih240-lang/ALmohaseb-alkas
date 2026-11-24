@@ -555,7 +555,7 @@ export const DailyClosingView: React.FC<DailyClosingViewProps> = ({
 
     return {
       title: `تقفيل يومية (${c.shiftNumber})`,
-      serialNo: `#${c.id.slice(-6).toUpperCase()}`,
+      serialNo: String(Math.max(1, (db.dailyClosings || []).findIndex(dc => dc.id === c.id) + 1)),
       date: c.date,
       time: c.time || '18:00',
       partyLabel: 'المسؤول',

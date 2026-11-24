@@ -49,7 +49,10 @@ import {
   roundMoney,
   assertJournalBalanced,
   isFinitePositive,
-  markRecordsDeleted
+  markRecordsDeleted,
+  getNextUniqueJournalNumber,
+  getNextUniqueSimpleNumber,
+  getNextUniqueTreasuryNumber
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { downloadElementAsPdf, exportFinancialReportToPdf } from '../services/printAndPdfService';
@@ -211,9 +214,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       const methodAcc = updated.accounts.find(a => a.id === methodAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
       const equityAcc = updated.accounts.find(a => a.id === 'acc_equity') || updated.accounts.find(a => a.id === 'acc_other_rev') || updated.accounts[0];
 
+      const nextJMove = getNextUniqueJournalNumber(updated);
       const jEntry: JournalEntry = {
         id: generateId('jrn_trmove'),
-        number: `J-${Date.now().toString().slice(-6)}`,
+        number: nextJMove.number,
         date: getTodayDate(),
         description: `قيد حركة خزينة مباشرة (${currentBranch.name}): ${descText}`,
         sourceType: 'manual',
@@ -236,8 +240,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         return;
       }
 
+      const nextTrMove = getNextUniqueTreasuryNumber(updated);
       updated.treasury.unshift({
         id: entryId,
+        number: nextTrMove.number,
         date: getTodayDate(),
         createdAt: new Date().toISOString(),
         direction: moveDir,
@@ -246,10 +252,13 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         description: descText,
         sourceType: 'manual',
         sourceId: entryId,
+        refNumber: nextTrMove.number,
         branchId: targetBranchId,
         branchName: currentBranch.name
       });
       updated.journals.unshift(jEntry);
+      updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, nextTrMove.nextSeq + 1);
+      updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJMove.nextSeq + 1);
 
       logAudit(updated, `حركة خزينة يدوية (${currentBranch.name})`, `${moveDir === 'in' ? 'إيداع' : 'سحب'} ${formatMoney(cleanAmt, updated.settings.currency)} (${moveMethod})`);
       onUpdateDb(updated);
@@ -286,9 +295,39 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
       const tId = generateId('tr');
       const nowIso = new Date().toISOString();
+
+      // 3. Double-entry journal between asset accounts (validate before mutating treasury)
+      const fromAccId = getMethodAccountId(fromMethod);
+      const toAccId = getMethodAccountId(toMethod);
+      const fromAcc = updated.accounts.find(a => a.id === fromAccId) || updated.accounts[0];
+      const toAcc = updated.accounts.find(a => a.id === toAccId) || updated.accounts[1];
+
+      const nextJTransfer = getNextUniqueJournalNumber(updated);
+      const transferJournal: JournalEntry = {
+        id: generateId('j'),
+        number: nextJTransfer.number,
+        date: getTodayDate(),
+        description: `تحويل سيولة داخلية من ${fromMethod} إلى ${toMethod}`,
+        sourceType: 'manual',
+        sourceId: tId,
+        lines: [
+          { accountId: toAcc.id, accountCode: toAcc.code, accountName: toAcc.name, debit: cleanAmt, credit: 0, notes: `تغذية رصيد ${toMethod}` },
+          { accountId: fromAcc.id, accountCode: fromAcc.code, accountName: fromAcc.name, debit: 0, credit: cleanAmt, notes: `سحب من ${fromMethod}` }
+        ],
+        createdAt: nowIso
+      };
+
+      const balCheck = assertJournalBalanced(transferJournal);
+      if (!balCheck.balanced) {
+        await appAlert(balCheck.reason || 'القيد المحاسبي للتحويل غير متوازن.');
+        return;
+      }
+
       // 1. Out from source method
+      const trOutInfo = getNextUniqueTreasuryNumber(updated);
       updated.treasury.unshift({
         id: generateId('tr'),
+        number: trOutInfo.number,
         date: getTodayDate(),
         createdAt: nowIso,
         direction: 'out',
@@ -302,8 +341,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       });
 
       // 2. In to destination method
+      const trInInfo = getNextUniqueTreasuryNumber(updated);
       updated.treasury.unshift({
         id: generateId('tr'),
+        number: trInInfo.number,
         date: getTodayDate(),
         createdAt: nowIso,
         direction: 'in',
@@ -316,33 +357,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
         branchName: currentBranch.name
       });
 
-      // 3. Double-entry journal between asset accounts
-      const fromAccId = getMethodAccountId(fromMethod);
-      const toAccId = getMethodAccountId(toMethod);
-      const fromAcc = updated.accounts.find(a => a.id === fromAccId) || updated.accounts[0];
-      const toAcc = updated.accounts.find(a => a.id === toAccId) || updated.accounts[1];
-
-      const transferJournal: JournalEntry = {
-        id: generateId('j'),
-        number: `J-${Date.now().toString().slice(-6)}`,
-        date: getTodayDate(),
-        description: `تحويل سيولة داخلية من ${fromMethod} إلى ${toMethod}`,
-        sourceType: 'manual',
-        sourceId: tId,
-        lines: [
-          { accountId: toAcc.id, accountCode: toAcc.code, accountName: toAcc.name, debit: cleanAmt, credit: 0, notes: `تغذية رصيد ${toMethod}` },
-          { accountId: fromAcc.id, accountCode: fromAcc.code, accountName: fromAcc.name, debit: 0, credit: cleanAmt, notes: `سحب من ${fromMethod}` }
-        ],
-        createdAt: new Date().toISOString()
-      };
-
-      const balCheck = assertJournalBalanced(transferJournal);
-      if (!balCheck.balanced) {
-        await appAlert(balCheck.reason || 'القيد المحاسبي للتحويل غير متوازن.');
-        return;
-      }
-
       updated.journals.unshift(transferJournal);
+      updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, trInInfo.nextSeq + 1);
+      updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJTransfer.nextSeq + 1);
 
       logAudit(updated, 'تحويل سيولة بين الخزائن', `تحويل ${formatMoney(cleanAmt, updated.settings.currency)} من ${fromMethod} إلى ${toMethod}`);
       onUpdateDb(updated);
@@ -399,8 +416,14 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       const cashAccId = getMethodAccountId(simpleMethod);
       const cashAcc = updated.accounts.find(a => a.id === cashAccId) || updated.accounts.find(a => a.id === 'acc_cash')!;
 
+      const nextSimpleInfo = editingSimple?.number
+        ? null
+        : getNextUniqueSimpleNumber(updated, isExpense ? 'expense' : 'revenue');
+      const simpleNumber = editingSimple?.number || nextSimpleInfo!.number;
+
       const record: SimpleRecord = {
         id: recId,
+        number: simpleNumber,
         date: simpleDate,
         category: simpleCategory.trim() || (isExpense ? 'مصروفات عامة' : 'إيرادات تشغيلية'),
         amount: cleanAmt,
@@ -418,6 +441,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           if (idx !== -1) {
             updated.expenses[idx] = {
               ...editingSimple,
+              number: simpleNumber,
               date: simpleDate,
               category: record.category,
               amount: cleanAmt,
@@ -431,6 +455,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           if (idx !== -1) {
             updated.revenues[idx] = {
               ...editingSimple,
+              number: simpleNumber,
               date: simpleDate,
               category: record.category,
               amount: cleanAmt,
@@ -501,9 +526,14 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       // Creating NEW Expense / Revenue (Idempotent Deterministic IDs)
       if (isExpense) {
         updated.expenses.unshift(record);
+        if (nextSimpleInfo) {
+          updated.settings.nextExpense = Math.max(updated.settings.nextExpense || 1, nextSimpleInfo.nextSeq + 1);
+        }
         const deterministicTrId = `tr_expense_${recId}_p0_out`;
+        const nextTrExp = getNextUniqueTreasuryNumber(updated);
         updated.treasury.unshift({
           id: deterministicTrId,
+          number: nextTrExp.number,
           date: simpleDate,
           createdAt: new Date().toISOString(),
           direction: 'out',
@@ -512,14 +542,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           description: `مصروف (${currentBranch.name}): ${record.category} (${record.description})`,
           sourceType: 'expense',
           sourceId: recId,
+          refNumber: record.number,
           branchId: targetBranchId,
           branchName: currentBranch.name
         });
 
         const expAcc = updated.accounts.find(a => a.id === 'acc_exp')!;
+        const nextJExp = getNextUniqueJournalNumber(updated);
         const jEntry: JournalEntry = {
           id: `jrn_expense_${recId}`,
-          number: `J-${Date.now().toString().slice(-6)}`,
+          number: nextJExp.number,
           date: simpleDate,
           description: `إثبات مصروف (${currentBranch.name}): ${record.category} - ${record.description}`,
           sourceType: 'expense',
@@ -536,11 +568,18 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           return;
         }
         updated.journals.unshift(jEntry);
+        updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, nextTrExp.nextSeq + 1);
+        updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJExp.nextSeq + 1);
       } else {
         updated.revenues.unshift(record);
+        if (nextSimpleInfo) {
+          updated.settings.nextRevenue = Math.max(updated.settings.nextRevenue || 1, nextSimpleInfo.nextSeq + 1);
+        }
         const deterministicTrId = `tr_revenue_${recId}_p0_in`;
+        const nextTrRev = getNextUniqueTreasuryNumber(updated);
         updated.treasury.unshift({
           id: deterministicTrId,
+          number: nextTrRev.number,
           date: simpleDate,
           createdAt: new Date().toISOString(),
           direction: 'in',
@@ -549,14 +588,16 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           description: `إيراد (${currentBranch.name}): ${record.category} (${record.description})`,
           sourceType: 'revenue',
           sourceId: recId,
+          refNumber: record.number,
           branchId: targetBranchId,
           branchName: currentBranch.name
         });
 
         const revAcc = updated.accounts.find(a => a.id === 'acc_other_rev')!;
+        const nextJRev = getNextUniqueJournalNumber(updated);
         const jEntry: JournalEntry = {
           id: `jrn_revenue_${recId}`,
-          number: `J-${Date.now().toString().slice(-6)}`,
+          number: nextJRev.number,
           date: simpleDate,
           description: `إثبات إيراد: ${record.category} - ${record.description}`,
           sourceType: 'revenue',
@@ -573,6 +614,8 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
           return;
         }
         updated.journals.unshift(jEntry);
+        updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, nextTrRev.nextSeq + 1);
+        updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJRev.nextSeq + 1);
       }
 
       logAudit(updated, isExpense ? 'تسجيل مصروف' : 'تسجيل إيراد', `${record.category} بمبلغ ${formatMoney(cleanAmt, updated.settings.currency)}`);
@@ -683,9 +726,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
 
   const handlePrintTreasurySingle = (tr: TreasuryEntry, autoPrint: boolean = false) => {
     const tafqeetWords = tafqeetCurrency(tr.amount, db.settings.currency || 'ج.م');
+    const trSerial = tr.number || tr.refNumber || '1';
     const block: MovementPrintBlock = {
       title: tr.direction === 'in' ? 'حركة إيداع وقبض خزينة' : 'حركة صرف وسحب خزينة',
-      serialNo: `#TR-${tr.id.slice(-6).toUpperCase()}`,
+      serialNo: trSerial,
       date: tr.date,
       partyLabel: 'الخزينة / الحساب',
       partyName: tr.method,
@@ -718,7 +762,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
     };
 
     setPrintDocuments([block]);
-    setPrintDocTitle(`حركة_خزينة_${tr.id.slice(-6)}`);
+    setPrintDocTitle(`حركة_خزينة_${trSerial}`);
     setPrintModalAutoPrint(autoPrint);
     setPrintModalOpen(true);
   };
@@ -728,9 +772,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       void appAlert('لا توجد حركات للطباعة');
       return;
     }
-    const blocks: MovementPrintBlock[] = db.treasury.map(tr => ({
+    const blocks: MovementPrintBlock[] = db.treasury.map((tr, idx) => ({
       title: tr.direction === 'in' ? 'حركة إيداع خزينة' : 'حركة صرف خزينة',
-      serialNo: `#TR-${tr.id.slice(-6).toUpperCase()}`,
+      serialNo: tr.number || tr.refNumber || String(idx + 1),
       date: tr.date,
       time: '12:00',
       partyLabel: 'الخزينة',
@@ -768,9 +812,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
   const handlePrintSimpleSingle = (item: SimpleRecord) => {
     const isExp = subPage === 'expenses';
     const tafqeetWords = tafqeetCurrency(item.amount, db.settings.currency || 'ج.م');
+    const itemSerial = item.number || '1';
     const block: MovementPrintBlock = {
       title: isExp ? 'إيصال إثبات مصروف' : 'إيصال إثبات إيراد',
-      serialNo: `#REC-${item.id.slice(-6).toUpperCase()}`,
+      serialNo: itemSerial,
       date: item.date,
       partyLabel: isExp ? 'بند المصروف' : 'بند الإيراد',
       partyName: item.category,
@@ -803,7 +848,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
     };
 
     setPrintDocuments([block]);
-    setPrintDocTitle(`${isExp ? 'مصروف' : 'إيراد'}_${item.id.slice(-6)}`);
+    setPrintDocTitle(`${isExp ? 'مصروف' : 'إيراد'}_${itemSerial}`);
     setPrintModalOpen(true);
   };
 
@@ -815,9 +860,9 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
     }
     const isExp = subPage === 'expenses';
 
-    const blocks: MovementPrintBlock[] = list.map(item => ({
+    const blocks: MovementPrintBlock[] = list.map((item, idx) => ({
       title: isExp ? 'إيصال مصروف' : 'إيصال إيراد',
-      serialNo: `#REC-${item.id.slice(-6).toUpperCase()}`,
+      serialNo: item.number || String(idx + 1),
       date: item.date,
       time: '12:00',
       partyLabel: 'التصنيف',
@@ -904,9 +949,10 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       if (!debitAcc || !creditAcc) return;
 
       const jId = generateId('j');
+      const nextJManual = getNextUniqueJournalNumber(updated);
       const newEntry: JournalEntry = {
         id: jId,
-        number: `J-${Date.now().toString().slice(-6)}`,
+        number: nextJManual.number,
         date: journalDate,
         description: journalDesc.trim() || 'قيد يومية تسوية يدوي',
         sourceType: 'manual',
@@ -925,6 +971,7 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
       }
 
       updated.journals.unshift(newEntry);
+      updated.settings.nextJournal = Math.max(updated.settings.nextJournal || 1, nextJManual.nextSeq + 1);
       logAudit(updated, 'إنشاء قيد يومية يدوي', `${newEntry.number}: ${newEntry.description} (${formatMoney(cleanAmt, updated.settings.currency)})`);
       onUpdateDb(updated);
       setShowJournalModal(false);
@@ -1178,7 +1225,12 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                       className="bg-white p-3.5 rounded-xl border border-slate-200 hover:border-slate-300 shadow-2xs hover:shadow-xs transition-all space-y-2"
                     >
                       <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                        <span className="font-mono text-[11px] text-slate-500">{tr.date}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono font-black text-xs text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
+                            #{tr.number || '—'}
+                          </span>
+                          <span className="font-mono text-[11px] text-slate-500">{tr.date}</span>
+                        </div>
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${
                           isIncoming
                             ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
@@ -1315,8 +1367,13 @@ export const TreasuryFinanceView: React.FC<TreasuryFinanceViewProps> = ({
                   className="bg-white p-3.5 rounded-xl border border-slate-200 hover:border-slate-300 shadow-2xs space-y-2"
                 >
                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <span className="font-bold text-xs text-slate-900">{item.category}</span>
-                    <span className="font-mono text-[11px] text-slate-500">{item.date}</span>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="font-mono font-black text-xs text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200 shrink-0">
+                        #{item.number || '—'}
+                      </span>
+                      <span className="font-bold text-xs text-slate-900 truncate">{item.category}</span>
+                    </div>
+                    <span className="font-mono text-[11px] text-slate-500 shrink-0">{item.date}</span>
                   </div>
 
                   <div className="text-xs space-y-1">

@@ -42,6 +42,7 @@ import {
   isVoucherLinkedToInvoice,
   partitionInvoicePaymentsForAutoPortion,
   getNextUniqueVoucherNumber,
+  getNextUniqueTreasuryNumber,
   syncInvoiceVouchers,
   deduplicatePartiesAndRepairReferences,
   reconcileInvoicePartyIntegrity
@@ -544,8 +545,16 @@ export function postInvoiceTransaction(
               ? `استرداد مرتجع مشتريات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`
               : `تحصيل فاتورة مبيعات رقم ${invoiceNumber} (${workingInvoice.partyName}) عبر ${pLine.method}`;
 
+        const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId);
+        const existingTrNumber = existingTrIdx > -1 ? updated.treasury[existingTrIdx].number : undefined;
+        const trSeqInfo = (!existingTrNumber || !/^\d+$/.test(String(existingTrNumber).trim()))
+          ? getNextUniqueTreasuryNumber(updated)
+          : null;
+        const resolvedTrNumber = trSeqInfo ? trSeqInfo.number : String(existingTrNumber).trim();
+
         const trEntry: TreasuryEntry = {
           id: deterministicTrId,
+          number: resolvedTrNumber,
           date: workingInvoice.date,
           createdAt: workingInvoice.createdAt || new Date().toISOString(),
           direction: trDirection,
@@ -560,12 +569,14 @@ export function postInvoiceTransaction(
           branchName: workingInvoice.branchName || 'الفرع الرئيسي'
         };
 
-        const existingTrIdx = updated.treasury.findIndex(t => t.id === deterministicTrId);
         if (existingTrIdx > -1) {
           trEntry.createdAt = updated.treasury[existingTrIdx].createdAt || trEntry.createdAt;
           updated.treasury[existingTrIdx] = trEntry;
         } else {
           updated.treasury.unshift(trEntry);
+        }
+        if (trSeqInfo && updated.settings) {
+          updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, trSeqInfo.nextSeq + 1);
         }
       }
     });
@@ -587,6 +598,8 @@ export function postInvoiceTransaction(
 
   // 4. Create/update balanced double-entry journal entry (using auto portion if manual installments exist to prevent double counting)
   const deterministicJournalId = getDeterministicJournalId(expectedSmType, invoiceId);
+  const existingJournalIdx = updated.journals.findIndex(j => j.id === deterministicJournalId || j.sourceId === invoiceId);
+  const existingJournalNumber = existingJournalIdx > -1 ? updated.journals[existingJournalIdx].number : undefined;
   const invForJournal: Invoice = manualInstallmentsPaid > 0
     ? {
         ...workingInvoice,
@@ -596,13 +609,12 @@ export function postInvoiceTransaction(
         paymentMethod: autoPaidPortion <= 0 ? 'آجل' : workingInvoice.paymentMethod
       }
     : workingInvoice;
-  const freshJournal = createInvoiceJournal(updated, invForJournal);
+  const freshJournal = createInvoiceJournal(updated, invForJournal, existingJournalNumber);
   freshJournal.id = deterministicJournalId;
   freshJournal.sourceId = invoiceId;
   workingInvoice.journalEntryId = deterministicJournalId;
   unblockActiveRecordIds(updated, [deterministicJournalId]);
 
-  const existingJournalIdx = updated.journals.findIndex(j => j.id === deterministicJournalId || j.sourceId === invoiceId);
   if (existingJournalIdx > -1) {
     updated.journals[existingJournalIdx] = freshJournal;
   } else {
@@ -1833,10 +1845,29 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
         const expectedVoucherDesc = isSale
           ? `سند قبض مقابل فاتورة مبيعات رقم ${inv.number} (${partyName}) عبر ${pLine.method}`
           : `سند صرف مقابل فاتورة مشتريات رقم ${inv.number} (${partyName}) عبر ${pLine.method}`;
+        const baseInvNum = String(inv.number || '').trim();
+        const expectedVoucherNumber = pIdx === 0 ? baseInvNum : `${baseInvNum}-${pIdx + 1}`;
 
         const existingSlot =
           autoLinkedVouchers.find(v => v.id === detVoucherId) ||
           (pIdx === 0 ? autoLinkedVouchers.find(v => !matchedOldIds.has(v.id)) : undefined);
+
+        if (expectedVoucherNumber) {
+          updated.vouchers.forEach(other => {
+            if (
+              other &&
+              other.id !== detVoucherId &&
+              other.id !== existingSlot?.id &&
+              other.type === expectedVoucherType &&
+              !isAutoV(other) &&
+              String(other.number).trim() === expectedVoucherNumber
+            ) {
+              const relocated = getNextUniqueVoucherNumber(updated, expectedVoucherType);
+              other.number = relocated.number;
+              updated.settings[nextSettingKey] = Math.max(updated.settings[nextSettingKey] || 1, relocated.nextSeq + 1);
+            }
+          });
+        }
 
         if (existingSlot) {
           matchedOldIds.add(existingSlot.id);
@@ -1849,6 +1880,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
           const needsUpdate =
             existingSlot.id !== detVoucherId ||
             existingSlot.type !== expectedVoucherType ||
+            (expectedVoucherNumber && String(existingSlot.number).trim() !== expectedVoucherNumber) ||
             Math.abs((Number(existingSlot.amount) || 0) - pLine.amount) > 0.01 ||
             existingSlot.invoiceId !== inv.id ||
             existingSlot.referenceNumber !== inv.number ||
@@ -1856,6 +1888,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
             existingSlot.date !== invDate ||
             existingSlot.partyId !== inv.partyId ||
             existingSlot.partyName !== partyName ||
+            existingSlot.description !== expectedVoucherDesc ||
             !existingSlot.isAutoFromInvoice ||
             Boolean(existingSlot.isManualInstallment) ||
             !existingSlot.branchId ||
@@ -1863,6 +1896,7 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
 
           if (needsUpdate) {
             existingSlot.id = detVoucherId;
+            if (expectedVoucherNumber) existingSlot.number = expectedVoucherNumber;
             existingSlot.type = expectedVoucherType;
             existingSlot.amount = pLine.amount;
             existingSlot.date = invDate;
@@ -1884,12 +1918,20 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
             fixedDiscrepanciesCount++;
           }
         } else {
-          // Auto-create missing deterministic Receipt/Payment voucher!
-          const nextNumInfo = getNextUniqueVoucherNumber(updated, expectedVoucherType);
-          updated.settings[nextSettingKey] = Math.max(updated.settings[nextSettingKey] || 1, nextNumInfo.nextSeq + 1);
+          // Auto-create missing deterministic Receipt/Payment voucher bound 1-to-1 with invoice #N!
+          const fallbackNumInfo = expectedVoucherNumber ? null : getNextUniqueVoucherNumber(updated, expectedVoucherType);
+          const finalVNumber = expectedVoucherNumber || fallbackNumInfo!.number;
+          if (fallbackNumInfo) {
+            updated.settings[nextSettingKey] = Math.max(updated.settings[nextSettingKey] || 1, fallbackNumInfo.nextSeq + 1);
+          } else {
+            const parsedNum = parseInt(finalVNumber.split('-')[0], 10);
+            if (!isNaN(parsedNum) && parsedNum > 0) {
+              updated.settings[nextSettingKey] = Math.max(updated.settings[nextSettingKey] || 1, parsedNum + 1);
+            }
+          }
           const newAutoVoucher: Voucher = {
             id: detVoucherId,
-            number: nextNumInfo.number,
+            number: finalVNumber,
             type: expectedVoucherType,
             date: invDate,
             partyId: inv.partyId,
@@ -2023,8 +2065,10 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
           }
         } else {
           // Backfill missing deterministic TreasuryEntry preserving original invoice createdAt timestamp (crucial for DailyClosing cutoffs)
+          const nextTrInfo = getNextUniqueTreasuryNumber(updated);
           updated.treasury.unshift({
             id: targetTrId,
+            number: nextTrInfo.number,
             date: invDate,
             createdAt: inv.createdAt || `${invDate}T12:00:00.000Z`,
             direction: expectedTrDirection,
@@ -2038,6 +2082,9 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
             branchId,
             branchName
           });
+          if (updated.settings) {
+            updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, nextTrInfo.nextSeq + 1);
+          }
           fixedDiscrepanciesCount++;
           fixedInvoicesCount++;
         }
@@ -2167,8 +2214,10 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
       }
     } else if (!deletedIdsForManualV.has(detTrId) && v.paymentMethod !== 'آجل') {
       const safeMethod = (v.paymentMethod || 'نقدي') as PaymentMethod;
+      const nextTrInfo = getNextUniqueTreasuryNumber(updated);
       updated.treasury.unshift({
         id: detTrId,
+        number: nextTrInfo.number,
         date: v.date || getTodayDate(),
         createdAt: v.createdAt || `${v.date || getTodayDate()}T12:00:00.000Z`,
         direction: expectedDir,
@@ -2182,6 +2231,9 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
         branchId,
         branchName
       });
+      if (updated.settings) {
+        updated.settings.nextTreasury = Math.max(updated.settings.nextTreasury || 1, nextTrInfo.nextSeq + 1);
+      }
       fixedDiscrepanciesCount++;
     }
   });

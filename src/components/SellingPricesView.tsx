@@ -322,7 +322,7 @@ export const SellingPricesView: React.FC<SellingPricesViewProps> = ({
     return [
       {
         title: 'قائمة أسعار البيع المعتمدة',
-        serialNo: `#SP-${getTodayDate()}`,
+        serialNo: '1',
         date: getTodayDate(),
         partyLabel: 'نطاق التسعير',
         partyName: activeBranchName,
