@@ -28,7 +28,8 @@ import {
   formatMoney,
   logAudit,
   deleteInvoiceAndRevert,
-  getTodayDate
+  getTodayDate,
+  resolvePartyForRecord
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
@@ -275,12 +276,11 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({
 
     const isRet = purchasesSection === 'returns';
     const docs: MovementPrintBlock[] = purchaseInvoices.map(inv => {
-      const matchedSupp = db.suppliers.find(
-        s =>
-          (inv.partyId && s.id === inv.partyId) ||
-          (inv.partyCode && s.code && s.code.trim().toLowerCase() === inv.partyCode.trim().toLowerCase()) ||
-          (inv.partyName && inv.partyName !== 'نقدي' && inv.partyName !== 'مورد نقدي' && inv.partyName !== 'مورد عام' && s.name.trim().toLowerCase() === inv.partyName.trim().toLowerCase())
-      );
+      const matchedSupp = resolvePartyForRecord(db.suppliers, {
+        partyId: inv.partyId,
+        partyCode: inv.partyCode,
+        partyName: inv.partyName
+      });
       return {
       title: isRet ? 'فاتورة مرتجع مشتريات للمورد' : 'فاتورة مشتريات وتوريد',
       serialNo: inv.number,

@@ -42,7 +42,9 @@ import {
   isVoucherLinkedToInvoice,
   partitionInvoicePaymentsForAutoPortion,
   getNextUniqueVoucherNumber,
-  syncInvoiceVouchers
+  syncInvoiceVouchers,
+  deduplicatePartiesAndRepairReferences,
+  reconcileInvoicePartyIntegrity
 } from './accountingStorage';
 
 /**
@@ -1595,6 +1597,9 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
   if (!updated.customers) updated.customers = [];
   if (!updated.suppliers) updated.suppliers = [];
 
+  const dedupPartiesRes = deduplicatePartiesAndRepairReferences(updated);
+  const partyRepairRes = reconcileInvoicePartyIntegrity(updated);
+
   const purgedPhantomIds: string[] = [];
   const purgedVoucherIds = new Set<string>();
   const purgedVoucherJournalIds = new Set<string>();
@@ -1664,8 +1669,8 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
 
   let duplicateVouchersRemoved = 0;
   let duplicateTreasuryRemoved = 0;
-  let fixedInvoicesCount = 0;
-  let fixedDiscrepanciesCount = 0;
+  let fixedInvoicesCount = partyRepairRes.repairedCount;
+  let fixedDiscrepanciesCount = dedupPartiesRes.mergedPartiesCount + partyRepairRes.repairedCount;
   let vouchersReconciledCount = 0;
 
   const defaultBranchId = updated.branches?.[0]?.id || 'br_mawan';
@@ -1754,6 +1759,11 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
       }
       if (!mv.invoiceId) {
         mv.invoiceId = inv.id;
+        fixedDiscrepanciesCount++;
+      }
+      if (mv.invoiceId === inv.id && (mv.partyId !== inv.partyId || mv.partyName !== partyName)) {
+        mv.partyId = inv.partyId;
+        mv.partyName = partyName;
         fixedDiscrepanciesCount++;
       }
       if (!mv.referenceNumber) mv.referenceNumber = inv.number;
@@ -1993,7 +2003,8 @@ export function reconcileAndDeduplicateAllFinancialRecords(db: AccountingDB): {
             Math.abs((Number(existingTr.amount) || 0) - pLine.amount) > 0.01 ||
             existingTr.method !== pLine.method ||
             existingTr.date !== invDate ||
-            !existingTr.branchId;
+            !existingTr.branchId ||
+            existingTr.description !== trDesc;
 
           if (changed) {
             existingTr.id = targetTrId;

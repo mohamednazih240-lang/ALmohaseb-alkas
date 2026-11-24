@@ -300,7 +300,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
     // Invoices (exclude quotes, orders, and return invoices — returns are added cleanly from db.returns below)
     db.invoices
-      .filter(i => i.partyId === party.id && i.invoiceKind !== 'quote' && (i.invoiceKind as string) !== 'order' && i.invoiceKind !== 'sale_return' && i.invoiceKind !== 'purchase_return')
+      .filter(i => Boolean(party.id && i.partyId === party.id) && i.invoiceKind !== 'quote' && (i.invoiceKind as string) !== 'order' && i.invoiceKind !== 'sale_return' && i.invoiceKind !== 'purchase_return')
       .forEach(inv => {
         if (isCustomer && (inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale')) {
           const hasLinkedVoucher = db.vouchers.some(v => v.type === 'receipt' && isVoucherLinkedToInvoice(v, inv));
@@ -355,7 +355,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
     // Vouchers (سندات القبض والصرف)
     db.vouchers
-      .filter(v => v.partyId === party.id)
+      .filter(v => Boolean(party.id && v.partyId === party.id))
       .forEach(v => {
         if (isCustomer && v.type === 'receipt') {
           running -= v.amount;
@@ -382,7 +382,7 @@ export const PartiesView: React.FC<PartiesViewProps> = ({
 
     // Returns
     (db.returns || [])
-      .filter(r => r.partyId === party.id && r.type === (isCustomer ? 'sale' : 'purchase'))
+      .filter(r => Boolean(party.id && r.partyId === party.id) && r.type === (isCustomer ? 'sale' : 'purchase'))
       .forEach(r => {
         if (r.paymentMethod === 'آجل') {
           running -= r.total;

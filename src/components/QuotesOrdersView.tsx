@@ -28,7 +28,8 @@ import {
   roundMoney,
   getNextUniqueInvoiceNumber,
   markRecordsDeleted,
-  PAYMENT_METHODS
+  PAYMENT_METHODS,
+  resolvePartyForRecord
 } from '../services/accountingStorage';
 import { postInvoiceTransaction } from '../services/accountingEngine';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
@@ -87,12 +88,11 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       : roundMoney((q.items || []).reduce((s, it) => s + (Number(it.total) || 0), 0));
     const payMethod: PaymentMethod = q.paymentMethod || 'نقدي';
     const isCredit = payMethod === 'آجل';
-    const matchedCust = db.customers.find(
-      c =>
-        (q.partyId && c.id === q.partyId) ||
-        (q.partyCode && c.code && c.code.trim().toLowerCase() === q.partyCode.trim().toLowerCase()) ||
-        (q.partyName && q.partyName !== 'نقدي' && c.name.trim().toLowerCase() === q.partyName.trim().toLowerCase())
-    );
+    const matchedCust = resolvePartyForRecord(db.customers, {
+      partyId: q.partyId,
+      partyCode: q.partyCode,
+      partyName: q.partyName
+    });
     const resolvedBranch =
       (db.branches || []).find(b => b.id === q.branchId) ||
       (db.branches || []).find(b => b.isMain) ||
@@ -221,12 +221,11 @@ export const QuotesOrdersView: React.FC<QuotesOrdersViewProps> = ({
       const remainingVal = isCredit ? cleanTotal : 0;
       const nowTime = new Date().toTimeString().slice(0, 5);
 
-      const matchedCustForConv = workingDb.customers.find(
-        c =>
-          (q.partyId && c.id === q.partyId) ||
-          (q.partyCode && c.code && c.code.trim().toLowerCase() === q.partyCode.trim().toLowerCase()) ||
-          (q.partyName && q.partyName !== 'نقدي' && c.name.trim().toLowerCase() === q.partyName.trim().toLowerCase())
-      );
+      const matchedCustForConv = resolvePartyForRecord(workingDb.customers, {
+        partyId: q.partyId,
+        partyCode: q.partyCode,
+        partyName: q.partyName
+      });
 
       const newInvoice: Invoice = {
         id: invId,

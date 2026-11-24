@@ -27,6 +27,7 @@ import {
 } from '../types/accounting';
 import { downloadElementAsPdf } from '../services/printAndPdfService';
 import { formatAuditDateTime } from './InvoiceAuditLogModal';
+import { isGenericCashPartyName, resolvePartyForRecord } from '../services/accountingStorage';
 
 interface InvoicePrintModalProps {
   invoice: Invoice | null;
@@ -124,21 +125,15 @@ export const InvoicePrintModal: React.FC<InvoicePrintModalProps> = ({
 
   // Resolve customer/supplier code, name, and phone from invoice or live parties directory
   const rawPartyName = (invoice.partyName || '').trim();
-  const isGenericCashParty =
-    !rawPartyName ||
-    rawPartyName === 'نقدي' ||
-    rawPartyName === 'عميل نقدي' ||
-    rawPartyName === 'مورد نقدي' ||
-    rawPartyName === 'مورد عام';
-  const matchedParty = parties.find(
-    p =>
-      (invoice.partyId && p.id === invoice.partyId) ||
-      (!isGenericCashParty && invoice.partyCode && p.code && p.code.trim().toLowerCase() === invoice.partyCode.trim().toLowerCase()) ||
-      (!isGenericCashParty && p.name && p.name.trim().toLowerCase() === rawPartyName.toLowerCase())
-  );
-  const resolvedPartyCode = (invoice.partyCode || matchedParty?.code || invoice.partyId || '—').trim();
-  const resolvedPartyName = (rawPartyName || matchedParty?.name || (isSale ? 'عميل نقدي' : 'مورد عام')).trim();
-  const resolvedPartyPhone = (invoice.partyPhone || matchedParty?.phone || '').trim();
+  const isGenericCashParty = isGenericCashPartyName(rawPartyName);
+  const matchedParty = resolvePartyForRecord(parties, {
+    partyId: invoice.partyId,
+    partyCode: invoice.partyCode,
+    partyName: rawPartyName
+  });
+  const resolvedPartyCode = (matchedParty?.code || (isGenericCashParty ? 'CASH' : invoice.partyCode) || invoice.partyId || '—').trim();
+  const resolvedPartyName = (rawPartyName || matchedParty?.name || (isSale ? 'عميل نقدي' : 'مورد نقدي')).trim();
+  const resolvedPartyPhone = isGenericCashParty ? '' : (invoice.partyPhone || matchedParty?.phone || '').trim();
 
   // Helper to extract sequential number starting from 1
   const rawInvoiceNo = invoice.number?.trim() || (invoice as any).id?.replace(/\D/g, '') || '1';

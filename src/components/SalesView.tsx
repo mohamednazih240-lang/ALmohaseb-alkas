@@ -33,7 +33,8 @@ import {
   formatMoney,
   logAudit,
   deleteInvoiceAndRevert,
-  getTodayDate
+  getTodayDate,
+  resolvePartyForRecord
 } from '../services/accountingStorage';
 import { pushDatabaseToCloud } from '../services/cloudSyncService';
 import { UnifiedInvoicePage } from './UnifiedInvoicePage';
@@ -279,12 +280,11 @@ export const SalesView: React.FC<SalesViewProps> = ({
     }
 
     const docs: MovementPrintBlock[] = salesInvoices.map(inv => {
-      const matchedCust = db.customers.find(
-        c =>
-          (inv.partyId && c.id === inv.partyId) ||
-          (inv.partyCode && c.code && c.code.trim().toLowerCase() === inv.partyCode.trim().toLowerCase()) ||
-          (inv.partyName && inv.partyName !== 'نقدي' && inv.partyName !== 'عميل نقدي' && c.name.trim().toLowerCase() === inv.partyName.trim().toLowerCase())
-      );
+      const matchedCust = resolvePartyForRecord(db.customers, {
+        partyId: inv.partyId,
+        partyCode: inv.partyCode,
+        partyName: inv.partyName
+      });
       return {
       title: inv.invoiceKind === 'wholesale' ? 'فاتورة مبيعات جملة' : 'فاتورة مبيعات',
       serialNo: inv.number,

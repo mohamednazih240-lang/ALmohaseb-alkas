@@ -84,7 +84,9 @@ import {
   isVoucherLinkedToInvoice,
   partitionInvoicePaymentsForAutoPortion,
   unblockActiveRecordIds,
-  markRecordsDeleted
+  markRecordsDeleted,
+  isGenericCashPartyName,
+  resolvePartyForRecord
 } from '../services/accountingStorage';
 import { validateDbTransactionIntegrity, getDeterministicJournalId } from '../services/accountingEngine';
 import { useSubmitLock } from '../hooks/useSubmitLock';
@@ -328,7 +330,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
   const [invNum, setInvNum] = useState<string>('1');
   const [invDate, setInvDate] = useState<string>(getTodayDate());
   const [invTime, setInvTime] = useState<string>('12:00');
-  const [custCode, setCustCode] = useState<string>('1');
+  const [custCode, setCustCode] = useState<string>('CASH');
   const [custSearchInput, setCustSearchInput] = useState<string>('');
   const [custPhone, setCustPhone] = useState<string>('');
   const [jobSite, setJobSite] = useState<string>('');
@@ -665,9 +667,25 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (data.invoiceItems && Array.isArray(data.invoiceItems) && data.invoiceItems.length > 0) {
       setInvoiceItems(data.invoiceItems);
     }
+    const restoredName = (data.custSearchInput || '').trim();
+    const isRestoredCash = isGenericCashPartyName(restoredName);
+    const activeRoleList = theme.partyRole === 'customer' ? db.customers : db.suppliers;
+    const verifiedDraftParty = isRestoredCash
+      ? activeRoleList.find(p => isGenericCashPartyName(p.name) || (p.code || '').trim().toUpperCase() === 'CASH') || null
+      : resolvePartyForRecord(activeRoleList, {
+          partyId: data.selectedParty?.id,
+          partyCode: data.custCode,
+          partyName: restoredName
+        });
+
     if (data.custSearchInput) setCustSearchInput(data.custSearchInput);
-    if (data.custCode) setCustCode(data.custCode);
-    if (data.custPhone) setCustPhone(data.custPhone);
+    if (isRestoredCash) {
+      setCustCode(verifiedDraftParty?.code || 'CASH');
+      setCustPhone('');
+    } else {
+      if (data.custCode) setCustCode(verifiedDraftParty?.code || data.custCode);
+      if (data.custPhone) setCustPhone(data.custPhone);
+    }
     if (data.jobSite) setJobSite(data.jobSite);
     if (data.priceType) setPriceType(data.priceType);
     if (data.globalInvDisc) setGlobalInvDisc(data.globalInvDisc);
@@ -677,7 +695,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (data.selectedPaymentMethod) setSelectedPaymentMethod(data.selectedPaymentMethod);
     if (data.partialPaidInput) setPartialPaidInput(data.partialPaidInput);
     if (data.paymentRows) setPaymentRows(data.paymentRows);
-    if (data.selectedParty) setSelectedParty(data.selectedParty);
+    setSelectedParty(verifiedDraftParty);
     setHasUnsavedDraft(false);
     showToast(`✓ تم استعادة مسودة ${mode === 'quote' ? 'عرض السعر' : 'الفاتورة'} بنجاح (${data.invoiceItems?.length || 0} أصناف)`);
   };
@@ -753,19 +771,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     lastLoadedEditorKeyRef.current = editorKey;
 
     if (editingQuote) {
-      const foundQuoteParty = db.customers.find(
-        p => (editingQuote.partyId && p.id === editingQuote.partyId) ||
-             (editingQuote.partyCode && p.code && p.code.trim().toLowerCase() === editingQuote.partyCode.trim().toLowerCase()) ||
-             (editingQuote.partyName && editingQuote.partyName !== 'نقدي' && p.name.trim() === editingQuote.partyName.trim())
-      );
+      const foundQuoteParty = resolvePartyForRecord(db.customers, {
+        partyId: editingQuote.partyId,
+        partyCode: editingQuote.partyCode,
+        partyName: editingQuote.partyName
+      });
+      const isQuoteCash = isGenericCashPartyName(editingQuote.partyName);
       setInvNum(editingQuote.number);
       setInvDate(editingQuote.date);
       setInvTime(editingQuote.time || '12:00');
       setJobSite(editingQuote.jobSite || editingQuote.notes || '');
       setPriceType(editingQuote.priceType || theme.defaultPriceType);
-      setCustCode(editingQuote.partyCode || foundQuoteParty?.code || '1');
+      setCustCode(foundQuoteParty?.code || (isQuoteCash ? 'CASH' : (editingQuote.partyCode || '')));
       setCustSearchInput(editingQuote.partyName || 'نقدي');
-      setCustPhone(toWesternNumerals((editingQuote.partyPhone || foundQuoteParty?.phone || '').trim()));
+      setCustPhone(isQuoteCash ? '' : toWesternNumerals((editingQuote.partyPhone || foundQuoteParty?.phone || '').trim()));
       setInvoiceItems([...(editingQuote.items || [])]);
 
       setGlobalInvDisc(editingQuote.discount && editingQuote.discount > 0 ? String(editingQuote.discount) : '');
@@ -783,19 +802,20 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setSelectedParty(foundQuoteParty || null);
     } else if (editingInvoice) {
       const partyList = theme.partyRole === 'customer' ? db.customers : db.suppliers;
-      const foundInvParty = partyList.find(
-        p => (editingInvoice.partyId && p.id === editingInvoice.partyId) ||
-             (editingInvoice.partyCode && p.code && p.code.trim().toLowerCase() === editingInvoice.partyCode.trim().toLowerCase()) ||
-             (editingInvoice.partyName && editingInvoice.partyName !== 'نقدي' && editingInvoice.partyName !== 'عميل نقدي' && editingInvoice.partyName !== 'مورد نقدي' && p.name.trim() === editingInvoice.partyName.trim())
-      );
+      const foundInvParty = resolvePartyForRecord(partyList, {
+        partyId: editingInvoice.partyId,
+        partyCode: editingInvoice.partyCode,
+        partyName: editingInvoice.partyName
+      });
+      const isEditCash = isGenericCashPartyName(editingInvoice.partyName);
       setInvNum(editingInvoice.number);
       setInvDate(editingInvoice.date);
       setInvTime(editingInvoice.time || '12:00');
       setJobSite(editingInvoice.jobSite || '');
       setPriceType(editingInvoice.priceType || theme.defaultPriceType);
-      setCustCode(editingInvoice.partyCode || foundInvParty?.code || '1');
+      setCustCode(foundInvParty?.code || (isEditCash ? 'CASH' : (editingInvoice.partyCode || '')));
       setCustSearchInput(editingInvoice.partyName || '');
-      setCustPhone(toWesternNumerals((editingInvoice.partyPhone || foundInvParty?.phone || '').trim()));
+      setCustPhone(isEditCash ? '' : toWesternNumerals((editingInvoice.partyPhone || foundInvParty?.phone || '').trim()));
       setInvoiceItems([...editingInvoice.items]);
 
       setGlobalInvDisc(editingInvoice.discount > 0 ? String(editingInvoice.discount) : '');
@@ -831,7 +851,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         setPaymentRows([]);
       }
 
-      if (foundInvParty) setSelectedParty(foundInvParty);
+      setSelectedParty(foundInvParty || null);
     } else {
       // Guaranteed unique invoice number with zero collisions
       const { number: uniqueInvNum } = getNextUniqueInvoiceNumber(db, mode);
@@ -850,21 +870,19 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       setSelectedPaymentMethod('نقدي');
       setPartialPaidInput('');
 
-      // Default party: ALWAYS "نقدي" (Cash) as strictly requested
+      // Default party: ALWAYS "نقدي" (Cash) with dedicated 'CASH' code so it never collides with real party code '1'
       setCustSearchInput('نقدي');
-      setCustCode('1');
       setCustPhone('');
       const partyList = theme.partyRole === 'customer' ? db.customers : db.suppliers;
       const cashParty = partyList.find(
-        p => p.name.trim() === 'نقدي' ||
-             p.name.trim() === (theme.partyRole === 'customer' ? 'عميل نقدي' : 'مورد نقدي') ||
-             p.code === 'CASH'
+        p => isGenericCashPartyName(p.name) || (p.code || '').trim().toUpperCase() === 'CASH'
       );
       if (cashParty) {
         setSelectedParty(cashParty);
-        setCustCode(cashParty.code || '1');
+        setCustCode(cashParty.code || 'CASH');
       } else {
         setSelectedParty(null);
+        setCustCode('CASH');
       }
 
       // Check for unsaved draft to recover
@@ -902,29 +920,62 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
     if (type === 'name') setCustSearchInput(val);
     if (type === 'phone') setCustPhone(val);
 
-    const match = trimmed
-      ? partiesList.find(p => {
-          const pCode = (p.code || '').trim().toLowerCase();
-          const pName = (p.name || '').trim();
+    if (type === 'name' && isGenericCashPartyName(trimmed)) {
+      const cashParty = partiesList.find(
+        p => isGenericCashPartyName(p.name) || (p.code || '').trim().toUpperCase() === 'CASH'
+      );
+      setSelectedParty(cashParty || null);
+      setCustCode(cashParty?.code || 'CASH');
+      if (selectedParty && !isGenericCashPartyName(selectedParty.name)) {
+        setCustPhone('');
+      }
+      return;
+    }
+
+    let match: Party | undefined;
+    if (trimmed) {
+      if (type === 'code') {
+        const codeLower = trimmed.toLowerCase();
+        match = partiesList.find(p => p.code && p.code.trim().toLowerCase() === codeLower);
+      } else if (type === 'phone') {
+        match = partiesList.find(p => {
           const pPhone = toWesternNumerals((p.phone || '').trim());
-          if (type === 'code') return Boolean(pCode && pCode === trimmed.toLowerCase());
-          if (type === 'phone') return Boolean(pPhone && pPhone === trimmed);
-          return (
-            pName.toLowerCase() === trimmed.toLowerCase() ||
-            (normVal.length > 0 && normalizeArabicText(pName) === normVal) ||
-            Boolean(pCode && pCode === trimmed.toLowerCase()) ||
-            Boolean(pPhone && pPhone === trimmed)
-          );
-        })
-      : undefined;
+          return Boolean(pPhone && pPhone === trimmed);
+        });
+      } else {
+        // Name field: exact name first -> non-generic code -> phone
+        const isGenericCode = trimmed.toLowerCase() === 'cash' || trimmed === '1';
+        match =
+          partiesList.find(
+            p =>
+              !isGenericCashPartyName(p.name) &&
+              (p.name.trim().toLowerCase() === trimmed.toLowerCase() ||
+                (normVal.length > 0 && normalizeArabicText(p.name) === normVal))
+          ) ||
+          (!isGenericCode
+            ? partiesList.find(p => p.code && p.code.trim().toLowerCase() === trimmed.toLowerCase())
+            : undefined) ||
+          partiesList.find(p => {
+            const pPhone = toWesternNumerals((p.phone || '').trim());
+            return Boolean(pPhone && pPhone === trimmed);
+          });
+      }
+    }
 
     if (match) {
       setSelectedParty(match);
-      setCustCode(match.code || match.id || '1');
+      setCustCode(match.code || '');
       setCustSearchInput(match.name);
       setCustPhone(toWesternNumerals((match.phone || '').trim()));
-    } else if (type === 'name' && trimmed !== '' && trimmed !== 'نقدي' && trimmed !== 'عميل نقدي' && trimmed !== 'مورد نقدي') {
-      setSelectedParty(null);
+    } else {
+      // Never retain a stale selectedParty when user edits name/code/phone away from it
+      if (selectedParty) {
+        if (type === 'name') {
+          if (custCode === (selectedParty.code || '') || custCode === '1') setCustCode('');
+          if (custPhone === toWesternNumerals((selectedParty.phone || '').trim())) setCustPhone('');
+        }
+        setSelectedParty(null);
+      }
     }
   };
 
@@ -1235,9 +1286,9 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
 
   const selectParty = (party: Party) => {
     setSelectedParty(party);
-    setCustCode(party.code || party.id || '1');
+    setCustCode(party.code || (isGenericCashPartyName(party.name) ? 'CASH' : ''));
     setCustSearchInput(party.name);
-    setCustPhone(toWesternNumerals((party.phone || '').trim()));
+    setCustPhone(isGenericCashPartyName(party.name) ? '' : toWesternNumerals((party.phone || '').trim()));
     setShowCustDropdown(false);
     setShowPhoneDropdown(false);
   };
@@ -1929,25 +1980,38 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
       const targetPartyList = isCust ? updated.customers : updated.suppliers;
 
       const trimmedInput = custSearchInput.trim();
-      const isCash = !trimmedInput ||
-                     trimmedInput === 'نقدي' ||
-                     trimmedInput === 'عميل نقدي' ||
-                     trimmedInput === 'مورد نقدي';
+      const isCash = isGenericCashPartyName(trimmedInput);
 
       let partyName = isCash ? (isCust ? 'عميل نقدي' : 'مورد نقدي') : trimmedInput;
-      let activePartyId = selectedParty?.id;
+      let activePartyId: string | undefined;
       let activePartyCode = custCode;
-      let effectivePartyPhone = toWesternNumerals(custPhone).trim();
+      let effectivePartyPhone = isCash ? '' : toWesternNumerals(custPhone).trim();
 
-      if (!isCash) {
+      if (isCash) {
+        const cashParty = targetPartyList.find(
+          p => isGenericCashPartyName(p.name) || (p.code || '').trim().toUpperCase() === 'CASH'
+        );
+        activePartyId = cashParty?.id;
+        activePartyCode = cashParty?.code || 'CASH';
+        partyName = cashParty ? cashParty.name : (isCust ? 'عميل نقدي' : 'مورد نقدي');
+      } else {
         const normInput = normalizeArabicText(trimmedInput);
-        const matchedExisting =
-          (activePartyId ? targetPartyList.find(p => p.id === activePartyId) : undefined) ||
-          targetPartyList.find(
-            p =>
-              p.name.trim().toLowerCase() === trimmedInput.toLowerCase() ||
-              (normInput.length > 0 && normalizeArabicText(p.name) === normInput)
-          );
+        // Priority: exact name match matching what the user actually typed -> only trust selectedParty if its name matches trimmedInput
+        const matchedByName = targetPartyList.find(
+          p =>
+            !isGenericCashPartyName(p.name) &&
+            (p.name.trim().toLowerCase() === trimmedInput.toLowerCase() ||
+              (normInput.length > 0 && normalizeArabicText(p.name) === normInput))
+        );
+        const selectedMatchesInput = selectedParty?.id
+          ? targetPartyList.find(
+              p =>
+                p.id === selectedParty.id &&
+                !isGenericCashPartyName(p.name) &&
+                normalizeArabicText(p.name) === normInput
+            )
+          : undefined;
+        const matchedExisting = matchedByName || selectedMatchesInput;
 
         if (matchedExisting) {
           activePartyId = matchedExisting.id;
@@ -1958,7 +2022,7 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
           } else if (effectivePartyPhone && !matchedExisting.phone?.trim()) {
             matchedExisting.phone = effectivePartyPhone;
           }
-        } else if (!activePartyId && trimmedInput) {
+        } else {
           const dupCheck = isDuplicateParty(updated, targetType, trimmedInput, effectivePartyPhone);
           if (dupCheck.isDuplicate && dupCheck.existing) {
             activePartyId = dupCheck.existing.id;
@@ -2770,14 +2834,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
         setGlobalInvTax('');
         setExtraIncomeVal('');
         setCustSearchInput('نقدي');
-        setCustCode('1');
         setCustPhone('');
         const cashParty = (isCust ? updated.customers : updated.suppliers).find(
-          p => p.name.trim() === 'نقدي' ||
-               p.name.trim() === (isCust ? 'عميل نقدي' : 'مورد نقدي') ||
-               p.code === 'CASH'
+          p => isGenericCashPartyName(p.name) || (p.code || '').trim().toUpperCase() === 'CASH'
         );
         setSelectedParty(cashParty || null);
+        setCustCode(cashParty?.code || 'CASH');
         const { number: nextUniqueNum } = getNextUniqueInvoiceNumber(updated, mode);
         setInvNum(nextUniqueNum);
       }
@@ -3149,14 +3211,12 @@ export const UnifiedInvoicePage: React.FC<UnifiedInvoicePageProps> = ({
                       type="button"
                       onClick={() => {
                         setCustSearchInput('نقدي');
-                        setCustCode('1');
                         setCustPhone('');
                         const cashParty = partiesList.find(
-                          p => p.name.trim() === 'نقدي' ||
-                               p.name.trim() === (theme.partyRole === 'customer' ? 'عميل نقدي' : 'مورد نقدي') ||
-                               p.code === 'CASH'
+                          p => isGenericCashPartyName(p.name) || (p.code || '').trim().toUpperCase() === 'CASH'
                         );
                         setSelectedParty(cashParty || null);
+                        setCustCode(cashParty?.code || 'CASH');
                         setShowCustDropdown(false);
                       }}
                       className="flex-1 py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white rounded-lg text-[10px] font-black flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer transition-all"

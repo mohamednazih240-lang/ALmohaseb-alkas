@@ -5011,6 +5011,297 @@ export function getNextUniqueInvoiceNumber(db: AccountingDB, mode?: string): { n
   return { number: candidate, nextSeq: seq };
 }
 
+export function isGenericCashPartyName(name?: string | null): boolean {
+  const clean = (name || '').trim().toLowerCase();
+  return (
+    !clean ||
+    clean === 'نقدي' ||
+    clean === 'عميل نقدي' ||
+    clean === 'مورد نقدي' ||
+    clean === 'مورد عام' ||
+    clean === 'عميل نقدي عام'
+  );
+}
+
+/**
+ * Strict priority party lookup:
+ * 1. Exact partyId (guarded so generic cash invoices never attach to a non-cash supplier/customer)
+ * 2. Exact normalized non-cash partyName
+ * 3. Exact non-cash partyCode (ignoring generic placeholders like '1' or 'CASH')
+ * 4. Explicit cash party fallback only when the invoice itself is cash
+ */
+export function resolvePartyForRecord(
+  parties: Party[] = [],
+  opts: { partyId?: string; partyCode?: string; partyName?: string }
+): Party | null {
+  if (!Array.isArray(parties) || parties.length === 0) return null;
+  const rawName = (opts.partyName || '').trim();
+  const isCash = isGenericCashPartyName(rawName);
+  const normTargetName = normalizeArabicText(rawName);
+  const cleanCode = (opts.partyCode || '').trim().toLowerCase();
+  const isGenericCode = !cleanCode || cleanCode === '1' || cleanCode === 'cash';
+
+  if (opts.partyId) {
+    const byId = parties.find(p => p && p.id === opts.partyId);
+    if (byId) {
+      if (!isCash) {
+        // If stored partyName is an explicit non-cash name and disagrees with byId's name, prefer exact name match when present
+        if (normTargetName && normalizeArabicText(byId.name) !== normTargetName) {
+          const byNameOverride = parties.find(
+            p => p && !isGenericCashPartyName(p.name) && normalizeArabicText(p.name) === normTargetName
+          );
+          if (byNameOverride) return byNameOverride;
+        }
+        return byId;
+      }
+      if (isGenericCashPartyName(byId.name) || (byId.code || '').trim().toUpperCase() === 'CASH') {
+        return byId;
+      }
+    }
+  }
+
+  if (!isCash && normTargetName) {
+    const byName = parties.find(
+      p => p && !isGenericCashPartyName(p.name) && normalizeArabicText(p.name) === normTargetName
+    );
+    if (byName) return byName;
+  }
+
+  if (!isCash && !isGenericCode) {
+    const byCode = parties.find(
+      p => p && !isGenericCashPartyName(p.name) && p.code && p.code.trim().toLowerCase() === cleanCode
+    );
+    if (byCode) return byCode;
+  }
+
+  if (isCash) {
+    const cashParty = parties.find(
+      p => p && (isGenericCashPartyName(p.name) || (p.code || '').trim().toUpperCase() === 'CASH')
+    );
+    return cashParty || null;
+  }
+
+  return null;
+}
+
+/**
+ * Safely merges duplicate Party shells that share the exact same normalized name
+ * (e.g. created offline on two devices) and remaps all partyId references without
+ * ever deleting any invoice, voucher, return, order, or product.
+ */
+export function deduplicatePartiesAndRepairReferences(db: AccountingDB): { db: AccountingDB; mergedPartiesCount: number } {
+  if (!db) return { db, mergedPartiesCount: 0 };
+  let mergedPartiesCount = 0;
+
+  const dedupList = (list: Party[], role: 'customer' | 'supplier'): { cleaned: Party[]; idRemap: Map<string, string> } => {
+    const byNormName = new Map<string, Party[]>();
+    const idRemap = new Map<string, string>();
+    const cashParties: Party[] = [];
+
+    (list || []).forEach(p => {
+      if (!p || !p.id) return;
+      if (isGenericCashPartyName(p.name)) {
+        cashParties.push(p);
+        return;
+      }
+      const key = normalizeArabicText(p.name) || p.id;
+      const arr = byNormName.get(key) || [];
+      arr.push(p);
+      byNormName.set(key, arr);
+    });
+
+    const cleaned: Party[] = [];
+
+    // Keep at most one canonical explicit cash party if any exist
+    if (cashParties.length > 0) {
+      const canonicalCash = cashParties[0];
+      cleaned.push(canonicalCash);
+      for (let i = 1; i < cashParties.length; i++) {
+        idRemap.set(cashParties[i].id, canonicalCash.id);
+        mergedPartiesCount++;
+      }
+    }
+
+    byNormName.forEach(group => {
+      if (group.length === 1) {
+        cleaned.push(group[0]);
+        return;
+      }
+      // Score candidates: prefer the party referenced by more invoices/vouchers, with cleaner code, and earlier id
+      const refCount = new Map<string, number>();
+      group.forEach(g => refCount.set(g.id, 0));
+      (db.invoices || []).forEach(inv => {
+        if (inv?.partyId && refCount.has(inv.partyId)) {
+          refCount.set(inv.partyId, (refCount.get(inv.partyId) || 0) + 1);
+        }
+      });
+      (db.vouchers || []).forEach(v => {
+        if (v?.partyId && refCount.has(v.partyId)) {
+          refCount.set(v.partyId, (refCount.get(v.partyId) || 0) + 1);
+        }
+      });
+
+      const sorted = [...group].sort((a, b) => {
+        const diffRefs = (refCount.get(b.id) || 0) - (refCount.get(a.id) || 0);
+        if (diffRefs !== 0) return diffRefs;
+        const codeA = (a.code || '').trim();
+        const codeB = (b.code || '').trim();
+        if (Boolean(codeA) !== Boolean(codeB)) return codeB ? 1 : -1;
+        return String(a.id).localeCompare(String(b.id));
+      });
+
+      const canonical = { ...sorted[0] };
+      for (let i = 1; i < sorted.length; i++) {
+        const dup = sorted[i];
+        if (!canonical.phone && dup.phone) canonical.phone = dup.phone;
+        if (!canonical.address && dup.address) canonical.address = dup.address;
+        if (!canonical.taxNumber && dup.taxNumber) canonical.taxNumber = dup.taxNumber;
+        if (!canonical.notes && dup.notes) canonical.notes = dup.notes;
+        if (!canonical.openingBalance && dup.openingBalance) canonical.openingBalance = dup.openingBalance;
+        idRemap.set(dup.id, canonical.id);
+        mergedPartiesCount++;
+      }
+      cleaned.push(canonical);
+    });
+
+    if (idRemap.size > 0) {
+      (db.invoices || []).forEach(inv => {
+        if (!inv || !inv.partyId) return;
+        const isCustInv = inv.type === 'sale' || inv.invoiceKind === 'sale' || inv.invoiceKind === 'wholesale' || inv.invoiceKind === 'sale_return' || inv.invoiceKind === 'quote';
+        const invRole: 'customer' | 'supplier' = isCustInv ? 'customer' : 'supplier';
+        if (invRole === role && idRemap.has(inv.partyId)) {
+          inv.partyId = idRemap.get(inv.partyId)!;
+        }
+      });
+      (db.vouchers || []).forEach(v => {
+        if (!v || !v.partyId) return;
+        const vRole: 'customer' | 'supplier' = v.type === 'receipt' ? 'customer' : 'supplier';
+        if (vRole === role && idRemap.has(v.partyId)) {
+          v.partyId = idRemap.get(v.partyId)!;
+        }
+      });
+      (db.returns || []).forEach(r => {
+        if (!r || !r.partyId) return;
+        const rRole: 'customer' | 'supplier' = r.type === 'sale' ? 'customer' : 'supplier';
+        if (rRole === role && idRemap.has(r.partyId)) {
+          r.partyId = idRemap.get(r.partyId)!;
+        }
+      });
+      (db.quotes || []).forEach(q => {
+        if (role === 'customer' && q?.partyId && idRemap.has(q.partyId)) {
+          q.partyId = idRemap.get(q.partyId)!;
+        }
+      });
+      (db.orders || []).forEach(o => {
+        if (!o || !o.partyId) return;
+        const oRole: 'customer' | 'supplier' = o.type === 'sale' ? 'customer' : 'supplier';
+        if (oRole === role && idRemap.has(o.partyId)) {
+          o.partyId = idRemap.get(o.partyId)!;
+        }
+      });
+      (db.goodsReceivedNotes || []).forEach(grn => {
+        if (role === 'supplier' && grn?.supplierId && idRemap.has(grn.supplierId)) {
+          grn.supplierId = idRemap.get(grn.supplierId)!;
+        }
+      });
+    }
+
+    return { cleaned, idRemap };
+  };
+
+  if (Array.isArray(db.customers)) {
+    db.customers = dedupList(db.customers, 'customer').cleaned;
+  }
+  if (Array.isArray(db.suppliers)) {
+    db.suppliers = dedupList(db.suppliers, 'supplier').cleaned;
+  }
+
+  return { db, mergedPartiesCount };
+}
+
+/**
+ * Repairs mismatched partyId <-> partyName links on existing invoices (e.g. a Cash invoice
+ * accidentally bound to a real supplier's partyId, or an invoice whose partyName and partyId
+ * point to two different suppliers) without ever deleting any invoice or item.
+ */
+export function reconcileInvoicePartyIntegrity(db: AccountingDB): { db: AccountingDB; repairedCount: number } {
+  if (!db || !Array.isArray(db.invoices)) return { db, repairedCount: 0 };
+  let repairedCount = 0;
+
+  db.invoices.forEach(inv => {
+    if (!inv) return;
+    const isCustInv =
+      inv.type === 'sale' ||
+      inv.invoiceKind === 'sale' ||
+      inv.invoiceKind === 'wholesale' ||
+      inv.invoiceKind === 'sale_return' ||
+      inv.invoiceKind === 'quote';
+    const partyList = isCustInv ? (db.customers || []) : (db.suppliers || []);
+    const cashDefaultName = isCustInv ? 'عميل نقدي' : 'مورد نقدي';
+
+    // Check explicit party change audit log entries if any exist on this invoice
+    let latestAuditPartyName: string | null = null;
+    if (Array.isArray(inv.auditLog)) {
+      for (const aud of inv.auditLog) {
+        if (aud?.summary) {
+          const m = aud.summary.match(/تغيير الطرف:\s*إلى\s*"([^"]+)"/);
+          if (m && m[1]) {
+            latestAuditPartyName = m[1].trim();
+            break;
+          }
+        }
+      }
+    }
+
+    const effectiveTargetName = (latestAuditPartyName || inv.partyName || '').trim();
+    const isCash = isGenericCashPartyName(effectiveTargetName);
+    const byId = inv.partyId ? partyList.find(p => p && p.id === inv.partyId) : undefined;
+    const cashParty = partyList.find(
+      p => p && (isGenericCashPartyName(p.name) || (p.code || '').trim().toUpperCase() === 'CASH')
+    );
+
+    if (isCash) {
+      const targetId = cashParty?.id;
+      const targetCode = cashParty?.code || 'CASH';
+      const targetName = cashParty ? cashParty.name : cashDefaultName;
+      if (inv.partyId !== targetId || (inv.partyId && byId && !isGenericCashPartyName(byId.name)) || inv.partyCode === '1') {
+        inv.partyId = targetId;
+        inv.partyCode = targetCode;
+        inv.partyName = targetName;
+        if (!byId || !isGenericCashPartyName(byId.name)) {
+          inv.partyPhone = '';
+        }
+        repairedCount++;
+      }
+      return;
+    }
+
+    const normTarget = normalizeArabicText(effectiveTargetName);
+    const byName = normTarget
+      ? partyList.find(p => p && !isGenericCashPartyName(p.name) && normalizeArabicText(p.name) === normTarget)
+      : undefined;
+
+    if (byName) {
+      if (inv.partyId !== byName.id || inv.partyName !== byName.name || (byName.code && inv.partyCode !== byName.code)) {
+        inv.partyId = byName.id;
+        inv.partyName = byName.name;
+        if (byName.code) inv.partyCode = byName.code;
+        if (!inv.partyPhone && byName.phone) inv.partyPhone = byName.phone;
+        repairedCount++;
+      }
+    } else if (byId && !isGenericCashPartyName(byId.name)) {
+      // partyId points to a valid non-cash party; ensure partyName matches if blank
+      if (!inv.partyName || !inv.partyName.trim()) {
+        inv.partyName = byId.name;
+        if (byId.code) inv.partyCode = byId.code;
+        repairedCount++;
+      }
+    }
+  });
+
+  return { db, repairedCount };
+}
+
 export function isDuplicateParty(
   db: AccountingDB,
   type: 'customer' | 'supplier',
@@ -5022,7 +5313,7 @@ export function isDuplicateParty(
   const cleanName = (name || '').trim().toLowerCase();
 
   // "نقدي" or generic cash is allowed as a recurring customer
-  if (cleanName === 'نقدي' || cleanName === 'عميل نقدي' || cleanName === 'مورد نقدي' || cleanName === 'مورد عام') {
+  if (isGenericCashPartyName(cleanName)) {
     return { isDuplicate: false };
   }
 
@@ -5422,6 +5713,8 @@ export function mergeDatabasesSafely(
   };
 
   const purged = purgeDeletedRecordsFromDb(rawMerged, deletedIdsSet);
+  deduplicatePartiesAndRepairReferences(purged);
+  reconcileInvoicePartyIntegrity(purged);
   const stockVerified = verifyAndCorrectStockMovements(purged).db;
   return reconcileAndDeduplicateAllFinancialRecords(stockVerified).db;
 }
