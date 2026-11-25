@@ -705,6 +705,7 @@ export interface AppSettings {
   nextTreasury?: number;
   nextFixedAsset?: number;
   sequencesNormalizedVersion?: number;
+  rahma2049FrozenSettledV1?: boolean;
 }
 
 export interface AccountingDB {

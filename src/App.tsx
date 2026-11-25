@@ -295,7 +295,8 @@ export default function App() {
         nextAdjustment: merged.settings.nextAdjustment,
         nextTreasury: merged.settings.nextTreasury,
         nextFixedAsset: merged.settings.nextFixedAsset,
-        sequencesNormalizedVersion: merged.settings.sequencesNormalizedVersion
+        sequencesNormalizedVersion: merged.settings.sequencesNormalizedVersion,
+        rahma2049FrozenSettledV1: merged.settings.rahma2049FrozenSettledV1
       }
     };
   }, [mergeSafeSettings]);
@@ -361,7 +362,7 @@ export default function App() {
             );
             const needsCloudLogoRepair = Boolean(merged.settings.logo && !ensuredCloud.settings?.logo);
             const needsCloudPhantomCleanup = doesCloudNeedCleanupSync(initialCompanyCode, merged);
-            const needsSequenceSync = (cloudDb.settings?.sequencesNormalizedVersion || 0) < 1;
+            const needsSequenceSync = (cloudDb.settings?.sequencesNormalizedVersion || 0) < 2;
             if (hasRicherLocal || hasLocalClosingsMissingFromCloud || hasUnsyncedDeletions || needsCloudLogoRepair || needsCloudPhantomCleanup || needsSequenceSync) {
               hasPendingCloudPushRef.current = true;
               void pushDatabaseToCloud(merged, true).then(ok => {
@@ -545,7 +546,7 @@ export default function App() {
               const effectiveUser = matchedUser ? { ...matchedUser, lastLogin: currentLocalUser?.lastLogin } : currentLocalUser;
               const merged = mergeLocalAndCloudDb(prevDb, cloudDb, effectiveUser);
               saveDatabase(merged);
-              if (needsRetryPush || hasUnsyncedLocalInvoice) {
+              if (needsRetryPush || hasUnsyncedLocalInvoice || doesCloudNeedCleanupSync(currentCompanyCode, merged)) {
                 mergedToPush = merged;
               }
               return merged;

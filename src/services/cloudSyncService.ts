@@ -239,24 +239,26 @@ const rawCloudMetaByCompany = new Map<
     rawTreasuryCount: number;
     rawJournalsCount: number;
     rawFinSig: string;
+    rawSeqVersion: number;
+    rawRahmaSettled: boolean;
   }
 >();
 
 function computeFinancialSyncSignature(db: AccountingDB): string {
   const vSig = [...(db.vouchers || [])]
-    .map(v => `${v.id}:${v.type}:${Math.round((Number(v.amount) || 0) * 100)}:${v.paymentMethod || ''}:${v.invoiceId || ''}:${v.isAutoFromInvoice ? 1 : 0}`)
+    .map(v => `${v.id}:${v.number || ''}:${v.referenceNumber || ''}:${v.date || ''}:${v.type}:${Math.round((Number(v.amount) || 0) * 100)}:${v.paymentMethod || ''}:${v.invoiceId || ''}:${v.isAutoFromInvoice ? 1 : 0}`)
     .sort()
     .join('|');
   const tSig = [...(db.treasury || [])]
-    .map(t => `${t.id}:${t.direction}:${Math.round((Number(t.amount) || 0) * 100)}:${t.method || ''}:${t.sourceId || ''}:${t.invoiceId || ''}`)
+    .map(t => `${t.id}:${t.number || ''}:${t.refNumber || ''}:${t.date || ''}:${t.direction}:${Math.round((Number(t.amount) || 0) * 100)}:${t.method || ''}:${t.sourceId || ''}:${t.invoiceId || ''}`)
     .sort()
     .join('|');
   const jSig = [...(db.journals || [])]
-    .map(j => `${j.id}:${j.sourceId || ''}:${(j.lines || []).length}`)
+    .map(j => `${j.id}:${j.number || ''}:${j.date || ''}:${j.sourceId || ''}:${(j.lines || []).length}`)
     .sort()
     .join('|');
   const rSig = [...(db.returns || [])]
-    .map(r => `${r.id}:${r.date}:${r.originalInvoiceId || ''}:${Math.round((Number(r.total) || 0) * 100)}`)
+    .map(r => `${r.id}:${r.number || ''}:${r.date}:${r.originalInvoiceId || ''}:${Math.round((Number(r.total) || 0) * 100)}`)
     .sort()
     .join('|');
   const cSig = [...(db.dailyClosings || [])]
@@ -264,7 +266,7 @@ function computeFinancialSyncSignature(db: AccountingDB): string {
     .sort()
     .join('|');
   const iSig = [...(db.invoices || [])]
-    .map(i => `${i.id}:${i.createdAt || ''}:${(i.auditLog || []).length}`)
+    .map(i => `${i.id}:${i.number || ''}:${i.date || ''}:${i.paymentMethod || ''}:${i.createdAt || ''}:${(i.auditLog || []).length}`)
     .sort()
     .join('|');
   return quickHash(`${vSig}#${tSig}#${jSig}#${rSig}#${cSig}#${iSig}`);
@@ -274,6 +276,8 @@ export function doesCloudNeedCleanupSync(companyCode: string | undefined, curren
   const clean = normalizeCompanyCode(companyCode);
   const meta = rawCloudMetaByCompany.get(clean);
   if (!meta) return false;
+  if ((currentDb.settings?.sequencesNormalizedVersion || 0) > meta.rawSeqVersion) return true;
+  if (Boolean(currentDb.settings?.rahma2049FrozenSettledV1) !== meta.rawRahmaSettled) return true;
   if ((currentDb.vouchers?.length || 0) !== meta.rawVouchersCount) return true;
   if ((currentDb.treasury?.length || 0) !== meta.rawTreasuryCount) return true;
   if ((currentDb.journals?.length || 0) !== meta.rawJournalsCount) return true;
@@ -999,7 +1003,9 @@ export async function fetchDatabaseFromCloud(companyCode?: string): Promise<Acco
       rawVouchersCount: (unified.vouchers || []).length,
       rawTreasuryCount: (unified.treasury || []).length,
       rawJournalsCount: (unified.journals || []).length,
-      rawFinSig: computeFinancialSyncSignature(unified)
+      rawFinSig: computeFinancialSyncSignature(unified),
+      rawSeqVersion: Number(unified.settings?.sequencesNormalizedVersion || 0),
+      rawRahmaSettled: Boolean(unified.settings?.rahma2049FrozenSettledV1)
     });
 
     const purgedUnified = purgeDeletedRecordsFromDb(unified, combinedDeletedSet);

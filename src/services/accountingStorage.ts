@@ -723,7 +723,7 @@ export function defaultSettings(): AppSettings {
     nextAdjustment: 1,
     nextTreasury: 1,
     nextFixedAsset: 1,
-    sequencesNormalizedVersion: 1
+    sequencesNormalizedVersion: 0
   };
 }
 
@@ -2246,6 +2246,7 @@ export function sanitizeCompanyDatabase(db: AccountingDB, _identifier?: string):
   }
 
   // التدقيق غير التوليدي: تصحيح الأرصدة وتنظيف التكرارات والسجلات الشبحية فقط دون إنشاء أي حركة أو سند أو صنف جديد لم يسجله المستخدم
+  db = applyRahma2049FrozenSettlement(db);
   db = normalizeAllSectionSequences(db);
   db = verifyAndCorrectStockMovements(db).db;
   db = reconcileAndDeduplicateAllFinancialRecords(db).db;
@@ -2281,7 +2282,7 @@ export function wipeAllInvoicesFromSystem(db: AccountingDB): AccountingDB {
   updated.settings.nextGRN = 1;
   updated.settings.nextJournal = 1;
   updated.settings.nextTreasury = 1;
-  updated.settings.sequencesNormalizedVersion = 1;
+  updated.settings.sequencesNormalizedVersion = 2;
   
   // Recalculate customer and supplier balances
   (updated.customers || []).forEach(c => {
@@ -2350,7 +2351,7 @@ export function cleanAllDemoTransactions(db: AccountingDB): AccountingDB {
       nextAdjustment: 1,
       nextTreasury: 1,
       nextFixedAsset: 1,
-      sequencesNormalizedVersion: 1
+      sequencesNormalizedVersion: 2
     },
     audit: [
       {
@@ -2401,7 +2402,7 @@ export function wipeEntireSystemToCleanSlate(db: AccountingDB): AccountingDB {
   updated.settings.nextAdjustment = 1;
   updated.settings.nextTreasury = 1;
   updated.settings.nextFixedAsset = 1;
-  updated.settings.sequencesNormalizedVersion = 1;
+  updated.settings.sequencesNormalizedVersion = 2;
   updated.cleanGeneration = 5;
 
   logAudit(
@@ -2991,8 +2992,10 @@ export function executeCashFreezeTransfer(
   const noteSuffix = params.note?.trim() ? ` — ${params.note.trim()}` : '';
   const isFreeze = params.direction === 'freeze';
 
+  const nextTrNumIn = getNextUniqueTreasuryNumber(updated);
   updated.treasury.unshift({
     id: generateId('tr_frz_in'),
+    number: nextTrNumIn.number,
     date: entryDate,
     createdAt: nowIso,
     direction: isFreeze ? 'in' : 'out',
@@ -4059,8 +4062,8 @@ export function mergeTreasury(
     );
   const getKey = (tr: TreasuryEntry) => {
     const splitMatch = tr.id.match(/_p(\d+)_/);
-    if (tr.sourceId && tr.sourceType === 'transfer') {
-      return `transfer_${tr.sourceId}_${tr.direction}_${tr.method || 'cash'}`;
+    if (tr.sourceId && (tr.sourceType === 'transfer' || tr.sourceType === 'freeze')) {
+      return `${tr.sourceType}_${tr.sourceId}_${tr.direction}_${tr.method || 'cash'}`;
     }
     if (tr.sourceId && tr.sourceType && splitMatch) {
       return `tr_${tr.sourceType}_${tr.sourceId}_p${splitMatch[1]}`;
@@ -5776,6 +5779,242 @@ export function syncInvoiceVouchers(
 }
 
 /**
+ * One-time settlement for Rahma Hardware purchase invoice (#2049, 9,310 EGP, 2026-11-24):
+ * moves it and all linked records to 2026-11-25, deducts 9,310 from the 10,000 Frozen Cash Reserve,
+ * and releases the remaining 690 into the Cash Drawer ('نقدي').
+ */
+export function applyRahma2049FrozenSettlement(db: AccountingDB): AccountingDB {
+  if (!db || !db.settings) return db;
+  if (!isCompanyMawan(db.settings.companyCode || 'COMP-102')) return db;
+  if (db.settings.rahma2049FrozenSettledV1) return db;
+  if (!Array.isArray(db.invoices) || db.invoices.length === 0) return db;
+
+  const alreadyHasSettlement = (db.treasury || []).some(
+    t => t && (t.id === 'tr_frz_rahma_2049_inv_out' || t.sourceId === 'frz_rahma_2049_inv')
+  );
+  if (alreadyHasSettlement) {
+    db.settings.rahma2049FrozenSettledV1 = true;
+    return db;
+  }
+
+  const targetInv = db.invoices.find(inv => {
+    if (!inv || inv.invoiceKind === 'quote' || inv.invoiceKind === 'purchase_return' || inv.invoiceKind === 'sale_return') return false;
+    const isPurchase = inv.type === 'purchase' || inv.invoiceKind === 'purchase';
+    if (!isPurchase) return false;
+    const isRahma = normalizeArabicText(inv.partyName).includes(normalizeArabicText('الرحمة'));
+    const isAmt = Math.abs(roundMoney(Number(inv.total) || 0) - 9310) < 0.01;
+    const isNumOrDate = String(inv.number || '').trim() === '2049' || inv.date === '2026-11-24';
+    return isRahma && isAmt && isNumOrDate;
+  });
+
+  if (!targetInv) return db;
+
+  const targetDate = '2026-11-25';
+  const oldDate = targetInv.date;
+  const nowIso = new Date().toISOString();
+  const branchId = targetInv.branchId || db.branches?.[0]?.id || 'br_mawan';
+  const branchName = targetInv.branchName || db.branches?.find(b => b.id === branchId)?.name || 'الفرع الرئيسي - شركة الموان';
+
+  targetInv.date = targetDate;
+  targetInv.paid = 9310;
+  targetInv.remaining = 0;
+  targetInv.status = 'مدفوع';
+  targetInv.paymentMethod = 'نقدي';
+  targetInv.payments = [{ method: 'نقدي', amount: 9310 }];
+  targetInv.updatedAt = nowIso;
+  if (!targetInv.notes || !targetInv.notes.includes('المجمد')) {
+    targetInv.notes = targetInv.notes
+      ? `${targetInv.notes} — مسددة من المبلغ المجمد بتاريخ ${targetDate}`
+      : `مسددة من الـ 10,000 المجمدة بتاريخ ${targetDate} وإخراج باقي المجمد (690) للدرج`;
+  }
+
+  (db.stockMovements || []).forEach(sm => {
+    if (sm && sm.sourceId === targetInv.id) {
+      sm.date = targetDate;
+    }
+  });
+  (db.vouchers || []).forEach(v => {
+    if (v && (v.invoiceId === targetInv.id || v.sourceId === targetInv.id)) {
+      v.date = targetDate;
+      v.paymentMethod = 'نقدي';
+      v.amount = 9310;
+      v.updatedAt = nowIso;
+    }
+  });
+  (db.treasury || []).forEach(tr => {
+    if (tr && (tr.invoiceId === targetInv.id || tr.sourceId === targetInv.id)) {
+      tr.date = targetDate;
+      tr.method = 'نقدي';
+      tr.amount = 9310;
+      tr.direction = 'out';
+      tr.updatedAt = nowIso;
+    }
+  });
+  (db.journals || []).forEach(j => {
+    if (j && j.sourceId === targetInv.id) {
+      j.date = targetDate;
+    }
+  });
+
+  if (oldDate === '2026-11-24' && Array.isArray(db.dailyClosings)) {
+    db.dailyClosings.forEach(c => {
+      if (
+        c &&
+        c.date === '2026-11-24' &&
+        !c.isOpeningBalanceAnchor &&
+        isBranchMatch(c.branchId, branchId) &&
+        (Number(c.cashOut) || 0) >= 9310 &&
+        Math.abs((Number(c.actualCash) || 0) - (Number(c.expectedCash) || 0)) < 0.01
+      ) {
+        c.cashOut = roundMoney(c.cashOut - 9310);
+        c.expectedCash = roundMoney(c.expectedCash + 9310);
+        c.actualCash = roundMoney(c.actualCash + 9310);
+        if (c.nextDayOpeningBalances && c.nextDayOpeningBalances['نقدي'] !== undefined) {
+          c.nextDayOpeningBalances['نقدي'] = roundMoney(c.nextDayOpeningBalances['نقدي'] + 9310);
+        }
+        if (Array.isArray(c.channelSummaries)) {
+          c.channelSummaries = c.channelSummaries.map(cs =>
+            cs.method === 'نقدي'
+              ? {
+                  ...cs,
+                  cashOut: roundMoney(Math.max(0, cs.cashOut - 9310)),
+                  closingBalance: roundMoney(cs.closingBalance + 9310),
+                  actualBalance: roundMoney((cs.actualBalance ?? cs.closingBalance) + 9310),
+                  nextDayOpeningBalance: roundMoney(cs.nextDayOpeningBalance + 9310)
+                }
+              : cs
+          );
+        }
+        c.updatedAt = nowIso;
+      }
+    });
+  }
+
+  if (!db.treasury) db.treasury = [];
+  if (!db.journals) db.journals = [];
+  if (!db.accounts) db.accounts = defaultAccounts();
+  if (!db.accounts.some(a => a.id === 'acc_frozen')) {
+    db.accounts.push({
+      id: 'acc_frozen',
+      code: '1106',
+      name: 'المبلغ المجمد (نقدية محفوظة جانباً)',
+      type: 'asset',
+      isSystem: true
+    });
+  }
+  const cashAcc = db.accounts.find(a => a.id === 'acc_cash') || db.accounts[0];
+  const frozenAcc = db.accounts.find(a => a.id === 'acc_frozen') || cashAcc;
+
+  const frozenAvail = calculateFrozenTreasuryBalance(db, branchId);
+  if (frozenAvail >= 9310) {
+    const trInvOutNum = getNextUniqueTreasuryNumber(db);
+    db.treasury.unshift({
+      id: 'tr_frz_rahma_2049_inv_out',
+      number: trInvOutNum.number,
+      date: targetDate,
+      createdAt: nowIso,
+      direction: 'out',
+      amount: 9310,
+      method: FROZEN_CASH_METHOD,
+      description: 'خصم قيمة فاتورة مشتريات شركة الرحمة للحدايد (9,310) من المبلغ المجمد',
+      sourceType: 'freeze',
+      sourceId: 'frz_rahma_2049_inv',
+      branchId,
+      branchName
+    });
+    const trInvCashNum = getNextUniqueTreasuryNumber(db);
+    db.treasury.unshift({
+      id: 'tr_frz_rahma_2049_inv_cash',
+      number: trInvCashNum.number,
+      date: targetDate,
+      createdAt: nowIso,
+      direction: 'in',
+      amount: 9310,
+      method: 'نقدي',
+      description: 'تمويل سداد فاتورة مشتريات شركة الرحمة للحدايد من المبلغ المجمد',
+      sourceType: 'freeze',
+      sourceId: 'frz_rahma_2049_inv',
+      branchId,
+      branchName
+    });
+    if (cashAcc.id !== frozenAcc.id && !db.journals.some(j => j.id === 'jrn_frz_rahma_2049_inv')) {
+      const jInvNum = getNextUniqueJournalNumber(db);
+      db.journals.unshift({
+        id: 'jrn_frz_rahma_2049_inv',
+        number: jInvNum.number,
+        date: targetDate,
+        description: `خصم فاتورة مشتريات شركة الرحمة للحدايد من المبلغ المجمد (${branchName})`,
+        sourceType: 'manual',
+        sourceId: 'frz_rahma_2049_inv',
+        lines: [
+          { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: 9310, credit: 0, notes: 'تغطية سداد فاتورة المشتريات من المجمد' },
+          { accountId: frozenAcc.id, accountCode: frozenAcc.code, accountName: frozenAcc.name, debit: 0, credit: 9310, notes: 'خصم من الـ 10,000 المجمدة' }
+        ],
+        createdAt: nowIso
+      });
+    }
+
+    const remToDrawer = roundMoney(Math.min(frozenAvail - 9310, 690));
+    if (remToDrawer > 0) {
+      const trRemOutNum = getNextUniqueTreasuryNumber(db);
+      db.treasury.unshift({
+        id: 'tr_frz_rahma_2049_rem_out',
+        number: trRemOutNum.number,
+        date: targetDate,
+        createdAt: nowIso,
+        direction: 'out',
+        amount: remToDrawer,
+        method: FROZEN_CASH_METHOD,
+        description: `إخراج باقي الـ 10,000 المجمدة (${remToDrawer}) فكة إلى الدرج النقدي`,
+        sourceType: 'freeze',
+        sourceId: 'frz_rahma_2049_rem',
+        branchId,
+        branchName
+      });
+      const trRemCashNum = getNextUniqueTreasuryNumber(db);
+      db.treasury.unshift({
+        id: 'tr_frz_rahma_2049_rem_cash',
+        number: trRemCashNum.number,
+        date: targetDate,
+        createdAt: nowIso,
+        direction: 'in',
+        amount: remToDrawer,
+        method: 'نقدي',
+        description: `إيداع باقي المبلغ المجمد (${remToDrawer}) فكة بالدرج النقدي`,
+        sourceType: 'freeze',
+        sourceId: 'frz_rahma_2049_rem',
+        branchId,
+        branchName
+      });
+      if (cashAcc.id !== frozenAcc.id && !db.journals.some(j => j.id === 'jrn_frz_rahma_2049_rem')) {
+        const jRemNum = getNextUniqueJournalNumber(db);
+        db.journals.unshift({
+          id: 'jrn_frz_rahma_2049_rem',
+          number: jRemNum.number,
+          date: targetDate,
+          description: `إخراج باقي المبلغ المجمد فكة إلى الدرج (${branchName})`,
+          sourceType: 'manual',
+          sourceId: 'frz_rahma_2049_rem',
+          lines: [
+            { accountId: cashAcc.id, accountCode: cashAcc.code, accountName: cashAcc.name, debit: remToDrawer, credit: 0, notes: 'إيداع فكة بالدرج من المجمد' },
+            { accountId: frozenAcc.id, accountCode: frozenAcc.code, accountName: frozenAcc.name, debit: 0, credit: remToDrawer, notes: 'تصفية باقي المجمد إلى الدرج' }
+          ],
+          createdAt: nowIso
+        });
+      }
+    }
+  }
+
+  db.settings.rahma2049FrozenSettledV1 = true;
+  logAudit(
+    db,
+    'تسوية فاتورة شركة الرحمة من المجمد وترحيل الباقي للدرج',
+    `تم ترحيل فاتورة شركة الرحمة للحدايد (9,310 ج.م) بتاريخ ${targetDate} وخصم قيمتها من المبلغ المجمد مع إخراج الباقي (690 ج.م) فكة إلى الدرج النقدي`
+  );
+  return db;
+}
+
+/**
  * Normalizes every section across the ERP to independent pure integer sequences (1, 2, 3...)
  * and guarantees strict 1-to-1 numbering between Invoices (#N) and their linked Vouchers (#N).
  * Never deletes any invoices, items, vouchers, or financial records.
@@ -5785,12 +6024,12 @@ export function normalizeAllSectionSequences(db: AccountingDB): AccountingDB {
 
   const isPureNumericStr = (val?: string | number | null): boolean => /^\d+(?:-\d+)?$/.test(String(val ?? '').trim());
   const compareChrono = (
-    a: { date?: string; createdAt?: string; number?: string; id?: string },
-    b: { date?: string; createdAt?: string; number?: string; id?: string }
+    a: { date?: string; createdAt?: string; time?: string; number?: string; id?: string },
+    b: { date?: string; createdAt?: string; time?: string; number?: string; id?: string }
   ): number => {
     const da = (a.date || '').localeCompare(b.date || '');
     if (da !== 0) return da;
-    const ca = (a.createdAt || '').localeCompare(b.createdAt || '');
+    const ca = (a.createdAt || a.time || '').localeCompare(b.createdAt || b.time || '');
     if (ca !== 0) return ca;
     const na = parseLeadingPureSeq(a.number);
     const nb = parseLeadingPureSeq(b.number);
@@ -5800,36 +6039,60 @@ export function normalizeAllSectionSequences(db: AccountingDB): AccountingDB {
 
   const replaceDocNumInText = (text: string | undefined, newNum: string): string | undefined => {
     if (!text) return text;
-    return text.replace(/(رقم\s*#?\s*)([A-Za-z0-9_-]+)/, `$1${newNum}`);
+    return text.replace(/(رقم\s*#?\s*|#\s*)([A-Za-z0-9_-]+)/, `$1${newNum}`);
   };
 
   const invById = new Map<string, Invoice>();
+  const salesInvs: Invoice[] = [];
+  const purchaseInvs: Invoice[] = [];
+  const saleReturnInvs: Invoice[] = [];
+  const purchaseReturnInvs: Invoice[] = [];
+
   (db.invoices || []).forEach(inv => {
-    if (inv?.id) invById.set(inv.id, inv);
+    if (!inv) return;
+    if (inv.id) invById.set(inv.id, inv);
+    if (inv.invoiceKind === 'quote' || (inv.invoiceKind as string) === 'order') return;
+    if (inv.invoiceKind === 'sale_return' || (inv.type as string) === 'sale_return') {
+      saleReturnInvs.push(inv);
+    } else if (inv.invoiceKind === 'purchase_return' || (inv.type as string) === 'purchase_return') {
+      purchaseReturnInvs.push(inv);
+    } else if (inv.type === 'purchase' || inv.invoiceKind === 'purchase') {
+      purchaseInvs.push(inv);
+    } else {
+      salesInvs.push(inv);
+    }
   });
 
-  // 1. One-time full chronological 1..N renumbering of all existing historical data
-  if ((db.settings.sequencesNormalizedVersion || 0) < 1) {
-    const salesInvs: Invoice[] = [];
-    const purchaseInvs: Invoice[] = [];
-    const saleReturnInvs: Invoice[] = [];
-    const purchaseReturnInvs: Invoice[] = [];
+  const sectionHasSequenceAnomaly = (list: Invoice[]): boolean => {
+    if (list.length === 0) return false;
+    const seenNums = new Set<string>();
+    let maxSeq = 0;
+    for (const inv of list) {
+      const raw = String(inv.number || '').trim();
+      if (!/^\d+$/.test(raw)) return true;
+      if (seenNums.has(raw)) return true;
+      seenNums.add(raw);
+      const n = parseInt(raw, 10);
+      if (n > maxSeq) maxSeq = n;
+    }
+    return maxSeq > Math.max(list.length + 20, list.length * 3);
+  };
 
+  const needsFullNormalization =
+    (db.settings.sequencesNormalizedVersion || 0) < 2 ||
+    sectionHasSequenceAnomaly(salesInvs) ||
+    sectionHasSequenceAnomaly(purchaseInvs) ||
+    sectionHasSequenceAnomaly(saleReturnInvs) ||
+    sectionHasSequenceAnomaly(purchaseReturnInvs);
+
+  // 1. Full chronological 1..N renumbering of all existing historical data across every section
+  if (needsFullNormalization) {
     (db.invoices || []).forEach(inv => {
       if (!inv || inv.invoiceKind === 'quote') return;
       // Preserve special attribution before renumbering legacy #17 purchase invoice if applicable
       if (String(inv.number).trim() === '17' && !inv.createdBy) {
         inv.createdBy = 'Ahmed Nazih';
         inv.createdById = inv.createdById || 'usr_mvnj6i7d_vhlqh';
-      }
-      if (inv.invoiceKind === 'sale_return') {
-        saleReturnInvs.push(inv);
-      } else if (inv.invoiceKind === 'purchase_return') {
-        purchaseReturnInvs.push(inv);
-      } else if (inv.type === 'purchase' || inv.invoiceKind === 'purchase') {
-        purchaseInvs.push(inv);
-      } else {
-        salesInvs.push(inv);
       }
     });
 
@@ -6048,7 +6311,7 @@ export function normalizeAllSectionSequences(db: AccountingDB): AccountingDB {
         a.code = String(idx + 1);
       });
 
-    db.settings.sequencesNormalizedVersion = 1;
+    db.settings.sequencesNormalizedVersion = 2;
   }
 
   // 2. Always-on lightweight guard: repair any legacy prefixed or missing numbers & enforce auto-voucher <-> invoice #N
@@ -6206,7 +6469,8 @@ export function mergeDatabasesSafely(
       nextAdjustment: Math.max(prevDb.settings?.nextAdjustment || 1, ensuredIncoming.settings?.nextAdjustment || 1),
       nextTreasury: Math.max(prevDb.settings?.nextTreasury || 1, ensuredIncoming.settings?.nextTreasury || 1),
       nextFixedAsset: Math.max(prevDb.settings?.nextFixedAsset || 1, ensuredIncoming.settings?.nextFixedAsset || 1),
-      sequencesNormalizedVersion: Math.max(prevDb.settings?.sequencesNormalizedVersion || 0, ensuredIncoming.settings?.sequencesNormalizedVersion || 0)
+      sequencesNormalizedVersion: Math.max(prevDb.settings?.sequencesNormalizedVersion || 0, ensuredIncoming.settings?.sequencesNormalizedVersion || 0),
+      rahma2049FrozenSettledV1: Boolean(prevDb.settings?.rahma2049FrozenSettledV1 || ensuredIncoming.settings?.rahma2049FrozenSettledV1)
     },
     products: mergedProducts,
     invoices: mergedInvoices,
@@ -6240,6 +6504,7 @@ export function mergeDatabasesSafely(
   const purged = purgeDeletedRecordsFromDb(rawMerged, deletedIdsSet);
   deduplicatePartiesAndRepairReferences(purged);
   reconcileInvoicePartyIntegrity(purged);
+  applyRahma2049FrozenSettlement(purged);
   const normalized = normalizeAllSectionSequences(purged);
   const stockVerified = verifyAndCorrectStockMovements(normalized).db;
   const reconciled = reconcileAndDeduplicateAllFinancialRecords(stockVerified).db;
